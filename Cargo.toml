@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/synchrome-types",
+    "crates/synchrome-browser",
+    "crates/synchrome-storage",
+    "crates/synchrome-supabase",
+    "crates/synchrome-sync",
+    "crates/synchrome-bridge",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+synchrome-types = { path = "crates/synchrome-types" }
+synchrome-browser = { path = "crates/synchrome-browser" }
+synchrome-storage = { path = "crates/synchrome-storage" }
+synchrome-supabase = { path = "crates/synchrome-supabase" }
+synchrome-sync = { path = "crates/synchrome-sync" }
+synchrome-bridge = { path = "crates/synchrome-bridge" }

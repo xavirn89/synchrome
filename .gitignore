@@ -1,11 +1,17 @@
+# Rust
+/target
+**/target
+# Node / frontend
 node_modules/
-target/
 dist/
-.DS_Store
-tests/experiments/udd-*/
-tests/experiments/results/
-*.log
+.vite/
+# env + secrets
 .env
 .env.local
-tests/experiments/e1-harness/target/
-tests/experiments/e1-harness/E1Probe.app/
+# macOS
+.DS_Store
+# experiment throwaway data
+tests/experiments/udd-*/
+tests/experiments/**/target/
+tests/experiments/**/E1Probe.app/
+*.log

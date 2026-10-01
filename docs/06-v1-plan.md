@@ -46,12 +46,24 @@ Scripted against headless throwaway profiles (`tests/experiments/`). Pass/fail c
 | E12 | **Profile creation**: `--profile-directory="Profile N"` creates a usable profile; renaming via `Local State` while closed sticks; profile picker shows it | headless launch + edit | create via the browser UI with guidance |
 | E13 | **GitHub adapter limits** (optional store): requests per cycle, 304s, 422 on stale ref, blob upload | scratch repo | adjust chunking/debounce |
 
+## 2.1 Milestone 0 status — CLOSED (2026-10-01)
+
+Sufficient to begin implementation. Done: E12, E3, E9 (full), E4, E5, E1 (negative case), E6, E7, E8. Non-blocking pending items, carried forward:
+
+- **E1 positive (Full Disk Access)**: mandatory gate before the macOS release — verify with a manual FDA grant that Chrome/Brave/Edge become accessible and the grant survives a notarized update.
+- **E2 protected preferences** (homepage/search MAC): pending an approach decision; **not blocking** the base sync (only the few tracked prefs; everything else syncs).
+- **E10 / E11** (Windows handle release, liveness): pending a Windows environment.
+- **E13 GitHub adapter limits**: pending; GitHub is an **optional** store, Supabase Cloud is the default.
+
+Implementation starts at Milestone 1 (scaffold + read-only detection vertical slice).
+
 ## 3. Milestones
 
 | Milestone | Deliverable | Exit criterion |
 |---|---|---|
 | **M0 Experiments** | E1–E13, results appended to `01` §9 | every row has pass/fail; plan adjusted |
-| **M1 Core engine** | `crates/core`, `schemas` (+ generated TS), `storage` (LocalFolder, GitHub), `crypto`; simulator | property-based convergence tests pass; no data loss without a tombstone; cycles/orphans handled |
+| **M1 Scaffold + detection slice** — IN PROGRESS | Cargo+Tauri2 workspace; crates types/browser/storage/supabase/sync/bridge; Svelte UI; read-only browser+profile discovery with TCC access state | DONE: workspace builds, 8 unit tests pass, clippy clean, Tauri app launches, real detection of Helium/Chrome/Brave/Edge + per-profile access |
+| **M1b Core engine** | `synchrome-sync` real HLC/merge + `synchrome-storage` adapters + crypto; simulator | property-based convergence tests pass; no data loss without a tombstone; cycles/orphans handled |
 | **M2 Cloud** | `cloud/`: Supabase schema, RLS, Realtime events, quotas; `SupabaseStore` adapter; auth flows | two simulated devices sync through a local Supabase stack; RLS tests prove isolation |
 | **M3 Browser adapters** | `crates/browser`: discovery, liveness, profile creation, Preferences (+MAC forging per E2), LevelDB, History DB, SafeWriter, backups/restore, external descriptors, native-messaging manifests | round-trip real fixtures from Helium, Chrome, Brave on macOS and Linux; Windows in CI VM |
 | **M4 Desktop app** | Tauri 2 app + `crates/service`: onboarding (sign in, discover, import/create/map profiles, scopes), tray + background service, pending-apply queue, restart-to-apply, conflicts, backups UI, auto-update | end-to-end on one machine: two throwaway profiles synced via local Supabase, extension auto-installed, file applies at close |

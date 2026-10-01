@@ -1,0 +1,17 @@
+[package]
+name = "synchrome-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Chromium browser & profile discovery and access-state detection (read-only)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+synchrome-types = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

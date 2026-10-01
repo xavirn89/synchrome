@@ -1,0 +1,13 @@
+[package]
+name = "synchrome-supabase"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Supabase Cloud storage adapter skeleton (default store). No network yet."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+synchrome-storage = { workspace = true }
+synchrome-types = { workspace = true }

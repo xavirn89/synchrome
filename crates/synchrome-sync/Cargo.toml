@@ -1,0 +1,12 @@
+[package]
+name = "synchrome-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Sync engine skeleton: HLC, entities, merge (interfaces only in M1)."
+
+[dependencies]
+serde = { workspace = true }
+synchrome-types = { workspace = true }
+synchrome-storage = { workspace = true }

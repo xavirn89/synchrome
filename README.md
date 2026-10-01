@@ -35,3 +35,36 @@ Data lives in Synchrome Cloud by default; users can instead keep a profile in th
 - **Verified constraints.** Chromium enforces preference MACs on Windows and macOS in every build tested (Helium, Chrome, Brave); externally inserted history rows and bookmark nodes survive; macOS protects Chrome/Brave/Edge profile folders (Full Disk Access needed; Helium exempt).
 - **Account and stores.** Synchrome Cloud (private Supabase: Auth, Postgres, Storage, Realtime push) by default; GitHub repository and local folder as optional stores; end-to-end encryption optional (default on for third-party stores).
 - **Never synced:** passwords, cookies, sessions.
+
+## Implementation (Milestone 1)
+
+The app is a Tauri 2 desktop application with a Rust backend and a Svelte frontend; the
+Chromium extension is a companion for live events (not in this slice). Build:
+
+```bash
+# Rust core
+cargo build && cargo test
+# Frontend + app (needs the Tauri CLI: pnpm add -D @tauri-apps/cli already in apps/desktop)
+cd apps/desktop && pnpm install && pnpm tauri dev
+```
+
+Workspace layout:
+
+```text
+crates/
+  synchrome-types     shared domain types (BrowserKind, AccessState, DiscoveredBrowser/Profile, user_agent)
+  synchrome-browser   read-only browser & profile discovery + macOS TCC access detection
+  synchrome-storage   StorageAdapter trait (CAS via opaque version token) — interfaces only
+  synchrome-supabase  Supabase Cloud adapter skeleton (default store) — no network yet
+  synchrome-sync      sync engine vocabulary (HLC, Scope) — interfaces only
+  synchrome-bridge    extension <-> app native-messaging frames — interfaces only
+apps/desktop/
+  src-tauri/          Tauri 2 Rust app (commands: list_browsers, app_version)
+  src/                Svelte UI (browser/profile list with access badges)
+cloud/migrations/     Supabase SQL (E9 OCC experiment, applied on the server)
+tests/experiments/    Milestone 0 validation scripts
+```
+
+The first vertical slice detects installed Chromium browsers and their profiles read-only and
+shows each one's access state (`accessible`, `requires_full_disk_access`, `browser_running`,
+`unknown`). No profile is modified, no permission is requested, no secret ships in the client.

@@ -1,0 +1,11 @@
+[package]
+name = "synchrome-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Storage adapter abstraction (StorageAdapter trait). No concrete backend here."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
