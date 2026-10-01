@@ -4,6 +4,7 @@
 
 use crate::{local_token, mapping_views, write_token_for_mapping, AppState};
 use std::path::PathBuf;
+use synchrome_bridge::token_sha256;
 use synchrome_types::{BrowserKind, MAPPING_TOKEN_STORAGE_KEY, SYNCHROME_EXTENSION_ID};
 use uuid::Uuid;
 
@@ -111,8 +112,34 @@ async fn run_async(args: &[String]) -> i32 {
             let Ok(id) = Uuid::parse_str(&id) else {
                 return fail("bad mapping id");
             };
-            match write_token_for_mapping(&state, id, Some(udd)).await {
-                Ok(v) => out(serde_json::to_value(v).unwrap()),
+            match write_token_for_mapping(&state, id, Some(udd.clone())).await {
+                Ok((view, report)) => {
+                    // Inspect the pre-write backup (keys only; never the token value).
+                    let backup = report
+                        .backup_path
+                        .as_deref()
+                        .map(synchrome_browser::read_store_copy);
+                    let (backup_keys, backup_has_token) = match &backup {
+                        Some(Ok(kv)) => (
+                            kv.keys()
+                                .filter(|k| k.as_str() != MAPPING_TOKEN_STORAGE_KEY)
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                            kv.contains_key(MAPPING_TOKEN_STORAGE_KEY),
+                        ),
+                        _ => (vec![], false),
+                    };
+                    let mut v = serde_json::to_value(view).unwrap();
+                    v["write"] = serde_json::json!({
+                        "created": report.created,
+                        "preserved_keys": report.preserved_keys,
+                        "backup_exists": report.backup_path.as_ref().is_some_and(|p| p.exists()),
+                        "backup_outside_profile": report.backup_path.as_ref().is_some_and(|p| !p.starts_with(&udd)),
+                        "backup_keys": backup_keys,
+                        "backup_has_token": backup_has_token,
+                    });
+                    out(v)
+                }
                 Err(e) => fail(e),
             }
         }
@@ -173,10 +200,67 @@ async fn run_async(args: &[String]) -> i32 {
             match synchrome_browser::read_extension_settings(&udd, &dir, SYNCHROME_EXTENSION_ID) {
                 Ok(kv) => out(serde_json::json!({
                     "has_mapping_token": kv.contains_key(MAPPING_TOKEN_STORAGE_KEY),
+                    // 12-hex prefix of SHA-256(token): lets a test compare tokens without seeing one.
+                    "token_sha256_prefix": kv.get(MAPPING_TOKEN_STORAGE_KEY)
+                        .and_then(|v| serde_json::from_str::<String>(v).ok())
+                        .map(|t| token_sha256(&t)[..12].to_string()),
                     "status": kv.get("synchromeStatus").and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
                     "keys": kv.keys().filter(|k| k.as_str() != MAPPING_TOKEN_STORAGE_KEY).collect::<Vec<_>>(),
                 })),
                 Err(e) => fail(e),
+            }
+        }
+        "--dev-registry" => {
+            let Ok(id) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad mapping id");
+            };
+            match local_token::registry().find_by_mapping(id) {
+                Some(r) => out(serde_json::json!({
+                    "found": true, "state": r.state, "account_id": r.account_id,
+                    "token_sha256_prefix": r.token_sha256[..12].to_string(),
+                    "last_error": r.last_error,
+                })),
+                None => out(serde_json::json!({ "found": false })),
+            }
+        }
+        "--dev-register-device" => {
+            let session = match state.session().await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let (cloud, me) = match (state.cloud(), state.device()) {
+                (Ok(c), Ok(d)) => (c, d.clone()),
+                _ => return fail("not configured"),
+            };
+            match cloud.upsert_device(&session, &me).await {
+                Ok(d) => {
+                    out(serde_json::json!({ "device_id": d.device_id, "is_current": d.is_current }))
+                }
+                Err(e) => fail(e),
+            }
+        }
+        // Counts what the signed-in account can see (RLS): profiles, mappings, devices.
+        "--dev-inventory" => {
+            let session = match state.session().await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let (cloud, me) = match (state.cloud(), state.device()) {
+                (Ok(c), Ok(d)) => (c, d.clone()),
+                _ => return fail("not configured"),
+            };
+            let profiles = cloud.list_profiles(&session).await.map(|v| v.len());
+            let mappings = cloud.list_mappings(&session).await.map(|v| v.len());
+            let devices = cloud
+                .list_devices(&session, me.device_id)
+                .await
+                .map(|v| v.into_iter().map(|d| d.device_id).collect::<Vec<_>>());
+            match (profiles, mappings, devices) {
+                (Ok(p), Ok(m), Ok(d)) => out(serde_json::json!({
+                    "user_id": session.user_id, "this_device": me.device_id,
+                    "profiles": p, "mappings": m, "devices": d,
+                })),
+                _ => fail("inventory query failed"),
             }
         }
         // Unmap in the cloud but KEEP the local registry entry (same as the app's Unmap).

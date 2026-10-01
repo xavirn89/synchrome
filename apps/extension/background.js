@@ -77,8 +77,9 @@ function handshake() {
   return inFlight;
 }
 
-// One automatic retry when the app did not answer in time (e.g. the first launch of a freshly
-// installed/updated host binary can be slow while macOS verifies it).
+// One automatic retry when the app did not answer in time (e.g. a slow first start of the host).
+// Note: a host executable inside a macOS TCC-protected folder (~/Documents etc.) can hang before
+// main while the OS waits on a consent for the browser — retrying cannot fix that; see docs/06.
 async function handshakeWithRetry() {
   const s = await handshake();
   if (s && s.status === "timeout") {

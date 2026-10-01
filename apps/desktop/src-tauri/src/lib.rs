@@ -326,7 +326,7 @@ pub(crate) async fn write_token_for_mapping(
     state: &AppState,
     mapping_id: Uuid,
     udd_override: Option<std::path::PathBuf>,
-) -> Result<MappingView, String> {
+) -> Result<(MappingView, synchrome_browser::WriteReport), String> {
     let session = state.session().await?;
     let me = state.device()?.device_id;
     let m = state
@@ -347,7 +347,7 @@ pub(crate) async fn write_token_for_mapping(
     };
     let written = local_token::write_token_local(&m, &session.user_id, &udd);
     let view = mapping_views(state, &session, vec![m]).await?.remove(0);
-    written.map(|_| view)
+    written.map(|r| (view, r))
 }
 
 /// Create the mapping's local half right after the cloud mapping exists. Failures (typically
@@ -462,7 +462,9 @@ async fn write_mapping_token_local(
     state: State<'_, AppState>,
     mapping_id: Uuid,
 ) -> Result<MappingView, String> {
-    write_token_for_mapping(&state, mapping_id, None).await
+    write_token_for_mapping(&state, mapping_id, None)
+        .await
+        .map(|(view, _)| view)
 }
 
 /// Register the native messaging host for a browser (writes its NativeMessagingHosts manifest,

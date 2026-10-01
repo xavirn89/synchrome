@@ -108,6 +108,8 @@ pub struct MappingSummary {
     pub browser_kind: BrowserKind,
     pub browser_profile_dir: String,
     pub token_hint: String,
+    /// When the companion extension proved it holds the token (handshake), if it has.
+    pub token_confirmed_at: Option<String>,
     pub created_at: Option<String>,
 }
 
@@ -133,6 +135,7 @@ impl Mapping {
             browser_kind: self.browser_kind,
             browser_profile_dir: self.browser_profile_dir.clone(),
             token_hint: self.mapping_token.hint(),
+            token_confirmed_at: self.token_confirmed_at.clone(),
             created_at: self.created_at.clone(),
         }
     }
@@ -193,6 +196,7 @@ mod tests {
         assert!(!json.contains("account_id"));
         assert_eq!(s.token_hint, "abab…");
         assert!(s.mapped && s.is_this_device);
+        assert!(s.token_confirmed_at.is_none());
         assert_eq!(s.status, MappingStatus::TokenPendingLocalWrite);
         assert!(json.contains("\"browser_kind\":\"helium\""));
         let other = m.summary(None, None, Uuid::nil());

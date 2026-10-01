@@ -14,8 +14,8 @@ mod paths;
 pub use access::{detect_access, is_browser_running};
 pub use discovery::discover_browsers;
 pub use ext_storage::{
-    extension_store_path, is_store_locked, read_extension_settings, write_extension_setting,
-    ExtStorageError, WriteReport,
+    extension_store_path, is_store_locked, read_extension_settings, read_store_copy,
+    write_extension_setting, ExtStorageError, WriteReport,
 };
 pub use native_host::{host_manifest, install_native_host};
 pub use paths::user_data_dir;

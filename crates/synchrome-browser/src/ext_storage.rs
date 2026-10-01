@@ -160,7 +160,12 @@ pub fn read_extension_settings(
     ext_id: &str,
 ) -> Result<BTreeMap<String, String>, ExtStorageError> {
     validate(profile_dir, ext_id, "x")?;
-    let store = extension_store_path(user_data_dir, profile_dir, ext_id);
+    read_store_copy(&extension_store_path(user_data_dir, profile_dir, ext_id))
+}
+
+/// Read every key of the LevelDB store at `store` (e.g. a backup) from a temporary copy.
+/// Returns an empty map when it does not exist.
+pub fn read_store_copy(store: &Path) -> Result<BTreeMap<String, String>, ExtStorageError> {
     if !store.exists() {
         return Ok(BTreeMap::new());
     }
@@ -169,7 +174,7 @@ pub fn read_extension_settings(
         std::process::id(),
         unique_suffix()
     ));
-    copy_dir(&store, &tmp)?;
+    copy_dir(store, &tmp)?;
     let res = read_all(&tmp);
     let _ = std::fs::remove_dir_all(&tmp);
     res
