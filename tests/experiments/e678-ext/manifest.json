@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Synchrome E6E7E8 Probe",
+  "version": "1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsbsFVnXslVtO13ywzjHZiuO47iqc5OC90RwerFkheCipCGq0PEwBks8eVEFxwy1dY5weJEcdE8WtibYGus0gLphsRcEWaBfa1wHFJ6caQjmoopvF1jleg2lAJqlpoMOJD91Pe4h2NKjRi5DfafOJ4BtrtzfIcUIDSeYnlgUPuxU08IkCrB9/7Tpce4odw0WMeJEjtjsJB6fwG/LxJKqoLqu37jkGgSyAYSR0L55IDhAIzfaP8o9R2LWkcy1cPwasK4Td3wpRRVJ2eu10oyi3GrRaPQ5n3ZEC/pNQTub1If1o4eF6j2lwDxEkuJcRyDtXLSGSki/nVRL+q/TBr82WTwIDAQAB",
+  "permissions": ["history", "management", "storage"],
+  "background": { "service_worker": "bg.js" }
+}

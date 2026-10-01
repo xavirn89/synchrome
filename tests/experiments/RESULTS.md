@@ -157,3 +157,26 @@ Canary: `~/Library/Application Support/com.apple.TCC/TCC.db` not accessible (con
 
 ### DEFERRED (to run before closing development): live positive FDA test
 Per the author's decision, the positive path will be verified at the end of development with a **manual FDA grant**: add the signed `Synchrome.app` (or the test `E1Probe.app`) in System Settings → Privacy & Security → Full Disk Access, then re-run the harness to confirm (a) Chrome/Brave/Edge profile reads succeed, (b) `External Extensions` becomes writable, and (c) the grant survives a notarized update (same identity) vs. breaks on an ad-hoc rebuild. Tracked here and in `docs/06` as the remaining E1 item.
+
+## E6 — history.onVisitRemoved on expiry — PASS (hypothesis disproven; important design consequence)
+
+**Hypothesis:** the 90-day expiry deletes rows silently, so `onVisitRemoved` would NOT fire for it.
+**Result: FALSE — the event DOES fire for age-expired visits.** Disposable profiles.
+
+Procedure: insert 2 recent visits + 3 visits dated ~120 days ago into the closed `History`, relaunch with the probe extension (Helium) listening to `history.onVisitRemoved`, wait 40 s, read the probe's results from `storage.local` off disk; Chrome validated DB-level only (no `--load-extension`).
+
+Observed (Helium):
+- `onVisitRemoved` fired reporting exactly the three ~120-day-old URLs (`old0/old1/old2`), **not** the recent ones. Same insertion method for both groups → the trigger is **age/expiry**, not injected-row cleanup.
+- Event shape: `{ allHistory: false, urls: [...] }` — **identical in shape to a user deletion**; nothing distinguishes expiry from an intentional delete in the payload.
+- DB caveat: the `urls` rows were still present at SIGTERM (the expirer's on-disk delete is asynchronous and did not complete in the 40 s window), so expiry is a **background process, not an instant startup purge**. Chrome: same, old rows not yet purged in-window.
+
+**Portable / bound:**
+- History rows themselves are portable (see E5); this experiment is about *events*, which are per-run and local — not portable.
+- Expiry threshold (90 days) is a Chromium build constant (bound to **browser/version**), not per-profile.
+
+**Design implications for Synchrome (firm):**
+1. **Do not propagate `onVisitRemoved` blindly as a user deletion** — it also fires for expiry, which would wrongly delete those URLs on every other device. Confirms the `03` §8 / `02` §2.4 heuristic empirically.
+2. Treat a removal as a propagatable user deletion only when it is **not age-driven**: ignore removals whose visits are older than ~89 days, and/or reconcile against the synced store (only delete remotely if the URL was recently present and the removal is recent).
+3. Because expiry is asynchronous and version-constant, Synchrome should not sync visits older than the expiry window at all (they will vanish anyway), which also sidesteps most spurious `onVisitRemoved` events.
+
+**Verdict: PASS** (question conclusively answered; the answer changes the deletion design, already reflected in the data model).
