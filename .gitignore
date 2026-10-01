@@ -7,3 +7,5 @@ tests/experiments/results/
 *.log
 .env
 .env.local
+tests/experiments/e1-harness/target/
+tests/experiments/e1-harness/E1Probe.app/

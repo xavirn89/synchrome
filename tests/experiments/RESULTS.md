@@ -119,3 +119,41 @@ Probe extension (`tests/experiments/e4-ext/`) writes known values to each storag
 - **Schema gate**: operate only within a supported `meta.version` range (70 today); refuse unknown versions.
 - **90-day expiry** (session-1 research): visits older than ~90 days are purged by Chromium, so injecting older rows is pointless.
 - **AUTOINCREMENT id collisions**: wholesale replace is safe for a fresh profile; merging into an existing DB requires allocating new ids and fixing `visits.url`/`from_visit` references.
+
+## E1 — macOS TCC / native-host permissions — PARTIAL (negative case proven; positive case deferred)
+
+Minimal Rust harness `tests/experiments/e1-harness/` (std only, non-destructive: reads/stats paths, write-tests only disposable dirs; never writes a real profile or the real External Extensions dir). Run two ways with **no Full Disk Access granted**: (1) the binary from the shell, (2) an ad-hoc-signed `.app` (bundle id `com.synchrome.e1probe`) launched via LaunchServices (`open`) — the TCC identity a Tauri app has.
+
+**Both execution modes gave identical access** (TCC decides by *who* is responsible, not by binary vs app):
+
+| Operation | Helium | Chrome | Brave | Edge | Permission needed |
+|---|---|---|---|---|---|
+| Read `Local State` | READ ok | EPERM | EPERM | EPERM | Chrome/Brave/Edge: **Full Disk Access** |
+| List profile dir | ok | EPERM | EPERM | EPERM | same |
+| Read `Preferences` | READ ok | EPERM | — | — | same |
+| Read `History` | READ ok | EPERM | EPERM | — | same |
+| List `Local Extension Settings` | ok | EPERM | — | — | same |
+| List `NativeMessagingHosts` | ok | **ok** | (n/t) | (n/t) | **none** — subpath not TCC-protected |
+| Stat `External Extensions` (canonical) | n/a | STAT ok (exists) | — | — | none (metadata only) |
+| List `External Extensions` (canonical) | n/a | **EPERM** | — | — | **Full Disk Access** |
+| Write to a disposable profile dir | WRITE ok | — | — | — | none |
+
+Canary: `~/Library/Application Support/com.apple.TCC/TCC.db` not accessible (confirms no FDA).
+
+**Findings**
+1. **Helium needs no special permission.** Its data dir (`~/Library/Application Support/net.imput.helium`) is not a TCC-guarded location; full read/write of `Local State`, `Preferences`, `History` and LevelDB stores works from both a plain binary and an unsigned `.app`.
+2. **Chrome, Brave and Edge profile data require Full Disk Access.** Every profile-data read is EPERM without it. This is the single macOS gate for those browsers.
+3. **`NativeMessagingHosts` is NOT under TCC protection** — it is readable inside Chrome's dir even while the rest is EPERM. So installing Synchrome's native-messaging host manifest into Chrome/Brave/Edge does **not** need FDA. (Write not exercised to avoid altering the real install; the directory is outside the TCC boundary, so a write is expected to succeed — to be confirmed non-destructively with a temp file on request.)
+4. **The canonical `External Extensions` dir IS under TCC protection** (stat succeeds — the path exists — but listing is EPERM). Installing an extension into Chrome/Brave/Edge via their canonical `External Extensions` descriptor therefore **requires FDA on macOS**. This is the E1 × E3 intersection: on Helium the per-user `External Extensions` dir lives under its own (unprotected) Application Support and needs nothing; on Chrome/Brave/Edge it needs FDA.
+5. **Binary vs .app:** identical capability. The difference is attribution: a shell binary runs under the responsible parent app's TCC identity (grant FDA to Terminal → applies to all it spawns); an `.app` launched by LaunchServices is its own responsible process and the grant attaches to its code-signing identity.
+
+**TCC grant target and durability (mechanism; live positive test deferred — see below)**
+- FDA for a notarized Tauri app is granted to the app's **code-signing designated requirement** (Team ID + bundle id), so it **survives app updates** signed by the same Developer ID. Users add the app once in System Settings → Privacy & Security → Full Disk Access.
+- An **ad-hoc / unsigned** build is keyed by cdhash + path, so the grant **breaks on every rebuild** (new cdhash) — a dev-time nuisance only; production (signed + notarized) is stable.
+- FDA cannot be requested programmatically; macOS shows no prompt for it. The app must **detect** the EPERM and **guide** the user to System Settings (Tauri can open `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles`). "Files and Folders" per-folder prompts do not cover `~/Library/Application Support/<browser>` — only FDA does.
+- Separately, **Automation / Apple Events** is a distinct TCC bucket: Synchrome's "restart browser to apply" (quit + relaunch Chrome) sends Apple Events and triggers a one-time Automation prompt per target app. Not required for file sync, only for the restart convenience.
+
+**Degraded mode if the user declines FDA (macOS):** Helium fully works. Chrome/Brave/Edge: bookmarks, history capture, extension list/state and live applies still work **through the extension** (the browser reads its own files); what breaks is everything that needs the app to touch those profiles' files directly — full Preferences, extension settings, history import with dates, and `External Extensions` auto-install. Those become "needs Full Disk Access" in the UI.
+
+### DEFERRED (to run before closing development): live positive FDA test
+Per the author's decision, the positive path will be verified at the end of development with a **manual FDA grant**: add the signed `Synchrome.app` (or the test `E1Probe.app`) in System Settings → Privacy & Security → Full Disk Access, then re-run the harness to confirm (a) Chrome/Brave/Edge profile reads succeed, (b) `External Extensions` becomes writable, and (c) the grant survives a notarized update (same identity) vs. breaks on an ad-hoc rebuild. Tracked here and in `docs/06` as the remaining E1 item.
