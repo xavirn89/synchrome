@@ -1,5 +1,4 @@
 // Records results of E6/E7/E8 probes into chrome.storage.local (read off-disk by the test).
-const DUMMY_ID = "DUMMY_ID_PLACEHOLDER";
 const results = { started: Date.now() };
 
 async function e8() {
@@ -9,18 +8,25 @@ async function e8() {
 }
 
 async function e7() {
-  // E7: try to enable the (disabled) dummy extension from the SW with no user gesture.
   try {
-    const before = await chrome.management.get(DUMMY_ID).catch(() => null);
-    results.e7_dummy_found = !!before;
-    results.e7_enabled_before = before && before.enabled;
-    await chrome.management.setEnabled(DUMMY_ID, true);
-    const after = await chrome.management.get(DUMMY_ID).catch(() => null);
-    results.e7_enabled_after = after && after.enabled;
-    results.e7_setEnabled_error = null;
-  } catch (e) {
-    results.e7_setEnabled_error = String(e && e.message || e);
-  }
+    const all = await chrome.management.getAll();
+    const dummy = all.find(e => e.name === "Synchrome Dummy");
+    results.e7_dummy_found = !!dummy;
+    if (!dummy) return;
+    results.e7_dummy_id = dummy.id;
+    results.e7_enabled_initial = dummy.enabled;
+    results.e7_mayDisable = dummy.mayDisable;
+    // try to DISABLE from the SW (no user gesture)
+    try { await chrome.management.setEnabled(dummy.id, false); results.e7_disable_error = null; }
+    catch (e) { results.e7_disable_error = String(e && e.message || e); }
+    const d1 = await chrome.management.get(dummy.id).catch(() => null);
+    results.e7_enabled_after_disable = d1 && d1.enabled;
+    // try to RE-ENABLE from the SW (no user gesture)
+    try { await chrome.management.setEnabled(dummy.id, true); results.e7_enable_error = null; }
+    catch (e) { results.e7_enable_error = String(e && e.message || e); }
+    const d2 = await chrome.management.get(dummy.id).catch(() => null);
+    results.e7_enabled_after_enable = d2 && d2.enabled;
+  } catch (e) { results.e7_fatal = String(e && e.message || e); }
 }
 
 function e6() {

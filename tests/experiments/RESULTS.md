@@ -180,3 +180,23 @@ Observed (Helium):
 3. Because expiry is asynchronous and version-constant, Synchrome should not sync visits older than the expiry window at all (they will vanish anyway), which also sidesteps most spurious `onVisitRemoved` events.
 
 **Verdict: PASS** (question conclusively answered; the answer changes the deletion design, already reflected in the data model).
+
+## E7 — management.setEnabled from the service worker without a gesture — PARTIAL
+
+**Hypothesis:** SW-initiated `setEnabled` on another extension needs a user gesture / shows a confirmation, so Synchrome must route it through a popup click.
+**Result on Helium (disposable profile): it worked unattended — both directions.**
+
+Procedure: load the probe + a dummy extension (both enabled) via `--load-extension`; the probe's service worker calls `chrome.management.setEnabled(dummyId, false)` then `(…, true)` with no user gesture; results read off-disk from `storage.local`. Chrome 154 could not run this (ignores `--load-extension`).
+
+Observed (Helium): dummy `aplnkbnomlpnifbafnbgcdfpoelnndlk`, `mayDisable: true`. Disable → no error, `enabled` became `false`. Re-enable → no error, `enabled` became `true`. No dialog (headless) and no gesture.
+
+**Caveats (why PARTIAL):**
+- The dummy is a **development** extension (`installType: "development"`); the gesture/confirmation requirement documented by Chrome may apply differently to **Web Store ("normal")** extensions — the production case — which we could not load via CLI on Chrome 154.
+- Ungoogled/Helium may relax behaviour vs branded Chrome; `setEnabled` UI differences across builds are untested.
+- `mayDisable:false` (policy/managed extensions) would reject disable regardless.
+
+**Portable / bound:** enabled/disabled state is a per-profile pref (`extensions.settings.<id>` in Secure Preferences, tracked) — portable as a boolean (see E4). The *ability* to toggle it via API is bound to **browser/build** and the target's `installType`/`mayDisable`.
+
+**Design implication (firm, robust to the uncertainty):** Synchrome should **attempt `setEnabled` from the background first** (it may succeed with no UI, as here) and **fall back to a popup "Apply" click** (user gesture) when it errors. Never assume it is silent on every build; never try to toggle `mayDisable:false` extensions. This is exactly the attempt-then-gesture path already in `02` §2.2 / `05` §1.2.
+
+**Verdict: PARTIAL** — mechanism confirmed working unattended on Helium for a dev extension; the Web-Store/branded-Chrome case remains to confirm (will be covered once the real Web Store extension exists). Design is safe either way.
