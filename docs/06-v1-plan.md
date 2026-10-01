@@ -1,0 +1,99 @@
+# 06 — The First Complete Version: Scope, Experiments, Milestones, Risks
+
+## 1. Definition of v1 ("Synchrome 1.0")
+
+v1 is complete when a user installs **one desktop application**, signs in to a Synchrome account, picks which local browser profiles to sync (or creates new ones), and from then on **bookmarks, installed extensions, extension settings, browsing history and Chromium preferences** of those profiles stay synchronised across all their computers — on **macOS, Windows and Linux**, for **Helium, Chromium, Google Chrome, Brave and Microsoft Edge** (Flatpak/Snap browsers excluded) — with the behaviour below. Passwords, cookies and sessions are never synced.
+
+| Capability | v1 behaviour |
+|---|---|
+| Installation | one signed installer per OS; the app installs its background service, native-messaging hooks and the browser extension into synced profiles by itself |
+| Account | sign up / sign in (email + password or magic link) against the project's private Supabase; session in the OS keychain |
+| Stores | Synchrome Cloud (default) + optional GitHub repository + optional local/network folder; profile belongs to one store; move by export/import |
+| Browser & profile discovery | installed browsers and their profiles listed with names; import existing profiles; create new profiles in a chosen browser |
+| Profile mapping | a Synchrome profile is one identity across computers; per computer and per browser the user maps or creates local profiles; change any time; unmapping never deletes |
+| Bidirectional sync, no master | per-device journals, HLC, per-field LWW, snapshots (`03`) |
+| Bookmarks | live when the extension is active, at browser close otherwise; full tree incl. order; `dateAdded` not preserved on recreation |
+| Extensions | list + enabled state; missing ones auto-installed via external descriptor where the browser supports it (one "enable" bubble on Win/Mac), store link otherwise; uninstall requires confirmation; password managers are just extensions |
+| Extension settings | `storage.local` + `storage.sync` of Web Store extensions; per-key merge; exclusions; 5 MB cap; per-extension opt-out; applied at close |
+| History | lossless capture (extension or file); written with real timestamps into `History` at close; 90-day apply window; URL/range deletions; unified history view in the app |
+| Preferences | allow-listed untracked prefs everywhere; tracked prefs on Linux and non-branded builds via MAC forging (if E2 passes); "apply manually" for Google Chrome on Win/Mac |
+| Scopes | all on by default; per-profile toggles for each category |
+| Delivery modes | live (extension present) / file (extension absent); automatic |
+| Conflicts | deterministic convergence + conflict records + override in the app; per-collection strategies |
+| Deletions | tombstones, retention, bootstrap confirmation, local trash export |
+| Backups & recovery | file-level backups before every closed write, bookmark exports, store snapshots, restore from the app |
+| Encryption | optional E2E; off by default for Synchrome Cloud, on by default for GitHub |
+| Sync cadence | debounce 60 s; push via Realtime on Synchrome Cloud, 5 min poll elsewhere; manual "Sync now"; configurable |
+| Not in v1 | passwords, cookies, sessions, `Local Storage`/IndexedDB of extensions, Drive/WebDAV/S3 stores, Flatpak/Snap, policy-based silent installs as default (available as advanced option), bookmark `dateAdded` fidelity, account-bookmark (signed-in) trees, Edge Collections, sharing profiles between accounts |
+
+## 2. Experiments (Milestone 0)
+
+Scripted against headless throwaway profiles (`tests/experiments/`). Pass/fail criteria explicit so a failure changes the plan instead of surprising us.
+
+| # | Question | Method | If it fails |
+|---|---|---|---|
+| E1 | **macOS TCC inheritance**: can a native-messaging host spawned by Chrome read Chrome's protected profile dir? Does a detached child keep access after the browser exits? | throwaway Chrome profile + test extension + shell host | onboarding requires Full Disk Access for Chrome/Brave/Edge (fallback already designed) |
+| E2 | **Tracked-pref MAC forging** on non-branded builds (empty seed, `IOPlatformUUID`/machine id, drop `*_encrypted_hash`): does `homepage` survive relaunch in Helium, Chromium, Brave on macOS and Windows? | extend `tracked_prefs.py` | tracked prefs "apply manually" on Win/Mac |
+| E3 | **External extension descriptor** installs a Web Store extension on Chrome, Chromium, Brave, Edge (macOS), Windows via HKCU, Linux Chromium-branded; what does Helium do through its proxy? What exactly does the user see? | throwaway profiles | store-link fallback on failing combinations; consider `force_installed` policy as advanced option |
+| E4 | **LevelDB codec round-trip**: parse real extension stores, regenerate, confirm the extension reads identical values in headless Helium | fixtures + probe extension | `classic-level` for writing |
+| E5 | **History write fidelity**: inserted visits with counters show in `chrome://history`/`history.search`; typed counts respected; expiry removes >90-day rows | extend `history_bookmarks.py` | reduce to URL-level or document |
+| E6 | Does `history.onVisitRemoved` fire on expiry? | probe extension, back-dated visits | age heuristic |
+| E7 | `management.setEnabled` from the service worker without gesture? Dialog? | probe extension | route through popup |
+| E8 | **Profile identification**: `mappingToken` pre-seeded by the app in `Local Extension Settings/<synchrome-ext-id>` before first launch is readable by the extension via `chrome.storage.local` | app writes store, headless launch | user confirms mapping in the app |
+| E9 | **Supabase store**: Storage ETag/`If-Match` behaviour, RLS on `storage.objects` by prefix, Realtime latency on `store_events`, 20 MB object upload | local Supabase stack | Postgres lock row for CAS; polling |
+| E10 | Windows handle release timing after browser exit | Windows VM | longer grace / retry |
+| E11 | Windows liveness detection for Helium (`chrome.exe` signed by imput) and Edge | Windows VM | `lockfile` + process list |
+| E12 | **Profile creation**: `--profile-directory="Profile N"` creates a usable profile; renaming via `Local State` while closed sticks; profile picker shows it | headless launch + edit | create via the browser UI with guidance |
+| E13 | **GitHub adapter limits** (optional store): requests per cycle, 304s, 422 on stale ref, blob upload | scratch repo | adjust chunking/debounce |
+
+## 3. Milestones
+
+| Milestone | Deliverable | Exit criterion |
+|---|---|---|
+| **M0 Experiments** | E1–E13, results appended to `01` §9 | every row has pass/fail; plan adjusted |
+| **M1 Core engine** | `crates/core`, `schemas` (+ generated TS), `storage` (LocalFolder, GitHub), `crypto`; simulator | property-based convergence tests pass; no data loss without a tombstone; cycles/orphans handled |
+| **M2 Cloud** | `cloud/`: Supabase schema, RLS, Realtime events, quotas; `SupabaseStore` adapter; auth flows | two simulated devices sync through a local Supabase stack; RLS tests prove isolation |
+| **M3 Browser adapters** | `crates/browser`: discovery, liveness, profile creation, Preferences (+MAC forging per E2), LevelDB, History DB, SafeWriter, backups/restore, external descriptors, native-messaging manifests | round-trip real fixtures from Helium, Chrome, Brave on macOS and Linux; Windows in CI VM |
+| **M4 Desktop app** | Tauri 2 app + `crates/service`: onboarding (sign in, discover, import/create/map profiles, scopes), tray + background service, pending-apply queue, restart-to-apply, conflicts, backups UI, auto-update | end-to-end on one machine: two throwaway profiles synced via local Supabase, extension auto-installed, file applies at close |
+| **M5 Extension** | thin MV3 extension: events, live applies, popup; Web Store listing | live bookmark edit on profile A appears on profile B within one cycle |
+| **M6 Cross-machine validation** | two real machines (macOS + Linux), mixed live/file modes, GitHub store as alternative | converge; compaction; restore drill |
+| **M7 Hardening & release** | signed/notarized installers, winget/Homebrew, docs, diagnostics (`Help → Doctor`) | one week of daily use on the author's three machines with zero data-loss incidents |
+
+## 4. Risks and mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Chromium changes a file format (History schema, LevelDB layout, pref tracking) | closed-profile writes could corrupt | version gates per adapter, refuse unknown versions, backups always, verify-after-write, fixture corpus per release |
+| Tracked-pref forging stops working | homepage/startup/search not syncable on Win/Mac | E2 first; manual fallback designed; Linux unaffected |
+| macOS TCC tightens further | app cannot read Chrome/Brave/Edge profiles | FDA onboarding step; E1; Helium exempt today |
+| External-extension install UX differs per browser / Helium proxy | extension not present → file mode only | file mode is fully functional; store-link fallback; `force_installed` advanced option |
+| Running our own cloud | availability, cost, security duty, GDPR | Supabase managed stack we already operate; quotas; optional E2E; alternative stores for users who prefer their own; export at any time |
+| Extension stores contain device-bound data | an extension misbehaves after sync | exclusion patterns, opt-out, backup + rollback, size cap |
+| Clock skew | wrong LWW winner | HLC, skew warnings, conflict records |
+| Rust backend slows feature work; immature Supabase crates | longer M2–M4 | thin REST/WebSocket client over `reqwest`; schemas generated once; UI and extension stay in TypeScript |
+| Code signing / notarization | Gatekeeper, SmartScreen | Apple Developer ID; Windows signing + reputation ramp; Homebrew/winget |
+
+## 5. Answers to the brief's 20 questions — index
+
+| # | Question | Where answered |
+|---|---|---|
+| 1 | What data needs to be synchronised | `02` §2, `03` §3 |
+| 2 | Where Chromium stores each type | `01` §1–§6 |
+| 3 | Accessible via WebExtension APIs | `01` §2, §4, §6; `02` §1 |
+| 4 | Requires direct filesystem access | `02` §1, §2 |
+| 5 | Requires a native companion | `02` §3; `05` §1 |
+| 6 | Cannot be safely copied while running | `01` §1, `02` §4 |
+| 7 | Device-specific, never synced | `01` §3, §7; `03` §11 |
+| 8 | Extension settings storage and portability | `01` §5; `02` §2.3 |
+| 9 | History merge without corruption | `01` §4; `02` §2.4; `03` §3, §6 |
+| 10 | Preference filtering and normalisation | `02` §2.5; `03` §11 |
+| 11 | Extension installation on a new machine | `01` §6; `02` §2.2; `05` §1.2 |
+| 12 | Profile identity independent of folder names | `03` §1; `05` §2 |
+| 13 | Conflict representation and resolution | `03` §6–§7 |
+| 14 | Deletion propagation | `03` §8 |
+| 15 | Backups and rollback | `03` §9 |
+| 16 | Encryption mandatory or optional | `03` §10 (optional; off for Synchrome Cloud, on for third-party stores) |
+| 17 | First storage backend | `04` §3, §6 (Synchrome Cloud on Supabase; GitHub + folder optional) |
+| 18 | OS limitations | `01` §8.7; `05` §5 |
+| 19 | Browser differences | `01` §8.1–§8.6 |
+| 20 | Extension and native agent both needed | `02` §3; `05` §1 |
