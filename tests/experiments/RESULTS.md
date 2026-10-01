@@ -91,3 +91,31 @@ Probe extension (`tests/experiments/e4-ext/`) writes known values to each storag
 **Round-trip result** (Helium): probe id `ibknknhdfhdegdaefmboiaphhilheiop`, stable across profiles (same load path = same id; in production the Web Store id is fixed). src stamp `E4-…444`; a fresh second profile wrote its own stamp `…426`; after copying `Local Extension Settings` + `Sync Extension Settings` + `IndexedDB` into it (closed) and relaunching, the write-once probe kept the restored data and read back `…444` for both local and sync. PASS.
 
 **Operational rules confirmed** (consistent with `01` §5): LevelDB stores can be read with our own codec (keys plain, values JSON) and copied/restored wholesale **only while the browser is closed** (the live browser holds a `flock` on `LOCK` for opened stores). Restore = replace the whole `<id>/` directory after backup; never edit individual `.log`/`.ldb` files. A fresh store is a single `.log` WriteBatch + `MANIFEST` + `CURRENT`.
+
+## E5 — Chromium history — PASS (Helium and Chrome)
+
+`e5_history.py` on disposable profiles. No real profile touched.
+
+**Format (both browsers, identical):**
+- SQLite ("SQLite format 3" magic). `meta.version = 70`.
+- Journal mode **delete** (rollback journal, `History-journal`); **no WAL** by default (`-wal` absent, `-journal` present). WAL exists only behind a disabled feature flag.
+- Relevant tables: `urls`, `visits`, `visit_source`, `segments`, `segment_usage`, `keyword_search_terms`, `downloads`, `meta` (full schema in `01` §4).
+
+**Closed-profile read / write:**
+- Reading the closed DB: trivial (plain SQLite).
+- Inserting a visit into the closed profile (`urls` + `visits` + `visit_source=2`, counters maintained) → accepted, `integrity_check = ok`, **survives relaunch** with the row intact on both browsers.
+
+**Lock / copy while running (nuance):**
+- On these idle headless profiles, a read-only open **succeeded** and a copy taken while running had `integrity_check = ok`.
+- But on the real, actively-used Helium profile (session 1) the same read failed with **"database is locked"**. So the exclusive lock is situational: held during active use, sometimes not on an idle instance. **Rule stands: treat live reads as best-effort (may be locked); never write while running.**
+
+**Cross-profile import:**
+- Copied `History` (+ `-journal`) into a second disposable profile while both browsers were closed (after backing up the destination `History`). After relaunch, the imported row was present and `integrity_check = ok`. **PASS on Helium and Chrome.** Wholesale replace is valid for importing into a new/empty profile; incremental sync into a populated profile must insert rows individually (id remapping, counters, segments) rather than overwrite — as designed in `03` §3/§6.
+
+**Risks documented:**
+- **Torn copy**: copying `History` while the browser is actively writing can capture an inconsistent snapshot (committed pages may still be in the rollback journal). Mitigation: copy only when closed, or use the SQLite backup API / `VACUUM INTO` for a live snapshot, and always run `integrity_check`.
+- **Locks**: `locking_mode=EXCLUSIVE` during active use blocks external opens; writes are impossible/overwritten while running.
+- **WAL**: not used by default; if ever enabled, a copy must include `-wal`/`-shm` (or checkpoint first) or lose recent data. The import copies journal siblings.
+- **Schema gate**: operate only within a supported `meta.version` range (70 today); refuse unknown versions.
+- **90-day expiry** (session-1 research): visits older than ~90 days are purged by Chromium, so injecting older rows is pointless.
+- **AUTOINCREMENT id collisions**: wholesale replace is safe for a fresh profile; merging into an existing DB requires allocating new ids and fixing `visits.url`/`from_visit` references.
