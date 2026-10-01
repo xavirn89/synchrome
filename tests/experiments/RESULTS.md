@@ -29,3 +29,22 @@ Remaining E3 work: real-window install to completion on each browser; whether He
 - **E2** tracked-pref MAC regeneration — deferred pending approach agreed with the author.
 - **E9** Supabase store (ETag/CAS, RLS, Realtime) — needs the private Supabase credentials or a local stack.
 - **E4–E8, E10–E11, E13** — as listed in `docs/06-v1-plan.md` §2.
+
+## E9 — Supabase instance as a Synchrome store — PASS (with concrete CAS finding)
+
+Target: `https://synchrome-supabase.garduc.com` (self-hosted Supabase behind Cloudflare Tunnel + Kong). Scripts: `e9_http.py` (13/13), `e9_realtime.py` (3/3). All resources named `e9-*` and torn down.
+
+Verified:
+- **Cloudflare error 1010**: any request with a default library User-Agent (`Python-urllib/*`, and by extension `reqwest/*`) is blocked with HTTP 403 `error code: 1010`. Sending **any custom `User-Agent`** fixes it. The Synchrome client and all tooling MUST set an explicit User-Agent.
+- **Auth**: admin user creation (`/auth/v1/admin/users`, service role) and password login (`/auth/v1/token`) work; JWT issued.
+- **PostgREST**: reachable and authorized with anon key + user JWT.
+- **Storage CRUD**: create bucket, upload, download (byte-exact), list by prefix, update, delete — all work with the service role.
+- **Object metadata**: the `/storage/v1/object/info/<bucket>/<key>` endpoint returns `etag` (MD5 hex, quoted) and a per-write `version` UUID and `last_modified`. ETag is **not** present in GET/upload response headers, only via `info`.
+- **Realtime**: two WebSocket clients connect, join a topic, and a Broadcast from one reaches the other in ~**110 ms**. Push works → use it instead of polling for Synchrome Cloud.
+
+Key findings that shape the design:
+1. **`storage.objects` has RLS enabled with no policies** → an authenticated user cannot write (`new row violates row-level security policy`); only the service role can. Production needs **prefix-scoped RLS policies** on `storage.objects` so a user may write only under `"<their accountId>/%"`. The service role must never ship in the client; user writes go with the user JWT under those policies (or, if we prefer, through a PostgREST RPC / edge function).
+2. **The standard Storage REST endpoint ignores `If-Match` / `If-None-Match`** (returns 200, overwrites) → **no native CAS**. Two options exist: (a) the **S3-compatible endpoint** (`/storage/v1/s3` is present, not 404) which supports conditional writes but needs separate S3 access keys; (b) **emulate CAS in Postgres**: a metadata row per mutable shared object with a monotonic `version`, updated via PostgREST `PATCH ...?version=eq.<n>` (atomic; affects 0 rows if stale). **Decision: Postgres-version-row CAS.** Per-device journals are owner-written and need no CAS; only `store.json`, `profiles/*/profile.json` and snapshots do, and those get a `synchrome.objects` row `(path, version, hlc, device)` guarding each write. The object bytes live in Storage; the guard row makes the write a compare-and-swap.
+3. The `version` UUID from `info` changes on every write and can serve as the opaque `StorageAdapter` version token for change detection (cheap `list`/`info` diffing), independent of the CAS guard.
+
+Remaining E9 work (needs DDL / Postgres or a migration path): create the production RLS policies and the `synchrome.objects` CAS table and test user-JWT writes + live OCC end to end. Blocked only on a way to run SQL migrations (Supabase CLI `db push` with the DB URL, or psql). Flag to the author.

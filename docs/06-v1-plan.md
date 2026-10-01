@@ -40,7 +40,7 @@ Scripted against headless throwaway profiles (`tests/experiments/`). Pass/fail c
 | E6 | Does `history.onVisitRemoved` fire on expiry? | probe extension, back-dated visits | age heuristic |
 | E7 | `management.setEnabled` from the service worker without gesture? Dialog? | probe extension | route through popup |
 | E8 | **Profile identification**: `mappingToken` pre-seeded by the app in `Local Extension Settings/<synchrome-ext-id>` before first launch is readable by the extension via `chrome.storage.local` | app writes store, headless launch | user confirms mapping in the app |
-| E9 | **Supabase store**: Storage ETag/`If-Match` behaviour, RLS on `storage.objects` by prefix, Realtime latency on `store_events`, 20 MB object upload | local Supabase stack | Postgres lock row for CAS; polling |
+| E9 | **Supabase store** — DONE (`tests/experiments/RESULTS.md`): Auth/PostgREST/Storage/Realtime all work; Cloudflare needs a custom User-Agent; `storage.objects` RLS is service-role-only until prefix policies exist; standard Storage endpoint has no `If-Match` CAS → Postgres `synchrome_objects` version-row CAS; Realtime broadcast ~110 ms. Remaining: run the RLS + CAS-table migration and test user-JWT writes end to end (needs SQL migration access) | real instance | — |
 | E10 | Windows handle release timing after browser exit | Windows VM | longer grace / retry |
 | E11 | Windows liveness detection for Helium (`chrome.exe` signed by imput) and Edge | Windows VM | `lockfile` + process list |
 | E12 | **Profile creation**: `--profile-directory="Profile N"` creates a usable profile; renaming via `Local State` while closed sticks; profile picker shows it | headless launch + edit | create via the browser UI with guidance |

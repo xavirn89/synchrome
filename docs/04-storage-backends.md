@@ -35,9 +35,10 @@ The store layout (`03` §4) keeps per-device objects owner-written, so even no-C
 
 ## 3. Default store: Synchrome Cloud (private Supabase)
 
-- **Objects** in Supabase Storage, bucket `stores`, path prefix `<accountId>/<storeId>/…` following the layout in `03` §4. RLS policies on `storage.objects` restrict each account to its own prefix. Storage supports `If-Match`/`If-None-Match` via `x-upsert` + ETag semantics [U — verify in E9]; if CAS is not reliable there, snapshot/`profile.json` writes use an advisory lock row in Postgres (`select … for update`) which gives us CAS cheaply.
-- **Metadata** in Postgres: `accounts`, `devices`, `stores`, `profiles`, `profile_scopes`, `store_events` (append-only log: which path changed, by which device, HLC). RLS per account.
-- **Push**: Supabase Realtime subscription on `store_events` filtered by account → devices learn about changes within seconds and fetch only the changed objects. Polling (5 min) remains as fallback.
+- **Objects** in Supabase Storage, bucket `stores`, path prefix `<accountId>/<storeId>/…` following the layout in `03` §4. RLS policies on `storage.objects` restrict each account to its own prefix (verified in E9: without policies the bucket is service-role-only; the client uses the user JWT under prefix policies, and the service role never ships in the app).
+- **Compare-and-swap** (verified in E9): the standard Storage REST endpoint **ignores `If-Match`/`If-None-Match`**, so there is no native object CAS. Synchrome emulates it in Postgres: a `synchrome.objects` row `(account_id, store_id, path, version int, hlc, device_id)` guards every *shared mutable* object (`store.json`, `profiles/*/profile.json`, snapshots). A write is: `PATCH /rest/v1/synchrome_objects?path=eq.<p>&version=eq.<n>` with `version = n+1` (atomic; 0 rows affected = stale = retry), then upload the bytes to Storage. Per-device journals are owner-written and need no CAS. Storage's per-write `version` UUID (from the `info` endpoint) is the opaque `StorageAdapter` version token used for cheap change detection. (The S3-compatible endpoint, present at `/storage/v1/s3`, supports real conditional writes with S3 keys and remains an alternative if we later prefer object-level CAS.)
+- **Metadata** in Postgres: `accounts`, `devices`, `stores`, `profiles`, `profile_scopes`, `synchrome.objects` (CAS guard above), `store_events` (append-only log: which path changed, by which device, HLC). RLS per account.
+- **Push** (verified in E9, ~110 ms broadcast latency): Supabase Realtime over WebSocket → devices learn about changes within ~0.1 s and fetch only the changed objects. Polling (5 min) remains as fallback. **Client note:** every HTTP and WebSocket request must send an explicit `User-Agent`; the Cloudflare front returns `403 error code 1010` for default library agents (verified).
 - **Journals**: because Postgres is available, journal chunks can *also* be rows (`ops` table keyed by `(profile_id, device_id, seq)`) instead of files. Decision: **keep the object layout for all stores** (one code path, one format for export/import between stores) and use Postgres only for metadata, events and locks. Revisit if row-based journals prove materially cheaper.
 - **Quotas**: per-account soft quota (default 2 GB) enforced server-side; history retention default 365 days; compaction keeps snapshots small.
 - **Why Supabase**: already operated privately by the project; Auth, Storage, Postgres, RLS and Realtime in one place; local Docker stack for development; no vendor lock-in beyond Postgres + S3-compatible storage.
@@ -113,8 +114,11 @@ create table profiles   (id uuid primary key, account_id uuid references account
                          name text, icon text, scopes jsonb, strategies jsonb, created_at timestamptz);
 create table store_events (id bigserial primary key, account_id uuid, store_id uuid, profile_id uuid,
                          device_id uuid, path text, hlc text, created_at timestamptz default now());
-create table locks      (key text primary key, account_id uuid, holder uuid, expires_at timestamptz);
+-- CAS guard for shared mutable objects (store.json, profile.json, snapshots): verified necessary in E9
+create table synchrome_objects (account_id uuid, store_id uuid, path text, version int not null default 0,
+                         hlc text, device_id uuid, primary key (account_id, store_id, path));
 -- RLS: every table filtered by account_id = auth.uid(); storage.objects policy on name like auth.uid() || '/%'
+-- (E9 verified storage.objects is RLS-locked to service role until these policies exist)
 ```
 
 Secrets for alternative stores never enter these tables.
