@@ -70,3 +70,24 @@ After Codex applied `cloud/migrations/0001_e9_occ_experiment.sql` on the Synchro
 CAS race versions observed: create → **1**; two concurrent writers from v1 → winner **2** (loser sees current **2**); retry from v2 → **3**; stale write from v1 → rejected, current **3**. Monotonic, atomic, no lost update.
 
 Conclusion: the Postgres version-row CAS (`e9_cas_put`) plus prefix-scoped RLS on `storage.objects` fully provide the compare-and-swap and per-account isolation that Supabase Storage does not offer natively. **E9 is closed.** The `e9-experiments` bucket and `e9_*` objects remain in place as the validated reference for the production schema; remove with `0001_e9_occ_experiment.rollback.sql` when no longer needed.
+
+## E4 — Extension storage in LevelDB — PASS (Helium full round-trip; Chrome format-identical)
+
+Probe extension (`tests/experiments/e4-ext/`) writes known values to each storage area; `e4_leveldb.py` reads them with a pure-Python LevelDB reader, then copies the stores into a second disposable profile (both browsers closed) and verifies the write-once probe adopts and reads the restored values. No real profile touched.
+
+**Browser support for the test harness**: Helium (ungoogled) honours `--load-extension` → full round-trip. **Google Chrome stable 154 silently ignores `--load-extension`** (CLI extension loading was removed around Chrome 137), so the probe cannot be side-loaded there; the on-disk format is identical (same Chromium 154 base, confirmed against the real Chrome profile), and Synchrome installs its extension via the Web Store, not `--load-extension`, so this does not affect the product.
+
+**What lives where, and portability** (none of these areas is OSCrypt-encrypted; values are raw):
+
+| Concept | On-disk location | Format | Portable? |
+|---|---|---|---|
+| **Extension installed** (registration, enabled, grants) | `Secure Preferences → extensions.settings.<id>` (tracked) + `Extensions/<id>/<version>/` payload | JSON + files | as "(re)install + enabled flag": yes. The payload is re-downloadable; its `path`/`version` are device-bound → never copy the payload. |
+| **Extension settings** (`chrome.storage.sync`) | `Sync Extension Settings/<id>/` | LevelDB, keys plain UTF-8, values JSON | **yes** — stored locally even without Google sync; verified copy+restore |
+| **Extension local data** (`chrome.storage.local`) | `Local Extension Settings/<id>/` | LevelDB, keys plain UTF-8, values JSON | **yes** — verified copy+restore, read back by the extension |
+| **`chrome.storage.session`** | in-memory only | — | not on disk; nothing to sync |
+| **IndexedDB** (extension origin) | `IndexedDB/chrome-extension_<id>_0.indexeddb.leveldb` | LevelDB, binary keys, `idb_cmp1` comparator, V8-serialized values | dir-level copy works between same Chromium version (verified), but not parseable with the settings codec and may hold origin/device-bound data → **out of scope for v1**, handle later per-extension |
+| **Local Storage** (`window.localStorage`) | `Local Storage/leveldb` (one store **shared by all origins**) | LevelDB, binary type-prefixed keys | not per-extension isolable at file level → **out of scope for v1** |
+
+**Round-trip result** (Helium): probe id `ibknknhdfhdegdaefmboiaphhilheiop`, stable across profiles (same load path = same id; in production the Web Store id is fixed). src stamp `E4-…444`; a fresh second profile wrote its own stamp `…426`; after copying `Local Extension Settings` + `Sync Extension Settings` + `IndexedDB` into it (closed) and relaunching, the write-once probe kept the restored data and read back `…444` for both local and sync. PASS.
+
+**Operational rules confirmed** (consistent with `01` §5): LevelDB stores can be read with our own codec (keys plain, values JSON) and copied/restored wholesale **only while the browser is closed** (the live browser holds a `flock` on `LOCK` for opened stores). Restore = replace the whole `<id>/` directory after backup; never edit individual `.log`/`.ldb` files. A fresh store is a single `.log` WriteBatch + `MANIFEST` + `CURRENT`.
