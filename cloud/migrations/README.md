@@ -71,3 +71,52 @@ service role; no DB access) asserts:
 4. **CAS race**: two `e9_cas_put(..., expected=1)` calls → exactly one `ok=true (version 2)`, the other `ok=false` with `current_version=2`
 5. correct retry: user A calls `e9_cas_put(..., expected=2)` → `ok=true, new_version=3`
 6. user A can delete only their own objects/rows; teardown removes test users and objects
+
+## 0002 — devices & profiles (first production tables)
+
+- Migration: [`0002_devices_profiles.sql`](0002_devices_profiles.sql)
+- Rollback:  [`0002_devices_profiles.rollback.sql`](0002_devices_profiles.rollback.sql) — **destructive** (drops both tables)
+
+### What it creates / modifies
+
+| Object | Kind | Notes |
+|---|---|---|
+| `public.synchrome_set_updated_at()` | trigger function | sets `updated_at = now()` on update |
+| `public.devices` | table | PK `device_id uuid` (client-generated), `account_id uuid default auth.uid()`, `name`, `platform`, `os_version`, `app_version`, `created_at`, `updated_at`, `last_seen_at`; length checks; index on `account_id`; RLS **enabled + forced** |
+| `devices_select/insert/update/delete` | RLS policies | `account_id = auth.uid()` for role `authenticated` |
+| `public.profiles` | table | PK `id uuid default gen_random_uuid()`, `account_id uuid default auth.uid()`, `name`, timestamps; `unique (account_id, name)`; index; RLS **enabled + forced** |
+| `profiles_select/insert/update/delete` | RLS policies | `account_id = auth.uid()` for role `authenticated` |
+| grants | privileges | `usage` on `public` to `anon, authenticated`; CRUD on both tables to `authenticated`; **nothing** to `anon` |
+
+Does **not** touch `e9_*` objects. Aborts if `auth.uid()` is absent (non-Supabase DB). Idempotent (`if not exists`, `create or replace`, `drop … if exists` before `create`).
+
+### How Codex should apply it (on the Synchrome server)
+
+```bash
+# backup first (destructive rollback exists)
+psql "$SYNCHROME_DATABASE_URL" -v ON_ERROR_STOP=1 -f 0002_devices_profiles.sql
+# or inside the container:
+# docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 < 0002_devices_profiles.sql
+```
+
+Verification query:
+
+```sql
+select to_regclass('public.devices')  is not null as devices_ok,
+       to_regclass('public.profiles') is not null as profiles_ok,
+       (select count(*) from pg_policies where tablename in ('devices','profiles')) as policies, -- expect 8
+       (select relforcerowsecurity from pg_class where relname = 'devices')  as devices_forced,
+       (select relforcerowsecurity from pg_class where relname = 'profiles') as profiles_forced;
+```
+
+PostgREST picks up new tables automatically (schema cache reload on DDL via `pg_notify`); if `/rest/v1/devices` still 404s, `NOTIFY pgrst, 'reload schema';`.
+
+### Validation Claude Code runs afterwards (URL + anon + the existing test user; no DB access)
+
+1. `register_device` upserts this installation → one row with `account_id = auth.uid()`, `is_current = true`
+2. a second `register_device` (same `device_id`) **updates** the row (merge-duplicates), no duplicate
+3. `touch_device` advances `last_seen_at`
+4. `list_devices` returns the account's devices with exactly one `is_current`
+5. `list_profiles` returns `[]` for the fresh test account (normal empty state)
+6. RLS: a request with another user's JWT sees none of these rows
+7. `DeviceSummary`/`ProfileSummary` payloads carry no `account_id`, no tokens

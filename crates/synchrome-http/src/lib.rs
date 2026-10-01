@@ -87,6 +87,36 @@ impl HttpClient {
         synchrome_types::user_agent()
     }
 
+    /// Generic JSON request: `method` in {GET, POST, PATCH, DELETE}, optional JSON body.
+    /// Returns `(status, body_bytes)`; network failures are `Unreachable`. No auth logic.
+    pub async fn request_json(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Option<&serde_json::Value>,
+    ) -> Result<(u16, Vec<u8>), HttpError> {
+        let m = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|e| HttpError::Client(e.to_string()))?;
+        let mut req = self.inner.request(m, url);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| HttpError::Unreachable(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| HttpError::Unreachable(e.to_string()))?;
+        Ok((status, bytes.to_vec()))
+    }
+
     /// POST a JSON body and return `(status, body_bytes)`. Network/TLS/timeout failures are
     /// `HttpError::Unreachable`; any HTTP status (including 4xx/5xx) is returned to the caller
     /// so it can parse the service's own error payload. No retries, no auth logic.

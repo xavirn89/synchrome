@@ -10,6 +10,8 @@ members = [
     "crates/synchrome-config",
     "crates/synchrome-http",
     "crates/synchrome-auth",
+    "crates/synchrome-device",
+    "crates/synchrome-cloud",
     "apps/desktop/src-tauri",
 ]
 
@@ -33,6 +35,10 @@ synchrome-bridge = { path = "crates/synchrome-bridge" }
 synchrome-config = { path = "crates/synchrome-config" }
 synchrome-http = { path = "crates/synchrome-http" }
 synchrome-auth = { path = "crates/synchrome-auth" }
+synchrome-device = { path = "crates/synchrome-device" }
+synchrome-cloud = { path = "crates/synchrome-cloud" }
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "6"
 keyring = { version = "3", features = ["apple-native"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

@@ -1,0 +1,20 @@
+[package]
+name = "synchrome-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Authenticated PostgREST client for Synchrome Cloud account metadata (devices, profiles)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+synchrome-auth = { workspace = true }
+synchrome-config = { workspace = true }
+synchrome-device = { workspace = true }
+synchrome-http = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

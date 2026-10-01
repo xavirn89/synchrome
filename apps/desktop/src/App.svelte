@@ -5,6 +5,11 @@
   let browsers = $state([]);
   let cloud = $state(null);
   let account = $state(null);
+  let device = $state(null);
+  let devices = $state([]);
+  let profiles = $state([]);
+  let cloudDataError = $state(null);
+  let cloudDataBusy = $state(false);
   let version = $state("");
   let loadingBrowsers = $state(true);
   let loadingCloud = $state(true);
@@ -36,10 +41,29 @@
   async function loadAccount() {
     try { account = await invoke("account_status"); } catch (e) { error = String(e); }
   }
+  async function loadDevice() {
+    try { device = await invoke("device_identity"); } catch (e) { device = null; }
+  }
+  /// Register this device, then list devices + profiles. Only when signed in.
+  async function loadCloudData() {
+    if (!account?.signed_in) { devices = []; profiles = []; return; }
+    cloudDataBusy = true;
+    cloudDataError = null;
+    try {
+      await invoke("register_device");
+      [devices, profiles] = await Promise.all([invoke("list_devices"), invoke("list_profiles")]);
+    } catch (e) {
+      cloudDataError = String(e);
+      devices = []; profiles = [];
+    } finally {
+      cloudDataBusy = false;
+    }
+  }
   async function loadAll() {
     error = null;
     version = await invoke("app_version").catch(() => "");
-    await Promise.all([loadBrowsers(), loadCloud(), loadAccount()]);
+    await Promise.all([loadBrowsers(), loadCloud(), loadAccount(), loadDevice()]);
+    await loadCloudData();
   }
   onMount(loadAll);
 
@@ -50,6 +74,7 @@
     try {
       account = await invoke("sign_in", { email, password });
       password = "";
+      await loadCloudData();
     } catch (e) {
       authError = String(e);
     } finally {
@@ -59,7 +84,7 @@
   async function signOut() {
     authBusy = true;
     authError = null;
-    try { account = await invoke("sign_out"); } catch (e) { authError = String(e); }
+    try { account = await invoke("sign_out"); devices = []; profiles = []; } catch (e) { authError = String(e); }
     finally { authBusy = false; }
   }
   async function refresh() {
@@ -121,6 +146,44 @@
         <button class="danger" onclick={signOut} disabled={authBusy}>{authBusy ? "…" : "Sign out"}</button>
       </div>
       {#if account.error}<p class="warn small">{account.error}</p>{/if}
+
+      <div class="sub">
+        <div class="sub-head"><h3>Devices</h3>
+          <button class="tiny-btn" onclick={loadCloudData} disabled={cloudDataBusy}>{cloudDataBusy ? "…" : "Reload"}</button>
+        </div>
+        {#if cloudDataError}
+          <p class="warn small">{cloudDataError}</p>
+        {:else if cloudDataBusy && devices.length === 0}
+          <p class="muted small">Registering this device…</p>
+        {:else if devices.length === 0}
+          <p class="muted small">No devices registered yet.</p>
+        {:else}
+          <ul class="plain">
+            {#each devices as d (d.device_id)}
+              <li class="row-item">
+                <span class="pname">{d.name}</span>
+                <span class="pdir">{d.platform}{d.os_version ? ` · ${d.os_version}` : ""} · v{d.app_version}</span>
+                {#if d.is_current}<span class="badge small ok">This device</span>{/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+
+      <div class="sub">
+        <div class="sub-head"><h3>Profiles</h3><span class="badge muted small">{profiles.length}</span></div>
+        {#if cloudDataError}
+          <p class="muted small">—</p>
+        {:else if profiles.length === 0}
+          <p class="muted small">No Synchrome profiles yet. Profile creation comes in a later step.</p>
+        {:else}
+          <ul class="plain">
+            {#each profiles as p (p.id)}
+              <li class="row-item"><span class="pname">{p.name}</span><span class="pdir">{p.id.slice(0, 8)}</span></li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     {:else}
       <form class="login" onsubmit={signIn}>
         <label>Email
@@ -139,6 +202,9 @@
       {#if account?.error}<p class="warn small">{account.error}</p>{/if}
     {/if}
     {#if authError}<p class="bad small">{authError}</p>{/if}
+    {#if device}
+      <p class="hint tiny">This device: <strong>{device.device_name}</strong> · {device.platform}{device.os_version ? ` · ${device.os_version}` : ""} · id {device.device_id.slice(0, 8)}…</p>
+    {/if}
     <p class="hint tiny">Your session is stored only in the macOS Keychain. Tokens never reach this window.</p>
   </section>
 
@@ -271,5 +337,11 @@
   .badge.info { background: #10263a; color: #5aa6e0; border-color: #1c5a8a; }
   .badge.bad, .bad { color: #f08a8a; } .badge.bad { background: #3a1414; border-color: #8a2a2a; }
   .badge.muted, .muted { color: #8a97a4; } .badge.muted { background: #1b2733; border-color: #2b3a49; }
+  .sub { margin-top: 12px; padding-top: 10px; border-top: 1px solid #22303d; }
+  .sub-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  h3 { font-size: 13px; margin: 0; color: #9aa7b4; text-transform: uppercase; letter-spacing: .04em; }
+  .tiny-btn { padding: 2px 8px; font-size: 11px; margin-left: auto; }
+  .plain { list-style: none; padding: 0; margin: 0; }
+  .row-item { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid #1b2733; font-size: 13px; }
   .error { background: #3a1414; color: #f0a0a0; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }
 </style>
