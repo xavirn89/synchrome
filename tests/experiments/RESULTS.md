@@ -48,3 +48,25 @@ Key findings that shape the design:
 3. The `version` UUID from `info` changes on every write and can serve as the opaque `StorageAdapter` version token for change detection (cheap `list`/`info` diffing), independent of the CAS guard.
 
 Remaining E9 work (needs DDL / Postgres or a migration path): create the production RLS policies and the `synchrome.objects` CAS table and test user-JWT writes + live OCC end to end. Blocked only on a way to run SQL migrations (Supabase CLI `db push` with the DB URL, or psql). Flag to the author.
+
+### E9 OCC — migration validated end to end — PASS (11/11)
+
+After Codex applied `cloud/migrations/0001_e9_occ_experiment.sql` on the Synchrome server, `e9_occ.py` ran against the real instance (URL + anon + two service-role-created test users; no DB access). Store `bac9f2e2…`.
+
+| # | Check | Result |
+|---|---|---|
+| 1 | User A creates OCC row, `expected_version=0` | PASS — `ok, new_version=1, current_version=0` |
+| 2 | User A writes to Storage with its **user JWT** (not service role) under its own prefix | PASS — 200 |
+| 3 | User B cannot read A's object | PASS — 400 (RLS) |
+| 3b | User B cannot write under A's prefix | PASS — 400 (RLS) |
+| 3c | User B's CAS row isolated from A | PASS — B's own row created at v1 independently |
+| 4–5 | Two writers both `expected=1` → exactly one wins | PASS — winner `new_version=2`, loser `ok=false` |
+| 6 | Loser gets conflict + current version | PASS — `current_version=2` |
+| 7 | Retry with `expected=2` | PASS — `ok, new_version=3` |
+| 8 | Stale `expected=1` rejected | PASS — `ok=false, current_version=3` |
+| 9 | RLS on both `public.e9_objects` and `storage.objects` | PASS (rows 3, 3b, 3c) |
+| 10 | Cleanup removes test users + objects | PASS — 0 test users remain, bucket empty |
+
+CAS race versions observed: create → **1**; two concurrent writers from v1 → winner **2** (loser sees current **2**); retry from v2 → **3**; stale write from v1 → rejected, current **3**. Monotonic, atomic, no lost update.
+
+Conclusion: the Postgres version-row CAS (`e9_cas_put`) plus prefix-scoped RLS on `storage.objects` fully provide the compare-and-swap and per-account isolation that Supabase Storage does not offer natively. **E9 is closed.** The `e9-experiments` bucket and `e9_*` objects remain in place as the validated reference for the production schema; remove with `0001_e9_occ_experiment.rollback.sql` when no longer needed.
