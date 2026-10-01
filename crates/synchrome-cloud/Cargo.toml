@@ -20,3 +20,4 @@ synchrome-http = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+synchrome-browser = { workspace = true }

@@ -3350,6 +3350,7 @@ dependencies = [
  "serde",
  "serde_json",
  "synchrome-auth",
+ "synchrome-browser",
  "synchrome-config",
  "synchrome-device",
  "synchrome-http",
