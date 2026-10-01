@@ -5,3 +5,5 @@ dist/
 tests/experiments/udd-*/
 tests/experiments/results/
 *.log
+.env
+.env.local
