@@ -120,3 +120,55 @@ PostgREST picks up new tables automatically (schema cache reload on DDL via `pg_
 5. `list_profiles` returns `[]` for the fresh test account (normal empty state)
 6. RLS: a request with another user's JWT sees none of these rows
 7. `DeviceSummary`/`ProfileSummary` payloads carry no `account_id`, no tokens
+
+## 0003 — profile_mappings (local browser profile ↔ cloud profile, per device)
+
+- Migration: [`0003_profile_mappings.sql`](0003_profile_mappings.sql) — requires 0002
+- Rollback:  [`0003_profile_mappings.rollback.sql`](0003_profile_mappings.rollback.sql) — **destructive** (drops all mappings and tokens)
+
+### What it creates / modifies
+
+| Object | Kind | Notes |
+|---|---|---|
+| `profiles_account_id_id_key` | unique `(account_id, id)` on `public.profiles` | target of the composite FK |
+| `devices_account_id_device_id_key` | unique `(account_id, device_id)` on `public.devices` | target of the composite FK |
+| `public.profile_mappings` | table | `id`, `account_id default auth.uid()`, `profile_id`, `device_id`, `browser_kind`, `browser_profile_dir`, `mapping_token`, `token_state`, `token_confirmed_at`, `created_at`, `updated_at`; RLS **enabled + forced** |
+| `profile_mappings_profile_fk` | FK `(account_id, profile_id) → profiles(account_id, id)` **ON DELETE RESTRICT** | a mapped cloud profile cannot be deleted; unmap first |
+| `profile_mappings_device_fk` | FK `(account_id, device_id) → devices(account_id, device_id)` **ON DELETE CASCADE** | removing a device removes its mappings |
+| `profile_mappings_local_unique` | unique `(device_id, browser_kind, browser_profile_dir)` | one mapping per local profile |
+| `profile_mappings_profile_device_unique` | unique `(profile_id, device_id)` | a cloud profile maps to ≤1 local profile **per device** (docs/03 §1); many devices allowed |
+| `profile_mappings_token_unique` | unique `(mapping_token)` | |
+| checks | `browser_kind ∈ {helium,chrome,brave,edge,chromium}`; dir is a bare name (1–255 chars, no `/` `\`, not `.`/`..`); token `^[0-9a-f]{64}$`; `token_state ∈ {pending_local_write,confirmed}`; `confirmed ⇔ token_confirmed_at not null` | |
+| 3 indexes, `updated_at` trigger | | reuses `synchrome_set_updated_at()` from 0002 |
+| `profile_mappings_select/insert/update/delete` | RLS policies | `account_id = auth.uid()`, role `authenticated` |
+| grants | column-level | `revoke all` from anon+authenticated, then: `select, delete` (table); `insert (profile_id, device_id, browser_kind, browser_profile_dir, mapping_token)`; `update (token_state, token_confirmed_at)` → clients can never set `account_id` or rewrite a mapping's identity/token |
+| hardening | `revoke all on devices, profiles from anon` | defense in depth (anon already 401 today) |
+
+**Why composite FKs:** Postgres FK checks bypass RLS. With a plain `profile_id → profiles(id)` FK, user B could insert a mapping that references user A's profile by UUID. Pinning `account_id` into the FK (and `account_id = auth.uid()` via RLS `with check`) makes cross-account references impossible.
+
+### How Codex should apply it (on the Synchrome server)
+
+```bash
+# backup first (rollback is destructive)
+psql "$SYNCHROME_DATABASE_URL" -v ON_ERROR_STOP=1 -f 0003_profile_mappings.sql
+# or: docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 < 0003_profile_mappings.sql
+```
+
+Verification query:
+
+```sql
+select to_regclass('public.profile_mappings') is not null                                as table_ok,
+       (select relforcerowsecurity from pg_class where relname = 'profile_mappings')     as rls_forced,
+       (select count(*) from pg_policies where tablename = 'profile_mappings')           as policies,      -- expect 4
+       (select count(*) from pg_constraint where conrelid = 'public.profile_mappings'::regclass
+          and contype = 'f')                                                             as fks,           -- expect 2
+       (select confdeltype from pg_constraint where conname = 'profile_mappings_profile_fk') as profile_del, -- expect 'r'
+       (select confdeltype from pg_constraint where conname = 'profile_mappings_device_fk')  as device_del,  -- expect 'c'
+       exists (select 1 from pg_constraint where conname = 'profiles_account_id_id_key')     as profiles_uk,
+       exists (select 1 from pg_constraint where conname = 'devices_account_id_device_id_key') as devices_uk;
+-- column privileges for authenticated (expect insert on 5 cols, update on 2):
+select privilege_type, column_name from information_schema.column_privileges
+ where table_name = 'profile_mappings' and grantee = 'authenticated' order by 1, 2;
+```
+
+If `/rest/v1/profile_mappings` still 404s afterwards: `NOTIFY pgrst, 'reload schema';`.

@@ -28,6 +28,23 @@ pub enum CloudError {
     Server(u16),
     #[error("invalid response: {0}")]
     InvalidResponse(String),
+    /// Unique constraint violated (Postgres 23505), e.g. local profile already mapped,
+    /// duplicate profile name, cloud profile already mapped on this device.
+    #[error("conflict: {0}")]
+    Conflict(String),
+    /// Foreign key violated (Postgres 23503) on insert/update: the referenced profile or
+    /// device does not exist **in this account**.
+    #[error("unknown or foreign reference: {0}")]
+    UnknownReference(String),
+    /// Foreign key RESTRICT blocked a delete: the profile is still mapped on some device.
+    #[error("profile is still mapped on at least one device; unmap it first")]
+    ProfileInUse,
+    /// Check constraint violated (Postgres 23514): invalid field value.
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
+    /// The target row does not exist in this account (0 rows affected under RLS).
+    #[error("not found")]
+    NotFound,
 }
 
 pub type RestFuture<'a> =
@@ -89,6 +106,12 @@ pub fn classify_postgrest(status: u16, bytes: &[u8]) -> CloudError {
         .message
         .clone()
         .unwrap_or_else(|| String::from_utf8_lossy(bytes).chars().take(200).collect());
+    match code.as_str() {
+        "23505" => return CloudError::Conflict(message),
+        "23503" => return CloudError::UnknownReference(message),
+        "23514" => return CloudError::InvalidValue(message),
+        _ => {}
+    }
     match status {
         401 => CloudError::Unauthorized,
         403 => CloudError::Forbidden,
@@ -100,7 +123,7 @@ pub fn classify_postgrest(status: u16, bytes: &[u8]) -> CloudError {
     }
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     // Avoid a chrono dependency: PostgREST accepts epoch-derived ISO via "now()" semantics
     // only in SQL, so we build a UTC RFC 3339 string by hand from seconds since the epoch.
     let secs = std::time::SystemTime::now()
@@ -126,7 +149,7 @@ fn now_rfc3339() -> String {
 
 pub struct CloudClient<T: RestTransport> {
     cfg: SupabaseConfig,
-    transport: T,
+    pub(crate) transport: T,
 }
 
 impl CloudClient<ReqwestRest> {
@@ -147,7 +170,7 @@ impl<T: RestTransport> CloudClient<T> {
         format!("{}/rest/v1{}", self.cfg.url.trim_end_matches('/'), path)
     }
 
-    async fn call(
+    pub(crate) async fn call(
         &self,
         session: &Session,
         method: &str,
@@ -174,7 +197,7 @@ impl<T: RestTransport> CloudClient<T> {
         }
     }
 
-    fn one<D: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<D, CloudError> {
+    pub(crate) fn one<D: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<D, CloudError> {
         let mut rows: Vec<D> = serde_json::from_slice(bytes)
             .map_err(|e| CloudError::InvalidResponse(format!("expected row array: {e}")))?;
         rows.pop()
@@ -288,12 +311,14 @@ mod tests {
     use std::sync::Mutex;
     use synchrome_auth::Secret;
 
+    type SeenRequest = (String, String, Vec<(String, String)>);
+
     /// Scripted transport. Each queued entry: (expected Authorization bearer or "*", status, body).
     /// Returns rows depending on which user's token is presented — simulates RLS at the client
     /// boundary (real RLS is validated against the instance after the migration).
     struct Mock {
         queue: Mutex<Vec<(&'static str, u16, &'static str)>>,
-        pub seen: Mutex<Vec<(String, String, Vec<(String, String)>)>>,
+        pub seen: Mutex<Vec<SeenRequest>>,
     }
     impl Mock {
         fn new(q: Vec<(&'static str, u16, &'static str)>) -> Self {
@@ -442,10 +467,25 @@ mod tests {
         assert_eq!(classify_postgrest(401, b"{}"), CloudError::Unauthorized);
         assert_eq!(classify_postgrest(403, b"{}"), CloudError::Forbidden);
         assert_eq!(classify_postgrest(503, b""), CloudError::Server(503));
-        let bad = r#"{"code":"23514","message":"check constraint violated"}"#;
+        let check = r#"{"code":"23514","message":"check constraint violated"}"#;
         assert!(matches!(
-            classify_postgrest(400, bad.as_bytes()),
-            CloudError::Postgrest { code, .. } if code == "23514"
+            classify_postgrest(400, check.as_bytes()),
+            CloudError::InvalidValue(_)
+        ));
+        let dup = r#"{"code":"23505","message":"duplicate key"}"#;
+        assert!(matches!(
+            classify_postgrest(409, dup.as_bytes()),
+            CloudError::Conflict(_)
+        ));
+        let fk = r#"{"code":"23503","message":"violates foreign key"}"#;
+        assert!(matches!(
+            classify_postgrest(409, fk.as_bytes()),
+            CloudError::UnknownReference(_)
+        ));
+        let other = r#"{"code":"22P02","message":"invalid input syntax for type uuid"}"#;
+        assert!(matches!(
+            classify_postgrest(400, other.as_bytes()),
+            CloudError::Postgrest { code, .. } if code == "22P02"
         ));
         // Network failure path through the client
         struct Down;

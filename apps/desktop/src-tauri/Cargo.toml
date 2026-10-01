@@ -23,4 +23,5 @@ synchrome-config = { workspace = true }
 synchrome-supabase = { workspace = true }
 synchrome-auth = { workspace = true }
 synchrome-cloud = { workspace = true }
+uuid = { workspace = true }
 synchrome-device = { workspace = true }

@@ -3346,12 +3346,14 @@ dependencies = [
 name = "synchrome-cloud"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
  "synchrome-auth",
  "synchrome-config",
  "synchrome-device",
  "synchrome-http",
+ "synchrome-types",
  "thiserror 2.0.21",
  "tokio",
  "uuid",
@@ -3382,6 +3384,7 @@ dependencies = [
  "synchrome-types",
  "tauri",
  "tauri-build",
+ "uuid",
 ]
 
 [[package]]
