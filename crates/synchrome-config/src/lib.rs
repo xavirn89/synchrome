@@ -51,6 +51,21 @@ impl AppConfig {
     /// current directory or any parent (development convenience; silently ignored if absent).
     pub fn load() -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
+        // A process spawned by the browser (native messaging host) has an arbitrary cwd, so
+        // also look for `.env` next to the executable's ancestors (development builds live in
+        // `<repo>/target/...`). Already-set variables are never overridden.
+        if std::env::var(ENV_SUPABASE_URL).is_err() || std::env::var(ENV_SUPABASE_ANON_KEY).is_err()
+        {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(env_file) = exe
+                    .ancestors()
+                    .map(|d| d.join(".env"))
+                    .find(|p| p.is_file())
+                {
+                    let _ = dotenvy::from_path(env_file);
+                }
+            }
+        }
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 

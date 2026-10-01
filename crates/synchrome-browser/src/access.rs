@@ -52,23 +52,61 @@ pub fn detect_access(user_data_dir: &Path) -> AccessState {
 
 /// Whether a browser currently owns this user-data directory (POSIX: live `SingletonLock`).
 ///
-/// On macOS/Linux `SingletonLock` is a symlink to `<hostname>-<pid>`; its presence as a
-/// symlink is a reliable "in use" signal. Windows liveness (message window / `lockfile`) is a
-/// later-milestone concern and returns `false` here.
+/// On macOS/Linux `SingletonLock` is a symlink to `<hostname>-<pid>`. The directory is in use
+/// only if that hostname is this machine AND the pid is alive. A browser killed abruptly
+/// leaves a stale lock behind (observed in the E2E handshake run), so mere presence is not
+/// enough. A lock owned by another hostname (shared/network profile dir) or one that cannot be
+/// parsed is treated as in use — the conservative answer for a writer. Windows liveness
+/// (message window / `lockfile`) is a later-milestone concern and returns `false` here.
 pub fn is_browser_running(user_data_dir: &Path) -> bool {
     #[cfg(unix)]
     {
         let lock = user_data_dir.join("SingletonLock");
-        // symlink_metadata does not follow the link and succeeds even if the target is stale.
-        std::fs::symlink_metadata(&lock)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
+        let Ok(meta) = std::fs::symlink_metadata(&lock) else {
+            return false; // no lock at all
+        };
+        if !meta.file_type().is_symlink() {
+            return true; // unexpected shape: be conservative
+        }
+        let Ok(target) = std::fs::read_link(&lock) else {
+            return true;
+        };
+        let target = target.to_string_lossy();
+        let Some((host, pid)) = target.rsplit_once('-') else {
+            return true;
+        };
+        let Ok(pid) = pid.parse::<i32>() else {
+            return true;
+        };
+        if pid <= 0 || host != local_hostname() {
+            return true;
+        }
+        pid_alive(pid)
     }
     #[cfg(not(unix))]
     {
         let _ = user_data_dir;
         false
     }
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    // SAFETY: kill with signal 0 performs only the existence/permission check.
+    let r = unsafe { libc::kill(pid, 0) };
+    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn local_hostname() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: buf is valid for buf.len() bytes; gethostname NUL-terminates on success.
+    let r = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if r != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
 #[cfg(test)]
@@ -89,6 +127,52 @@ mod tests {
         std::fs::write(dir.path().join("Local State"), b"{}").unwrap();
         symlink("somehost-1234", dir.path().join("SingletonLock")).unwrap();
         assert_eq!(detect_access(dir.path()), AccessState::BrowserRunning);
+    }
+
+    #[test]
+    fn stale_lock_from_a_dead_local_pid_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Local State"), b"{}").unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        symlink(
+            format!("{}-{dead}", local_hostname()),
+            dir.path().join("SingletonLock"),
+        )
+        .unwrap();
+        assert!(
+            !is_browser_running(dir.path()),
+            "stale lock must not count as running"
+        );
+        assert_eq!(detect_access(dir.path()), AccessState::Accessible);
+    }
+
+    #[test]
+    fn live_local_lock_is_running_and_foreign_host_is_conservative() {
+        let dir = tempfile::tempdir().unwrap();
+        symlink(
+            format!("{}-{}", local_hostname(), std::process::id()),
+            dir.path().join("SingletonLock"),
+        )
+        .unwrap();
+        assert!(is_browser_running(dir.path()));
+        let other = tempfile::tempdir().unwrap();
+        symlink(
+            "some-other-machine.local-1",
+            other.path().join("SingletonLock"),
+        )
+        .unwrap();
+        assert!(
+            is_browser_running(other.path()),
+            "foreign host lock is treated as in use"
+        );
+        let junk = tempfile::tempdir().unwrap();
+        symlink("not-a-lock", junk.path().join("SingletonLock")).unwrap();
+        assert!(
+            is_browser_running(junk.path()),
+            "unparseable lock is treated as in use"
+        );
     }
 
     #[test]

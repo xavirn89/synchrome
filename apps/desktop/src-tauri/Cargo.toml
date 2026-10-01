@@ -24,4 +24,7 @@ synchrome-supabase = { workspace = true }
 synchrome-auth = { workspace = true }
 synchrome-cloud = { workspace = true }
 uuid = { workspace = true }
+synchrome-bridge = { workspace = true }
+libc = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "time", "macros"] }
 synchrome-device = { workspace = true }

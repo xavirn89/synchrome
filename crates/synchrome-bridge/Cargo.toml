@@ -4,9 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Extension <-> app native-messaging bridge skeleton (frames only in M1)."
+description = "Extension <-> app native-messaging bridge: protocol, framing, local token registry, handshake."
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+tokio = { version = "1", features = ["io-util", "io-std", "time", "rt", "macros"] }
 synchrome-types = { workspace = true }
+synchrome-auth = { workspace = true }
+synchrome-cloud = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "io-std", "time", "rt", "macros", "rt-multi-thread"] }

@@ -17,6 +17,21 @@ pub fn user_agent() -> String {
     format!("Synchrome/{VERSION}")
 }
 
+/// Stable id of the Synchrome companion extension, pinned by the public `key` in
+/// `apps/extension/manifest.json`. Native messaging only accepts this origin.
+pub const SYNCHROME_EXTENSION_ID: &str = "gmpmcnknoaogpjdoonlddhpdpgkebbog";
+
+/// Native messaging host name registered for the extension (`connectNative` target).
+pub const NATIVE_HOST_NAME: &str = "com.synchrome.host";
+
+/// The `chrome.storage.local` key under which the app seeds the mapping token (E8).
+pub const MAPPING_TOKEN_STORAGE_KEY: &str = "mappingToken";
+
+/// Origin string Chromium passes to the native host for the Synchrome extension.
+pub fn synchrome_extension_origin() -> String {
+    format!("chrome-extension://{SYNCHROME_EXTENSION_ID}/")
+}
+
 /// A Chromium-family browser family Synchrome knows how to discover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

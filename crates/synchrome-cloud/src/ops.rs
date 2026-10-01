@@ -134,6 +134,42 @@ impl<T: RestTransport> CloudClient<T> {
         }
     }
 
+    /// One profile of this account, or `None` (unknown, deleted, or another account's).
+    pub async fn get_profile(
+        &self,
+        session: &Session,
+        profile_id: Uuid,
+    ) -> Result<Option<ProfileSummary>, CloudError> {
+        let bytes = self
+            .call(
+                session,
+                "GET",
+                &format!("/profiles?id=eq.{profile_id}&select={PROFILE_COLUMNS}"),
+                &[],
+                None,
+            )
+            .await?;
+        Ok(rows::<ProfileSummary>(&bytes)?.into_iter().next())
+    }
+
+    /// `DELETE /devices?device_id=eq.<id>` (cascades to the device's mappings).
+    pub async fn delete_device(
+        &self,
+        session: &Session,
+        device_id: Uuid,
+    ) -> Result<(), CloudError> {
+        let bytes = self
+            .call(
+                session,
+                "DELETE",
+                &format!("/devices?device_id=eq.{device_id}&select=device_id"),
+                &JSON_REPR,
+                None,
+            )
+            .await?;
+        first_or_not_found::<serde_json::Value>(&bytes).map(|_| ())
+    }
+
     // ---------------- mappings ----------------
 
     /// Create a mapping for a local profile on `device_id`, generating a fresh 256-bit

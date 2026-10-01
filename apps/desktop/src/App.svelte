@@ -40,9 +40,12 @@
     unknown: { label: "Unknown", cls: "muted" },
   };
   const MAP_STATUS = {
-    token_pending_local_write: { label: "Mapped · token pending local write", cls: "info" },
-    token_confirmed: { label: "Mapped · token confirmed", cls: "ok" },
+    pending_local_write: { label: "Pending local write", cls: "muted" },
+    token_written: { label: "Token written", cls: "info" },
+    extension_confirmed: { label: "Extension confirmed", cls: "ok" },
+    error: { label: "Error", cls: "bad" },
   };
+  let connectorMsg = $state({});
 
   // ---- loaders ----
   async function loadBrowsers() {
@@ -150,6 +153,17 @@
       invoke("map_local_profile", { profileId, browserKind: b.kind, browserProfileDir: p.dir_name }));
   };
   const unmap = (m) => act(`unmap:${m.id}`, () => invoke("unmap_local_profile", { mappingId: m.id }));
+  const retryWrite = (m) => act(`write:${m.id}`, () => invoke("write_mapping_token_local", { mappingId: m.id }));
+  const checkExtension = (m) => act(`check:${m.id}`, async () => {});
+  async function installConnector(b) {
+    connectorMsg = { ...connectorMsg, [b.kind]: "Installing…" };
+    try {
+      await invoke("install_native_host", { browserKind: b.kind });
+      connectorMsg = { ...connectorMsg, [b.kind]: "Connector installed. Restart the browser." };
+    } catch (e) {
+      connectorMsg = { ...connectorMsg, [b.kind]: `Connector install failed: ${e}` };
+    }
+  }
 
   // ---- derived ----
   const signedIn = $derived(!!account?.signed_in);
@@ -327,6 +341,11 @@
               <span class="badge {ACCESS[b.access]?.cls ?? 'muted'}">{ACCESS[b.access]?.label ?? b.access}</span>
             </div>
             <div class="path">{b.user_data_dir}</div>
+            <div class="connector">
+              <button class="tiny-btn" onclick={() => installConnector(b)}
+                title="Registers Synchrome's native messaging connector for this browser (not a profile write).">Install connector</button>
+              {#if connectorMsg[b.kind]}<span class="pdir">{connectorMsg[b.kind]}</span>{/if}
+            </div>
             {#if b.profiles.length > 0}
               <ul class="profiles">
                 {#each b.profiles as p (p.dir_name)}
@@ -343,9 +362,16 @@
                         {#if m}
                           <span class="arrow">→</span>
                           <strong>{m.profile_name ?? "(unknown profile)"}</strong>
-                          <span class="badge small {MAP_STATUS[m.status]?.cls ?? 'muted'}">{MAP_STATUS[m.status]?.label ?? m.status}</span>
-                          <span class="pdir">{m.device_name ?? "this device"} · token {m.token_hint}</span>
+                          <span class="badge small {MAP_STATUS[m.display_status]?.cls ?? 'muted'}">{MAP_STATUS[m.display_status]?.label ?? m.display_status}</span>
+                          <span class="pdir">{m.device_name ?? "this device"}</span>
+                          {#if m.display_status !== "extension_confirmed"}
+                            <button class="tiny-btn" onclick={() => retryWrite(m)} disabled={busyKey === `write:${m.id}`}
+                              title="Writes the link into this browser profile. The browser must be closed.">Retry local write</button>
+                          {/if}
+                          <button class="tiny-btn" onclick={() => checkExtension(m)} disabled={busyKey === `check:${m.id}`}
+                            title="Re-reads the link status. The extension reconnects when the browser starts, or from its popup.">Check extension</button>
                           <button class="tiny-btn" onclick={() => unmap(m)} disabled={busyKey === `unmap:${m.id}`}>Unmap</button>
+                          {#if m.local_error}<span class="small bad">{m.local_error}</span>{/if}
                         {:else}
                           <button class="tiny-btn" onclick={() => createAndMap(b, p)} disabled={busyKey === `map:${key}`}>
                             {busyKey === `map:${key}` ? "…" : "Create Synchrome profile"}
@@ -424,6 +450,7 @@
   .profile-main { display: flex; align-items: center; gap: 10px; }
   .profile-map { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; padding-left: 12px; font-size: 13px; }
   .arrow { color: #5ac8be; }
+  .connector { display: flex; gap: 8px; align-items: center; margin: -2px 0 8px; }
   .pname { flex: 1; }
   .pdir { color: #6b7988; font-size: 12px; }
   .profiles-note { font-size: 12px; padding-top: 8px; }

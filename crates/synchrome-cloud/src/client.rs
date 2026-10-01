@@ -11,7 +11,7 @@ use synchrome_http::{HttpClient, HttpError};
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum CloudError {
     #[error("not signed in or session rejected (HTTP 401)")]
     Unauthorized,

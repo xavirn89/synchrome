@@ -4,9 +4,16 @@
 //! session, which lives exclusively in the OS credential store (macOS Keychain); cloud
 //! commands use that session inside Rust only. The webview receives token-free models:
 //! [`AccountStatus`], [`DeviceIdentity`], [`DeviceSummary`], [`ProfileSummary`],
-//! [`MappingSummary`]. Mapping commands only touch the cloud: nothing is written into any
-//! browser profile yet (the mapping token stays `pending_local_write`).
+//! [`MappingView`]. The only write into a browser profile is the mapping token, placed in the
+//! Synchrome extension's own `chrome.storage.local` store while the browser is closed
+//! (see [`local_token`]); the same binary serves as native messaging host (see [`host`]).
 
+#[cfg(debug_assertions)]
+mod devcli;
+mod host;
+mod local_token;
+
+use local_token::MappingView;
 use std::sync::Arc;
 use synchrome_auth::{
     AccountStatus, AuthClient, AuthError, KeychainStore, ReqwestTransport, Session, SessionManager,
@@ -298,26 +305,86 @@ async fn delete_profile(state: State<'_, AppState>, profile_id: Uuid) -> Result<
         .map_err(|e| e.to_string())
 }
 
-/// Every mapping of the account (all devices), as safe summaries.
+/// Summaries + local write state, for the UI. Never contains a token.
+pub(crate) async fn mapping_views(
+    state: &AppState,
+    session: &Session,
+    mappings: Vec<Mapping>,
+) -> Result<Vec<MappingView>, String> {
+    let registry = local_token::registry();
+    Ok(summarize(state, session, mappings)
+        .await?
+        .into_iter()
+        .map(|s| local_token::view(s, &registry))
+        .collect())
+}
+
+/// Write a mapping's token into the Synchrome extension store of its local profile.
+/// `udd_override` targets a specific user-data dir (dev validation with disposable profiles);
+/// otherwise the browser's default user-data dir on this machine is used.
+pub(crate) async fn write_token_for_mapping(
+    state: &AppState,
+    mapping_id: Uuid,
+    udd_override: Option<std::path::PathBuf>,
+) -> Result<MappingView, String> {
+    let session = state.session().await?;
+    let me = state.device()?.device_id;
+    let m = state
+        .cloud()?
+        .list_mappings(&session)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|m| m.id == mapping_id)
+        .ok_or_else(|| "mapping not found in this account".to_string())?;
+    if m.device_id != me {
+        return Err("this mapping belongs to another device".into());
+    }
+    let udd = match udd_override {
+        Some(p) => p,
+        None => synchrome_browser::user_data_dir(m.browser_kind)
+            .ok_or_else(|| "unsupported platform".to_string())?,
+    };
+    let written = local_token::write_token_local(&m, &session.user_id, &udd);
+    let view = mapping_views(state, &session, vec![m]).await?.remove(0);
+    written.map(|_| view)
+}
+
+/// Create the mapping's local half right after the cloud mapping exists. Failures (typically
+/// "browser is open") are recorded and shown as Error with a Retry action; they do not fail
+/// the mapping itself.
+async fn view_after_mapping(
+    state: &AppState,
+    session: &Session,
+    m: Mapping,
+) -> Result<MappingView, String> {
+    if let Some(udd) = synchrome_browser::user_data_dir(m.browser_kind) {
+        let _ = local_token::write_token_local(&m, &session.user_id, &udd);
+    }
+    Ok(mapping_views(state, session, vec![m]).await?.remove(0))
+}
+
+/// Every mapping of the account (all devices), with local write state.
 #[tauri::command]
-async fn list_mappings(state: State<'_, AppState>) -> Result<Vec<MappingSummary>, String> {
+async fn list_mappings(state: State<'_, AppState>) -> Result<Vec<MappingView>, String> {
     let session = state.session().await?;
     let mappings = state
         .cloud()?
         .list_mappings(&session)
         .await
         .map_err(|e| e.to_string())?;
-    summarize(&state, &session, mappings).await
+    mapping_views(&state, &session, mappings).await
 }
 
-/// Map a detected local profile on THIS device to an existing cloud profile.
+/// Map a detected local profile on THIS device to an existing cloud profile, then try to
+/// write its token locally.
 #[tauri::command]
 async fn map_local_profile(
     state: State<'_, AppState>,
     profile_id: Uuid,
     browser_kind: BrowserKind,
     browser_profile_dir: String,
-) -> Result<MappingSummary, String> {
+) -> Result<MappingView, String> {
     ensure_detected_local_profile(browser_kind, &browser_profile_dir)?;
     let session = state.session().await?;
     let device_id = ensure_device(&state, &session).await?;
@@ -332,18 +399,18 @@ async fn map_local_profile(
         )
         .await
         .map_err(|e| e.to_string())?;
-    Ok(summarize(&state, &session, vec![m]).await?.remove(0))
+    view_after_mapping(&state, &session, m).await
 }
 
-/// "Create Synchrome profile" from a local profile: create the cloud profile, then map it.
-/// If mapping fails, the just-created cloud profile is deleted so nothing is left orphaned.
+/// "Create Synchrome profile" from a local profile: create the cloud profile, map it, then try
+/// the local token write. If mapping fails, the just-created cloud profile is deleted again.
 #[tauri::command]
 async fn create_and_map_local_profile(
     state: State<'_, AppState>,
     name: String,
     browser_kind: BrowserKind,
     browser_profile_dir: String,
-) -> Result<MappingSummary, String> {
+) -> Result<MappingView, String> {
     ensure_detected_local_profile(browser_kind, &browser_profile_dir)?;
     let session = state.session().await?;
     let device_id = ensure_device(&state, &session).await?;
@@ -362,7 +429,7 @@ async fn create_and_map_local_profile(
         )
         .await
     {
-        Ok(m) => Ok(summarize(&state, &session, vec![m]).await?.remove(0)),
+        Ok(m) => view_after_mapping(&state, &session, m).await,
         Err(map_err) => {
             let rollback = cloud.delete_profile(&session, profile.id).await;
             Err(match rollback {
@@ -377,6 +444,8 @@ async fn create_and_map_local_profile(
     }
 }
 
+/// Unmap in the cloud. The local registry entry is kept on purpose: if the extension later
+/// presents that token, the handshake can report "mapping deleted" instead of "unknown".
 #[tauri::command]
 async fn unmap_local_profile(state: State<'_, AppState>, mapping_id: Uuid) -> Result<(), String> {
     let session = state.session().await?;
@@ -387,13 +456,34 @@ async fn unmap_local_profile(state: State<'_, AppState>, mapping_id: Uuid) -> Re
         .map_err(|e| e.to_string())
 }
 
+/// Retry writing the mapping token into the local extension store (browser must be closed).
+#[tauri::command]
+async fn write_mapping_token_local(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+) -> Result<MappingView, String> {
+    write_token_for_mapping(&state, mapping_id, None).await
+}
+
+/// Register the native messaging host for a browser (writes its NativeMessagingHosts manifest,
+/// which is not a browser profile and is not TCC-protected). Returns the manifest path.
+#[tauri::command]
+fn install_native_host(browser_kind: BrowserKind) -> Result<String, String> {
+    let udd = synchrome_browser::user_data_dir(browser_kind)
+        .ok_or_else(|| "unsupported platform".to_string())?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    synchrome_browser::install_native_host(&udd, &exe)
+        .map(|p| p.display().to_string())
+        .map_err(|e| e.to_string())
+}
+
 /// Mapping of a local profile on THIS device, if any.
 #[tauri::command]
 async fn mapping_for_local_profile(
     state: State<'_, AppState>,
     browser_kind: BrowserKind,
     browser_profile_dir: String,
-) -> Result<Option<MappingSummary>, String> {
+) -> Result<Option<MappingView>, String> {
     let session = state.session().await?;
     let me = state.device()?.device_id;
     let found = state
@@ -402,7 +492,7 @@ async fn mapping_for_local_profile(
         .await
         .map_err(|e| e.to_string())?;
     match found {
-        Some(m) => Ok(summarize(&state, &session, vec![m]).await?.pop()),
+        Some(m) => Ok(mapping_views(&state, &session, vec![m]).await?.pop()),
         None => Ok(None),
     }
 }
@@ -412,14 +502,25 @@ async fn mapping_for_local_profile(
 async fn mapping_for_cloud_profile(
     state: State<'_, AppState>,
     profile_id: Uuid,
-) -> Result<Vec<MappingSummary>, String> {
+) -> Result<Vec<MappingView>, String> {
     let session = state.session().await?;
     let mappings = state
         .cloud()?
         .mapping_for_cloud_profile(&session, profile_id)
         .await
         .map_err(|e| e.to_string())?;
-    summarize(&state, &session, mappings).await
+    mapping_views(&state, &session, mappings).await
+}
+
+/// Native messaging host mode (see [`host`]).
+pub fn run_native_host(origin: &str) -> i32 {
+    host::run(origin)
+}
+
+/// Development-only CLI (see [`devcli`]).
+#[cfg(debug_assertions)]
+pub fn run_dev_cli(args: &[String]) -> i32 {
+    devcli::run(args)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -445,6 +546,8 @@ pub fn run() {
             map_local_profile,
             create_and_map_local_profile,
             unmap_local_profile,
+            write_mapping_token_local,
+            install_native_host,
             mapping_for_local_profile,
             mapping_for_cloud_profile
         ])

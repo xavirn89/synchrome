@@ -12,6 +12,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 synchrome-types = { workspace = true }
+rusty-leveldb = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
