@@ -10,6 +10,7 @@ description = "Common HTTP client for Synchrome: mandatory User-Agent, timeouts,
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 synchrome-types = { workspace = true }
 
 [dev-dependencies]

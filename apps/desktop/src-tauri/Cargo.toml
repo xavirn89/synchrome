@@ -21,3 +21,4 @@ synchrome-types = { workspace = true }
 synchrome-browser = { workspace = true }
 synchrome-config = { workspace = true }
 synchrome-supabase = { workspace = true }
+synchrome-auth = { workspace = true }

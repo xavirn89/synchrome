@@ -87,6 +87,31 @@ impl HttpClient {
         synchrome_types::user_agent()
     }
 
+    /// POST a JSON body and return `(status, body_bytes)`. Network/TLS/timeout failures are
+    /// `HttpError::Unreachable`; any HTTP status (including 4xx/5xx) is returned to the caller
+    /// so it can parse the service's own error payload. No retries, no auth logic.
+    pub async fn post_json(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &serde_json::Value,
+    ) -> Result<(u16, Vec<u8>), HttpError> {
+        let mut req = self.inner.post(url).json(body);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| HttpError::Unreachable(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| HttpError::Unreachable(e.to_string()))?;
+        Ok((status, bytes.to_vec()))
+    }
+
     /// Perform a GET with optional extra headers and return a [`Probe`]. Never panics; network
     /// failures become `Outcome::Unreachable`. The response body is discarded (read-only probe).
     pub async fn probe_get(&self, url: &str, headers: &[(&str, &str)]) -> Probe {

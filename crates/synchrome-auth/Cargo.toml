@@ -1,0 +1,20 @@
+[package]
+name = "synchrome-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "User authentication against Synchrome Cloud (GoTrue): sessions, OS credential store, login/refresh/logout."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+keyring = { workspace = true }
+synchrome-config = { workspace = true }
+synchrome-http = { workspace = true }
+synchrome-types = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
