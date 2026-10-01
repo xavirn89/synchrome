@@ -136,9 +136,8 @@
   const mappingFor = (b, p) =>
     mappings.find((m) => m.is_this_device && m.browser_kind === b.kind && m.browser_profile_dir === p.dir_name);
   const mappingsOf = (profileId) => mappings.filter((m) => m.profile_id === profileId);
-  const mappableProfiles = $derived(
-    profiles.filter((cp) => !mappings.some((m) => m.is_this_device && m.profile_id === cp.id)),
-  );
+  // A cloud profile may map to several local profiles (even on this device), so all are offered.
+  const mappableProfiles = $derived(profiles);
 
   const createAndMap = (b, p) => act(`map:${localKey(b, p)}`, () =>
     invoke("create_and_map_local_profile", {

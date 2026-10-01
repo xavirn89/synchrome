@@ -13,7 +13,7 @@ type StoreId   = string;   // UUID v4, written into store.json when the store is
 - A **device** is one agent installation (one OS user account on one machine). Its id never changes; a reinstall creates a new device, old journals remain valid.
 - A **Synchrome profile** is an abstract "Personal / Work / Dev" identity that lives in exactly one store. It is *not* a Chromium profile.
 - A **mapping** binds, on one device, a Synchrome profile to one local Chromium profile: `(deviceId, profileId) → { browser, userDataDir, profileDir }`. Mappings are device-local configuration and are also published to the store (in the device record) for display ("Work is mapped on 3 devices"). Local folder names (`Profile 2`, `Default`) therefore never matter to the sync model.
-- A Chromium profile can be mapped to at most one Synchrome profile; a Synchrome profile can be mapped to at most one local profile per device.
+- A Chromium profile can be mapped to at most one Synchrome profile. A Synchrome profile can be mapped to any number of local profiles, including several on the same device (e.g. "Personal" in both Helium and Chrome on one Mac) — decision of 2026-10-01, enforced by `profile_mappings` in migration 0003.
 
 The device record in the store:
 

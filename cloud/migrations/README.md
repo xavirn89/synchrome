@@ -136,13 +136,16 @@ PostgREST picks up new tables automatically (schema cache reload on DDL via `pg_
 | `profile_mappings_profile_fk` | FK `(account_id, profile_id) → profiles(account_id, id)` **ON DELETE RESTRICT** | a mapped cloud profile cannot be deleted; unmap first |
 | `profile_mappings_device_fk` | FK `(account_id, device_id) → devices(account_id, device_id)` **ON DELETE CASCADE** | removing a device removes its mappings |
 | `profile_mappings_local_unique` | unique `(device_id, browser_kind, browser_profile_dir)` | one mapping per local profile |
-| `profile_mappings_profile_device_unique` | unique `(profile_id, device_id)` | a cloud profile maps to ≤1 local profile **per device** (docs/03 §1); many devices allowed |
 | `profile_mappings_token_unique` | unique `(mapping_token)` | |
 | checks | `browser_kind ∈ {helium,chrome,brave,edge,chromium}`; dir is a bare name (1–255 chars, no `/` `\`, not `.`/`..`); token `^[0-9a-f]{64}$`; `token_state ∈ {pending_local_write,confirmed}`; `confirmed ⇔ token_confirmed_at not null` | |
 | 3 indexes, `updated_at` trigger | | reuses `synchrome_set_updated_at()` from 0002 |
 | `profile_mappings_select/insert/update/delete` | RLS policies | `account_id = auth.uid()`, role `authenticated` |
 | grants | column-level | `revoke all` from anon+authenticated, then: `select, delete` (table); `insert (profile_id, device_id, browser_kind, browser_profile_dir, mapping_token)`; `update (token_state, token_confirmed_at)` → clients can never set `account_id` or rewrite a mapping's identity/token |
 | hardening | `revoke all on devices, profiles from anon` | defense in depth (anon already 401 today) |
+
+**One cloud profile, many local profiles:** there is deliberately **no** `unique (profile_id, device_id)`. The same cloud profile may be mapped to several local profiles on the same device (e.g. "Personal" → Helium/Profile 1 and Chrome/Profile 3) and from any number of devices. Only a concrete local profile is limited to a single mapping.
+
+**Known technical debt — `devices.device_id` is a global primary key.** It is generated per installation, so if a second account signs in on the same installation its device upsert collides with the first account's row and is rejected (RLS → 403), and that account cannot register the device or create mappings. This must be fixed before supporting multiple accounts per installation, most likely by migrating `devices` to a composite PK `(account_id, device_id)` (the composite FKs added here already reference `(account_id, device_id)`, so they keep working). Not changed in 0003.
 
 **Why composite FKs:** Postgres FK checks bypass RLS. With a plain `profile_id → profiles(id)` FK, user B could insert a mapping that references user A's profile by UUID. Pinning `account_id` into the FK (and `account_id = auth.uid()` via RLS `with check`) makes cross-account references impossible.
 

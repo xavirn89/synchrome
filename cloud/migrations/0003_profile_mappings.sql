@@ -17,9 +17,11 @@
 --   * Deleting a device row CASCADES to its mappings (mappings are device-local state).
 --   * Uniqueness:
 --       - a local profile (device, browser, profile dir) is mapped at most once;
---       - a cloud profile is mapped to at most one local profile per device (docs/03 §1);
---         the same cloud profile CAN be mapped from different devices;
+--       - a cloud profile MAY be mapped to several local profiles, on the same device
+--         (e.g. Helium/Profile 1 and Chrome/Profile 3) and on other devices;
 --       - mapping_token is globally unique (64 lowercase hex chars, 256 bits).
+--   * Known debt (not changed here): public.devices.device_id is a global PK, so a second
+--     account on the same installation collides; see cloud/migrations/README.md §0003.
 --   * Column-level grants: clients may insert only the identifying columns and update only
 --     the token state; they can never set account_id or rewrite a mapping's identity/token.
 --
@@ -76,8 +78,6 @@ create table if not exists public.profile_mappings (
 
   constraint profile_mappings_local_unique
     unique (device_id, browser_kind, browser_profile_dir),
-  constraint profile_mappings_profile_device_unique
-    unique (profile_id, device_id),
   constraint profile_mappings_token_unique
     unique (mapping_token),
 

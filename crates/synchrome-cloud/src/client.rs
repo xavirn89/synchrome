@@ -29,7 +29,7 @@ pub enum CloudError {
     #[error("invalid response: {0}")]
     InvalidResponse(String),
     /// Unique constraint violated (Postgres 23505), e.g. local profile already mapped,
-    /// duplicate profile name, cloud profile already mapped on this device.
+    /// duplicate profile name, mapping token collision.
     #[error("conflict: {0}")]
     Conflict(String),
     /// Foreign key violated (Postgres 23503) on insert/update: the referenced profile or

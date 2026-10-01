@@ -551,12 +551,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_cloud_profile_can_map_two_local_profiles_on_one_device() {
+        // "Personal" -> Helium/Profile 1 and Chrome/Profile 3 on the same device.
+        let helium = mapping_row(DEV1, "Profile 1", "pending_local_write");
+        let chrome = mapping_row(DEV1, "Profile 3", "pending_local_write")
+            .replace("\"browser_kind\":\"helium\"", "\"browser_kind\":\"chrome\"");
+        let c = client(vec![("A", 201, helium), ("A", 201, chrome)]);
+        let m1 = c
+            .map_local_profile(
+                &s("A"),
+                uid(PID),
+                uid(DEV1),
+                BrowserKind::Helium,
+                "Profile 1",
+            )
+            .await
+            .unwrap();
+        let m2 = c
+            .map_local_profile(
+                &s("A"),
+                uid(PID),
+                uid(DEV1),
+                BrowserKind::Chrome,
+                "Profile 3",
+            )
+            .await
+            .unwrap();
+        assert_eq!((m1.profile_id, m1.device_id), (m2.profile_id, m2.device_id));
+        assert_eq!(m1.browser_kind, BrowserKind::Helium);
+        assert_eq!(m2.browser_kind, BrowserKind::Chrome);
+        let seen = c.transport.seen();
+        assert_eq!(seen[1].2.as_ref().unwrap()["browser_kind"], "chrome");
+        assert_eq!(seen[1].2.as_ref().unwrap()["profile_id"], PID);
+    }
+
+    #[tokio::test]
     async fn duplicate_local_mapping_and_token_collision_are_conflicts() {
         let c = client(vec![
             ("A", 409, pg_err("23505")),
             ("A", 409, pg_err("23505")),
         ]);
-        // same (device, browser, dir) mapped twice, or same cloud profile twice on this device
+        // the same local profile (device, browser, dir) mapped twice
         assert!(matches!(
             c.map_local_profile(
                 &s("A"),
