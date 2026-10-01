@@ -1,8 +1,10 @@
 //! Synchrome desktop (Tauri 2) application entry point.
 //!
-//! Milestone 1 exposes a single read-only command, [`list_browsers`], that returns the
-//! discovered browsers and profiles with their access state. No profile is modified.
+//! Milestone 1 commands are all read-only: [`list_browsers`] discovers browsers/profiles,
+//! [`cloud_status`] probes Synchrome Cloud connectivity, [`app_version`] reports the build.
+//! No profile is modified, no user is authenticated, nothing is written anywhere.
 
+use synchrome_supabase::CloudStatus;
 use synchrome_types::DiscoveredBrowser;
 
 /// Tauri command: discover installed Chromium-family browsers and their profiles (read-only).
@@ -17,17 +19,29 @@ fn app_version() -> String {
     synchrome_types::user_agent()
 }
 
+/// Tauri command: read-only connectivity probe of Synchrome Cloud (Auth, PostgREST, Storage).
+///
+/// Loads the client configuration from the environment / `.env`; if it is missing the result
+/// explains which variable is absent instead of failing the command.
+#[tauri::command]
+async fn cloud_status() -> CloudStatus {
+    match synchrome_config::AppConfig::load() {
+        Err(e) => CloudStatus::unconfigured(e.to_string()),
+        Ok(cfg) => match synchrome_supabase::cloud_status(&cfg.supabase).await {
+            Ok(status) => status,
+            Err(e) => CloudStatus::unconfigured(format!("http client error: {e}")),
+        },
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener_noop())
-        .invoke_handler(tauri::generate_handler![list_browsers, app_version])
+        .invoke_handler(tauri::generate_handler![
+            list_browsers,
+            app_version,
+            cloud_status
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Synchrome");
-}
-
-/// Placeholder no-op "plugin" slot kept so the builder chain is easy to extend later.
-/// Returns an identity plugin; real plugins (updater, autostart) arrive in later milestones.
-fn tauri_plugin_opener_noop() -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    tauri::plugin::Builder::new("synchrome-noop").build()
 }

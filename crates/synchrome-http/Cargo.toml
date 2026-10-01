@@ -1,0 +1,16 @@
+[package]
+name = "synchrome-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Common HTTP client for Synchrome: mandatory User-Agent, timeouts, typed errors."
+
+[dependencies]
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+synchrome-types = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

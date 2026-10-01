@@ -1,0 +1,15 @@
+[package]
+name = "synchrome-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Client configuration loading (env + .env). Publishable values only; no admin secrets."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+dotenvy = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

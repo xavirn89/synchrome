@@ -19,3 +19,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 synchrome-types = { workspace = true }
 synchrome-browser = { workspace = true }
+synchrome-config = { workspace = true }
+synchrome-supabase = { workspace = true }

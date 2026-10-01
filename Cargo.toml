@@ -7,6 +7,8 @@ members = [
     "crates/synchrome-supabase",
     "crates/synchrome-sync",
     "crates/synchrome-bridge",
+    "crates/synchrome-config",
+    "crates/synchrome-http",
     "apps/desktop/src-tauri",
 ]
 
@@ -27,3 +29,8 @@ synchrome-storage = { path = "crates/synchrome-storage" }
 synchrome-supabase = { path = "crates/synchrome-supabase" }
 synchrome-sync = { path = "crates/synchrome-sync" }
 synchrome-bridge = { path = "crates/synchrome-bridge" }
+synchrome-config = { path = "crates/synchrome-config" }
+synchrome-http = { path = "crates/synchrome-http" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+dotenvy = "0.15"
