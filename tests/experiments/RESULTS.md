@@ -200,3 +200,27 @@ Observed (Helium): dummy `aplnkbnomlpnifbafnbgcdfpoelnndlk`, `mayDisable: true`.
 **Design implication (firm, robust to the uncertainty):** Synchrome should **attempt `setEnabled` from the background first** (it may succeed with no UI, as here) and **fall back to a popup "Apply" click** (user gesture) when it errors. Never assume it is silent on every build; never try to toggle `mayDisable:false` extensions. This is exactly the attempt-then-gesture path already in `02` §2.2 / `05` §1.2.
 
 **Verdict: PARTIAL** — mechanism confirmed working unattended on Helium for a dev extension; the Web-Store/branded-Chrome case remains to confirm (will be covered once the real Web Store extension exists). Design is safe either way.
+
+## E8 — profile identification by pre-seeding mappingToken — PASS
+
+**Hypothesis:** the app can write a `mappingToken` into `Local Extension Settings/<ext-id>/` before the browser launches, and the extension reads it via `chrome.storage.local`, learning which Synchrome profile it maps to.
+**Result: confirmed on Helium.**
+
+Procedure (disposable profile): deterministic ext id `bahaodcchlkcffhkjkemenhdomfnjekm` derived from the manifest `key` (RSA pubkey → SHA256 → a–p mapping); created `Default/Local Extension Settings/<id>/` and seeded `mappingToken = {token, profileId, deviceId}` with **classic-level** (an external LevelDB writer standing in for the Rust app); our own reader confirmed the seed; launched the probe (same id); the probe's SW called `chrome.storage.local.get('mappingToken')` and recorded the value. Readback **equalled the seeded object exactly**. PASS.
+
+**What this proves:**
+1. An external process can create a LevelDB store that Chromium's `chrome.storage.local` reads — not just copy an existing one (E4) but author a fresh one. (Validated with classic-level, whose leveldb is format-compatible with Chromium's; production uses the Rust codec in `crates/browser`.)
+2. A deterministic extension id (manifest `key`) lets the app know the store path in advance — so it can seed per profile before launch.
+3. The seed→read handshake gives the app a reliable, per-profile identification channel without the extension needing filesystem access.
+
+**Portable / bound:**
+- `mappingToken` is a **local handshake**, intentionally not synced: bound to **profile** (store is per-profile) + **extension id** (installation-level, fixed by the Web Store key) + **browser** (LevelDB format). Not cross-device.
+- The deterministic id is bound to the **installation** (manifest key), identical across all installs of the Synchrome extension.
+
+**Corruption / timing risks:** the seed must be written **while the profile is closed** (LevelDB `LOCK` is held when the browser has the store open); writing to a live profile is ignored/overwritten. So the handshake is: app seeds token while the profile is closed → next launch, the extension reads it. If the profile is already open, fall back to the user confirming the mapping in the app (as designed in `05` §3.1).
+
+**Design implication:** `05` §3.1's profile-identification handshake is viable as specified. The app seeds a per-profile `mappingToken` into the Synchrome extension's `storage.local` before the browser opens that profile; the extension echoes it in `hello`; the daemon matches it to a mapping. User confirmation remains the fallback for already-open profiles or externally-installed extensions.
+
+**Verdict: PASS** (Helium; browser-independent mechanism, Chrome CLI load unavailable but the format/semantics are identical).
+
+> Note: `e8_seed.js` references `classic-level` installed under `/tmp/e8seed/` for the experiment; it is not a repo dependency. Production writes the store with the Rust LevelDB codec.
