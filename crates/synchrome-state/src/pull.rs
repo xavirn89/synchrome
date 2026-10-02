@@ -178,7 +178,7 @@ fn apply_remote_op(
     let open = crate::conflict::open_for(tx, pid, &op.id)?;
     let hold = match &open {
         Some(c) => c.status == ConflictStatus::Unresolved && c.kind != ConflictKind::Orphan,
-        None => local_pending,
+        None => local_pending && relevant(tx, pid, published_through, &row, op)?,
     };
     if hold {
         crate::conflict::hold(tx, pid, open, op, published_through, now)?;
@@ -186,6 +186,57 @@ fn apply_remote_op(
     }
     apply_lww(tx, pid, op)?;
     Ok(false)
+}
+
+/// Whether a remote op would change anything against this device's state BEFORE its
+/// unpublished edits (the BASE values and their HLCs). A stale op — one that per-field LWW
+/// discards even without the local edits (e.g. another device's old edit, published late
+/// while that device sorted out its own conflict) — is not concurrent with them: it merges
+/// normally (and loses) instead of opening a conflict. Without a BASE record, it is held.
+fn relevant(
+    tx: &Transaction<'_>,
+    pid: &str,
+    published: i64,
+    row: &Row,
+    op: &Op,
+) -> Result<bool, StateError> {
+    let base: Option<String> = tx
+        .query_row(
+            "SELECT base FROM entities WHERE profile_id = ?1 AND sid = ?2",
+            params![pid, op.id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(rec) = base
+        .as_deref()
+        .and_then(|b| serde_json::from_str::<crate::capture::BaseRec>(b).ok())
+        .filter(|b| b.seq > published)
+    else {
+        return Ok(true);
+    };
+    // the HLC each field had before the local edits
+    let before = |k: &str| -> Option<&str> {
+        if rec.f.contains_key(k) {
+            rec.h.get(k).map(String::as_str)
+        } else {
+            row.field_hlc.get(k).map(String::as_str)
+        }
+    };
+    Ok(match op.op {
+        OpKind::Set => op.fields.iter().flatten().any(|(k, _)| {
+            COLUMN.iter().any(|(f, _)| f == k) && before(k).map_or(true, |h| h < op.hlc.as_str())
+        }),
+        OpKind::Delete => {
+            let newest = row
+                .field_hlc
+                .keys()
+                .filter_map(|k| before(k))
+                .max()
+                .unwrap_or("");
+            newest < op.hlc.as_str()
+        }
+    })
 }
 
 /// Merge one remote op into the materialised state by per-field LWW (no conflict check).

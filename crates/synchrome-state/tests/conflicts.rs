@@ -898,3 +898,59 @@ async fn a_remote_change_that_only_restores_the_base_does_not_conflict() {
     );
     assert_eq!(a.br.tree(), b.br.tree());
 }
+
+#[tokio::test]
+async fn keep_remote_resolution_reaching_a_device_that_edits_again_is_not_a_conflict() {
+    let (mut w, mut a, mut b) = setup().await;
+    retitle(&mut b, "Bookmark 1", "H1 by B");
+    capture(&w, &mut b);
+    retitle(&mut a, "Bookmark 1", "H1 a1");
+    w.local(&mut a).await;
+    retitle(&mut a, "H1 a1", "H1 a2");
+    w.local(&mut a).await;
+    reurl(&mut a, "H1 a2", "https://a.example/a3");
+    w.local(&mut a).await;
+    pull_only(&w, &mut b).await;
+    let c = open(&w, &mut b).remove(0);
+    resolve(&w, &mut b, &c.conflict_id, Resolution::KeepRemote);
+    w.remote(&mut b, 1 << 20).await; // publishes the resolution op, applies it
+                                     // A edits again before it has seen B's resolution, then syncs (pull before publish)
+    retitle(&mut a, "H1 a2", "H1 a4");
+    capture(&w, &mut a);
+    let out = pull_only(&w, &mut a).await;
+    let all_a = all(&w, &mut a);
+    assert!(open(&w, &mut a).is_empty(), "{out:?} {:#?}", all_a);
+    converge(&mut w, &mut a, &mut b).await;
+    assert!(titles(&b).contains(&"H1 a4".to_string()));
+    assert_eq!(a.br.tree(), b.br.tree());
+}
+
+#[tokio::test]
+async fn a_stale_remote_op_published_late_does_not_conflict_with_a_newer_local_edit() {
+    let (mut w, mut a, mut b) = setup().await;
+    // B edits X (unpublished, older), A edits X later and publishes: B is in conflict
+    retitle(&mut b, "Bookmark 1", "old B edit");
+    capture(&w, &mut b);
+    retitle(&mut a, "Bookmark 1", "A one");
+    w.local(&mut a).await;
+    pull_only(&w, &mut b).await;
+    assert_eq!(open(&w, &mut b).len(), 1);
+    // A edits X again (unpublished) while B publishes its old edit (B's sync = pull + publish)
+    retitle(&mut a, "A one", "A two");
+    capture(&w, &mut a);
+    w.remote(&mut b, 1 << 20).await;
+    let out = pull_only(&w, &mut a).await;
+    // B's op is older than A's already-published "A one": LWW discards it anyway
+    assert!(
+        matches!(out, PullOutcome::Pulled(PullStats { conflicts: 0, .. })),
+        "{out:?}"
+    );
+    assert!(open(&w, &mut a).is_empty());
+    assert!(titles(&a).contains(&"A two".to_string()));
+    // B decides; everyone converges
+    let c = open(&w, &mut b).remove(0);
+    resolve(&w, &mut b, &c.conflict_id, Resolution::KeepRemote);
+    converge(&mut w, &mut a, &mut b).await;
+    assert!(open(&w, &mut a).is_empty() && open(&w, &mut b).is_empty());
+    assert_eq!(a.br.tree(), b.br.tree());
+}

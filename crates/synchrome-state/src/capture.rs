@@ -230,6 +230,9 @@ pub(crate) struct BaseRec {
     pub seq: i64,
     #[serde(default)]
     pub f: std::collections::BTreeMap<String, serde_json::Value>,
+    /// HLCs of those pre-edit values (`deleted` = the previous tombstone HLC, if any).
+    #[serde(default)]
+    pub h: std::collections::BTreeMap<String, String>,
 }
 
 /// Stamp changes with seq/HLC, write ops + chunk accounting + dirty state. Returns #ops.
@@ -365,6 +368,12 @@ pub(crate) fn persist(
             )?;
             let mut fh: std::collections::BTreeMap<String, String> =
                 serde_json::from_str(&cur).unwrap_or_default();
+            let prior_hlc = fh.clone();
+            let prior_deleted_hlc: Option<String> = tx.query_row(
+                "SELECT deleted_hlc FROM entities WHERE profile_id = ?1 AND sid = ?2",
+                params![pid, sid],
+                |r| r.get(0),
+            )?;
             for (k, h) in &t.fields {
                 fh.insert(k.clone(), h.clone());
             }
@@ -377,6 +386,7 @@ pub(crate) fn persist(
                     .unwrap_or(BaseRec {
                         seq: t.first_seq,
                         f: Default::default(),
+                        h: Default::default(),
                     });
                 let names = t
                     .fields
@@ -387,6 +397,14 @@ pub(crate) fn persist(
                     if !rec.f.contains_key(k) {
                         if let Some(v) = prior_value(k, p) {
                             rec.f.insert(k.to_string(), v);
+                            let h = if k == "deleted" {
+                                prior_deleted_hlc.clone()
+                            } else {
+                                prior_hlc.get(k).cloned()
+                            };
+                            if let Some(h) = h {
+                                rec.h.insert(k.to_string(), h);
+                            }
                         }
                     }
                 }
