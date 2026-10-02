@@ -209,7 +209,11 @@ async function sendSnapshot(p, force = false) {
   }
   const sid = crypto.randomUUID();
   let last = null;
+  let status = null;
   for (let i = 0; i < parts.length; i++) {
+    // Register the status waiter BEFORE sending the last part: the app may answer the ack and
+    // the status back to back, and a waiter registered later would miss it.
+    if (i === parts.length - 1) status = statusAfter(p);
     p.post({ type: "bookmarks_snapshot", snapshot_id: sid, epoch, covers_through: covers, part: i, parts: parts.length, nodes: parts[i] });
     last = await p.wait(isAck(`${sid}:${i}`), ACK_TIMEOUT_MS);
     if (!last || last.result === "rejected") return false;
@@ -218,14 +222,14 @@ async function sendSnapshot(p, force = false) {
   await chrome.storage.session.set({ [SNAPSHOT_HASH_KEY]: hash });
   needSnapshot = false;
   queue = queue.filter((e) => e.n > covers); // already reflected in the tree
-  await afterAck(p);
+  await status;
   return true;
 }
 
 // After an applied/duplicate ack the app publishes (bounded) and then sends sync_status.
 // Keep the port open until then: the browser terminates the host shortly after a disconnect.
 const STATUS_TIMEOUT_MS = 30000;
-function afterAck(p) {
+function statusAfter(p) {
   return p.wait((m) => m.type === "sync_status", STATUS_TIMEOUT_MS);
 }
 
@@ -234,6 +238,7 @@ async function sendEvents(p) {
   while (queue.length) {
     const batch = nextBatch();
     const id = `${epoch}:${batch[0].n}`;
+    const status = statusAfter(p); // before posting, see sendSnapshot
     p.post({ type: "bookmarks_events", epoch, batch_id: id, events: batch });
     const ack = await p.wait(isAck(id), ACK_TIMEOUT_MS);
     if (!ack || ack.result === "rejected") return false;
@@ -246,7 +251,7 @@ async function sendEvents(p) {
     }
     const last = batch[batch.length - 1].n;
     queue = queue.filter((e) => e.n > last);
-    await afterAck(p);
+    await status;
   }
   return true;
 }

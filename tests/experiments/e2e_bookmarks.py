@@ -208,9 +208,12 @@ def main(creds):
           rows(c1) == KNOWN and [r[:6] for r in c1["tree"]] == [r[:6] for r in local["tree"]] and c1.get("seq_contiguous"),
           json.dumps(rows(c1)))
 
-    # 10: repeated snapshot (forced, same browser session)
-    hl.js("chrome.storage.session.clear().then(() => { needSnapshot = true; return run(true); })")
-    time.sleep(2)
+    # 10: repeated snapshot (forced, same browser session) must travel on its own and give 0 ops
+    mark = os.path.getsize(h.LOG)
+    hl.js("chrome.storage.session.clear().then(() => { needSnapshot = true; return run(true); })", timeout=90)
+    seen = open(h.LOG, "rb").read()[mark:].decode("utf-8", "replace")
+    check("10a forced repeated snapshot reached the app on its own and produced 0 ops",
+          "bookmarks snapshot parts=1 nodes=8 -> Ok(Applied { ops: 0, pending: 0 })" in seen, "")
     c = dev("--dev-cloud-tree", pid)
     s = dev("--dev-bookmarks-status", mid).get("status") or {}
     check("10 repeated snapshot: 0 new ops, 0 new chunks, 0 new store_events",
