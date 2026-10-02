@@ -300,6 +300,17 @@ fn observe(e: &mut ExtRow, info: &ExtInfo, out: &mut Vec<Pending>) {
         e.local_state = Some("user_action_required".into());
         None
     };
+    if e.local_state.as_deref() == Some("protected") {
+        if !info.may_disable {
+            return; // still not changeable here: nothing to apply, nothing to publish
+        }
+        // Chromium lets it be changed again: bring it to the synchronised state
+        e.local_state = None;
+        if !e.deleted && user_value.is_some() && user_value != Some(e.enabled) {
+            e.pending_apply = true;
+            e.pending_fields.insert("enabled".into());
+        }
+    }
     if fresh {
         e.name = ex::clean_name(&info.name);
         e.version = ex::clean_version(&info.version);

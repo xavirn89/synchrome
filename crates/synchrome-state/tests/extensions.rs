@@ -774,3 +774,22 @@ async fn remove_here_needing_a_gesture_is_finished_from_the_popup() {
     assert_eq!(cloud_ext_ops(&w).len(), n);
     assert!(b.d.db.ext_views(w.profile).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn protected_recovers_when_chromium_allows_changes_again() {
+    let (w, mut a, mut b) = both_have_x().await;
+    b.m.exts.get_mut(X).unwrap().may_disable = false;
+    snap(&w, &mut b);
+    a.m.set(X, false);
+    local(&w, &mut a).await;
+    remote(&w, &mut b).await;
+    assert_eq!(view(&w, &b, X).state, ExtState::Protected);
+    let n = cloud_ext_ops(&w).len();
+    // policy lifted: the synchronised state is applied, nothing published
+    b.m.exts.get_mut(X).unwrap().may_disable = true;
+    let (done, echoes) = remote(&w, &mut b).await;
+    assert_eq!((done, echoes), (1, 0));
+    assert!(!b.m.exts[X].enabled);
+    assert_eq!(view(&w, &b, X).state, ExtState::Synced);
+    assert_eq!(cloud_ext_ops(&w).len(), n);
+}

@@ -1,0 +1,7 @@
+{
+  "manifest_version": 3,
+  "name": "Synchrome Test Theme",
+  "version": "1.0.0",
+  "description": "Inert theme used only by Synchrome's end-to-end tests (themes are not synchronised).",
+  "theme": { "colors": { "frame": [40, 60, 80] } }
+}
