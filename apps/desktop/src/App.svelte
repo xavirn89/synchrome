@@ -642,7 +642,7 @@
         <button class="tiny-btn" onclick={() => applyPrefsMode(m, chosen)} disabled={busyKey === `prefs:${m.id}`}>{chosen === "off" ? "Disable" : "Enable"}</button>
       {/if}
       {#if pv && pv.mode !== "off"}
-        <span class="pdir">{pv.synced} preferences synced · {pv.unsupported} unsupported · {pv.pending} pending · {pv.conflicts} conflicts</span>
+        <span class="pdir">{pv.synced} preferences synced · {pv.unsupported} unsupported · {pv.pending} pending · {pv.conflicts} conflicts{pv.invalid ? ` · ${pv.invalid} invalid` : ""}</span>
         {#if ["error", "waiting_for_browser_close", "version_mismatch", "unsupported"].includes(pv.state)}
           <button class="tiny-btn" onclick={() => prefsNow(m)} disabled={busyKey === `prefs:${m.id}`}>Retry</button>
         {/if}

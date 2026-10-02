@@ -22,8 +22,8 @@ pub use ext_storage::{
 pub use native_host::{host_manifest, install_native_host};
 pub use paths::user_data_dir;
 pub use prefs_file::{
-    apply_preferences, browser_last_version, preferences_path, read_preferences, PrefEdit,
-    PrefsError, PrefsReport,
+    apply_preferences, browser_last_version, preferences_path, read_preferences, strip_members,
+    PrefEdit, PrefsError, PrefsReport,
 };
 
 use thiserror::Error;

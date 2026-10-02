@@ -49,6 +49,9 @@ pub async fn prefs_cycle(state: &AppState, profile_id: Uuid) -> Result<CycleRepo
     else {
         return Ok(rep);
     };
+    // debug builds only: simulate a browser kind that is not validated (E2E, disposable profile)
+    #[cfg(debug_assertions)]
+    let kind = std::env::var("SYNCHROME_DEV_PREFS_BROWSER_KIND").unwrap_or(kind);
     let Some(src) = db.source_of(profile_id).map_err(|e| e.to_string())? else {
         return Ok(rep);
     };

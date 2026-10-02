@@ -588,6 +588,41 @@ fn splice_remove(b: &[u8], segs: &[&str]) -> Result<Option<Vec<u8>>, PrefsError>
     Ok(None)
 }
 
+/// The original bytes with the members at `paths` removed (and parents they leave empty),
+/// everything else verbatim: what must stay byte-identical across a Synchrome write.
+pub fn strip_members(bytes: &[u8], paths: &[&str]) -> Result<Vec<u8>, PrefsError> {
+    let mut b = bytes.to_vec();
+    for p in paths {
+        let segs: Vec<&str> = p.split('.').collect();
+        if let Some(n) = splice_remove(&b, &segs)? {
+            b = n;
+        }
+        for depth in (1..segs.len()).rev() {
+            if !empty_object_at(&b, &segs[..depth])? {
+                break;
+            }
+            if let Some(n) = splice_remove(&b, &segs[..depth])? {
+                b = n;
+            }
+        }
+    }
+    Ok(b)
+}
+
+fn empty_object_at(b: &[u8], segs: &[&str]) -> Result<bool, PrefsError> {
+    let mut cur = root(b)?;
+    for seg in segs {
+        let Node::Obj { members, .. } = cur else {
+            return Ok(false);
+        };
+        let Some(m) = members.into_iter().find(|m| m.key == *seg) else {
+            return Ok(false);
+        };
+        cur = m.value;
+    }
+    Ok(matches!(cur, Node::Obj { ref members, .. } if members.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,6 +853,24 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(left.len(), 1);
+    }
+
+    #[test]
+    fn strip_members_keeps_everything_else_verbatim() {
+        let b = br#"{"a":{"x":1},"bookmark_bar":{"show_on_all_tabs":true,"visibility_state":0},"z":{"n":1.50}}"#;
+        let out = strip_members(
+            b,
+            &[
+                "bookmark_bar.show_on_all_tabs",
+                "bookmark_bar.visibility_state",
+                "intl.selected_languages",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            r#"{"a":{"x":1},"z":{"n":1.50}}"#
+        );
     }
 
     #[test]

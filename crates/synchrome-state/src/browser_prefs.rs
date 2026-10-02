@@ -767,7 +767,12 @@ impl StateDb {
             unsupported,
             pending,
             conflicts,
-            invalid: c.invalid,
+            // local values outside the schema + remote values held for the same reason
+            invalid: c.invalid
+                + rows
+                    .iter()
+                    .filter(|r| r.pending_apply && r.compat.as_deref() == Some("invalid"))
+                    .count() as u64,
             browser_kind: c.browser_kind,
             browser_major: c.browser_major,
             error: c.error,

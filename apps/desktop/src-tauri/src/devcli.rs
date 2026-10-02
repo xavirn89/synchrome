@@ -656,6 +656,60 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // A DEFECTIVE writer (harness only): publish this profile's snapshot with one path's
+        // value replaced by arbitrary JSON, bypassing the schema check (browser closed).
+        "--dev-prefs-publish-raw" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-prefs-publish-raw <mapping> <path> <json>");
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&arg(3)) else {
+                return fail("value is not JSON");
+            };
+            let Some(spec) = synchrome_sync::browser_prefs::spec(&arg(2)) else {
+                return fail("not an allowlisted path");
+            };
+            let (_, pid) = match bookmarks::own_profile_pub(&state, mid) {
+                Ok(p) => p,
+                Err(e) => return fail(e),
+            };
+            let r = (|| -> Result<usize, String> {
+                let mut db = bookmarks::open_db()?;
+                let (kind, udd, profile) = db
+                    .prefs_target(pid)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("no target")?;
+                let src = db
+                    .source_of(pid)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("no source")?;
+                let udd = std::path::PathBuf::from(udd);
+                let major = synchrome_browser::browser_last_version(&udd)
+                    .and_then(|v| synchrome_sync::browser_prefs::major_of(&v));
+                let doc = synchrome_browser::read_preferences(&udd, &profile)
+                    .map_err(|e| e.to_string())?;
+                let (mut values, skipped) =
+                    synchrome_sync::browser_prefs::extract(&doc, &kind, major);
+                values.insert(spec.path, v);
+                let c = db
+                    .capture_prefs(
+                        &src,
+                        &kind,
+                        major,
+                        &values,
+                        &skipped,
+                        synchrome_sync::hlc::now_ms(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(c.ops)
+            })();
+            match r {
+                Ok(n) => {
+                    let p = bookmarks::publish_profile(&state, pid).await;
+                    out(serde_json::json!({ "ops": n, "publish": format!("{p:?}") }))
+                }
+                Err(e) => fail(e),
+            }
+        }
         // Write logical allowlisted values into a closed profile's Preferences through the
         // product writer (no cloud): --dev-write-prefs <udd> <profile> <kind> <{"path": value|null}>
         "--dev-write-prefs" => {
@@ -749,16 +803,63 @@ async fn run_async(args: &[String]) -> i32 {
                 }
             }
             let bytes = std::fs::read(&path).unwrap_or_default();
-            let secure =
+            let secure_bytes =
                 std::fs::read(udd.join(arg(2)).join("Secure Preferences")).unwrap_or_default();
             let sha = |b: &[u8]| {
                 synchrome_bridge::token_sha256(&String::from_utf8_lossy(b))[..12].to_string()
             };
+            let writable: Vec<&str> = synchrome_sync::browser_prefs::ALLOWLIST
+                .iter()
+                .map(|s| s.path)
+                .chain([synchrome_sync::browser_prefs::HELIUM_BOOKMARK_BAR_STATE])
+                .collect();
+            let rest_bytes =
+                synchrome_browser::strip_members(&bytes, &writable).unwrap_or_default();
+            let at = |d: &serde_json::Value, p: &str| -> Option<serde_json::Value> {
+                p.split('.')
+                    .try_fold(d, |d, k| d.as_object()?.get(k))
+                    .cloned()
+            };
+            let secure: serde_json::Value =
+                serde_json::from_slice(&secure_bytes).unwrap_or_default();
+            let digest = |v: Option<serde_json::Value>| {
+                v.map(|v| sha(serde_json::to_string(&v).unwrap_or_default().as_bytes()))
+            };
+            let blocks: serde_json::Map<String, serde_json::Value> = [
+                "signin",
+                "extensions",
+                "profile.content_settings",
+                "account_info",
+                "synchrome_e2e_unknown",
+            ]
+            .iter()
+            .map(|p| (p.to_string(), serde_json::json!(digest(at(&doc, p)))))
+            .collect();
+            // excluded candidates (tracked / derived / Google services): digests where present
+            let excluded: serde_json::Map<String, serde_json::Value> = [
+                "homepage",
+                "homepage_is_newtabpage",
+                "browser.show_home_button",
+                "intl.accept_languages",
+                "spellcheck.dictionaries",
+                "translate.enabled",
+                "spellcheck.use_spelling_service",
+            ]
+            .iter()
+            .map(|p| {
+                (
+                    p.to_string(),
+                    serde_json::json!({"preferences": digest(at(&doc, p)), "secure": digest(at(&secure, p))}),
+                )
+            })
+            .collect();
             out(serde_json::json!({
                 "values": values, "skipped": skipped, "raw": raw, "major": major,
                 "rest_sha": sha(serde_json::to_string(&rest).unwrap_or_default().as_bytes()),
+                "rest_bytes_sha": sha(&rest_bytes),
+                "blocks": blocks, "excluded": excluded,
                 "file_sha": sha(&bytes), "size": bytes.len(),
-                "secure_sha": sha(&secure),
+                "secure_sha": sha(&secure_bytes),
             }))
         }
         // Held remote ops of one conflict, in merge order: device, seq, HLC.
