@@ -330,10 +330,18 @@ async fn serve() -> i32 {
         assembly: SnapshotAssembly::default(),
     };
     let mut timeout = FIRST_FRAME_TIMEOUT;
+    let (mut frames_in, mut frames_out) = (0u32, 0u32);
     loop {
         let body = match read_frame(&mut stdin, timeout).await {
             Ok(b) => b,
-            Err(FrameError::Eof) => return 0,
+            Err(FrameError::Eof) => {
+                // one line per connection, so a test can tell connections apart
+                log(&format!(
+                    "stage end after {} ms frames_in={frames_in} frames_out={frames_out}",
+                    t0.elapsed().as_millis()
+                ));
+                return 0;
+            }
             Err(FrameError::Timeout) => {
                 log("timeout waiting for the extension; exiting");
                 return 0;
@@ -356,6 +364,7 @@ async fn serve() -> i32 {
             }
         };
         timeout = IDLE_TIMEOUT;
+        frames_in += 1;
         let replies = match decode(&body) {
             Ok(ExtToApp::Ping) => vec![AppToExt::Pong],
             Ok(ExtToApp::Hello {
@@ -385,11 +394,14 @@ async fn serve() -> i32 {
                 }]
             }
         };
+        let kinds: Vec<&str> = replies.iter().map(AppToExt::kind).collect();
         for reply in replies {
             if let Err(e) = write_frame(&mut stdout, &reply).await {
                 log(&format!("write error: {e}"));
                 return 4;
             }
+            frames_out += 1;
         }
+        log(&format!("sent {}", kinds.join(",")));
     }
 }

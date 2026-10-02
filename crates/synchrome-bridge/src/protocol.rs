@@ -232,6 +232,19 @@ pub enum AppToExt {
     },
 }
 
+impl AppToExt {
+    /// Wire `type` of the message (diagnostics: logged instead of any content).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AppToExt::HelloResult(_) => "hello_result",
+            AppToExt::Pong => "pong",
+            AppToExt::Error { .. } => "error",
+            AppToExt::BookmarksAck { .. } => "bookmarks_ack",
+            AppToExt::SyncStatus { .. } => "sync_status",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AckResult {
@@ -349,6 +362,16 @@ mod tests {
         .unwrap();
         assert_eq!(v["type"], "bookmarks_ack");
         assert_eq!(v["result"], "resync_required");
+        assert_eq!(
+            AppToExt::BookmarksAck {
+                batch_id: String::new(),
+                result: AckResult::Applied,
+                ops: 0,
+                pending: 0
+            }
+            .kind(),
+            "bookmarks_ack"
+        );
         assert_eq!(HandshakeStatus::ConnectedOffline.ui_state(), "connected");
     }
 
