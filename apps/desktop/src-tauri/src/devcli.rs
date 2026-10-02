@@ -432,6 +432,93 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // GAP harness: remove one store_events row of a device (the chunk stays) and print it,
+        // so it can be put back with --dev-insert-event. Own account only (RLS).
+        "--dev-delete-event" => {
+            let (Ok(pid), Ok(did), Ok(seq_to)) = (
+                Uuid::parse_str(&arg(1)),
+                Uuid::parse_str(&arg(2)),
+                arg(3).parse::<i64>(),
+            ) else {
+                return fail("usage: --dev-delete-event <profile> <device> <seq_to>");
+            };
+            let session = match state.session().await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let cloud = match state.cloud() {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            let row = cloud
+                .list_store_events(&session, pid)
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.into_iter()
+                        .find(|e| e.device_id == did && e.seq_to == seq_to)
+                });
+            match cloud.delete_store_event(&session, pid, did, seq_to).await {
+                Ok(deleted) => out(serde_json::json!({ "deleted": deleted, "event": row })),
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-insert-event" => {
+            let ev: synchrome_cloud::StoreEvent = match serde_json::from_str(&arg(1)) {
+                Ok(e) => e,
+                Err(e) => return fail(e),
+            };
+            let session = match state.session().await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            match state.cloud() {
+                Ok(c) => match c.record_store_event(&session, &ev).await {
+                    Ok(()) => out(serde_json::json!({ "inserted": true })),
+                    Err(e) => fail(e),
+                },
+                Err(e) => fail(e),
+            }
+        }
+        // DUPLICATE harness: pull with every store_event presented twice (and once more after
+        // the real list), as a replayed / duplicated delivery would.
+        "--dev-pull-duplicates" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad mapping id");
+            };
+            let pid = match bookmarks::open_db()
+                .and_then(|d| d.profile_for_mapping(mid).map_err(|e| e.to_string()))
+            {
+                Ok(Some(p)) => p,
+                Ok(None) => return fail("no local bookmarks state for this mapping"),
+                Err(e) => return fail(e),
+            };
+            let sink = DuplicateEvents {
+                inner: bookmarks::CloudSink::new(&state),
+            };
+            let mut db = match bookmarks::open_db() {
+                Ok(d) => d,
+                Err(e) => return fail(e),
+            };
+            let pending = |db: &synchrome_state::StateDb| {
+                db.status(pid, mid)
+                    .ok()
+                    .and_then(|s| s.download)
+                    .map(|d| d.remote_pending)
+            };
+            let before = pending(&db);
+            match synchrome_state::pull(&mut db, &sink, pid, "dup-harness", bookmarks::now_unix())
+                .await
+            {
+                Ok(o) => {
+                    let after = pending(&db);
+                    out(
+                        serde_json::json!({ "pull": format!("{o:?}"), "remote_pending_before": before, "remote_pending_after": after }),
+                    )
+                }
+                Err(e) => fail(e),
+            }
+        }
         // Open conflicts (entity ids and kinds only) and remote cursors.
         "--dev-conflicts" => {
             let Ok(pid) = Uuid::parse_str(&arg(1)) else {
@@ -780,5 +867,44 @@ impl synchrome_state::JournalSink for FaultAfterUpload<'_> {
         Err(synchrome_state::SinkError::Offline(
             "injected fault between upload and checkpoint".into(),
         ))
+    }
+}
+
+/// Dev harness: every store_event presented twice.
+struct DuplicateEvents<'a> {
+    inner: bookmarks::CloudSink<'a>,
+}
+
+impl synchrome_state::JournalSink for DuplicateEvents<'_> {
+    async fn account_id(&self) -> Result<String, synchrome_state::SinkError> {
+        self.inner.account_id().await
+    }
+    async fn mapping(
+        &self,
+        m: Uuid,
+    ) -> Result<synchrome_state::MappingCheck, synchrome_state::SinkError> {
+        self.inner.mapping(m).await
+    }
+    async fn journal_devices(&self, p: Uuid) -> Result<Vec<String>, synchrome_state::SinkError> {
+        self.inner.journal_devices(p).await
+    }
+    async fn put_chunk(&self, path: &str, body: &[u8]) -> Result<(), synchrome_state::SinkError> {
+        self.inner.put_chunk(path, body).await
+    }
+    async fn record_event(
+        &self,
+        ev: &synchrome_state::PublishedEvent,
+    ) -> Result<(), synchrome_state::SinkError> {
+        self.inner.record_event(ev).await
+    }
+    async fn list_events(
+        &self,
+        p: Uuid,
+    ) -> Result<Vec<synchrome_state::RemoteEvent>, synchrome_state::SinkError> {
+        let v = self.inner.list_events(p).await?;
+        Ok(v.iter().chain(v.iter()).cloned().collect())
+    }
+    async fn get_chunk(&self, path: &str) -> Result<Option<Vec<u8>>, synchrome_state::SinkError> {
+        self.inner.get_chunk(path).await
     }
 }

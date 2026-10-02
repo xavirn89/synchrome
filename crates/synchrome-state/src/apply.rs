@@ -206,9 +206,15 @@ impl StateDb {
             .collect();
         creates
             .sort_by(|a, b| (depth(&a.sid), &a.pos, &a.sid).cmp(&(depth(&b.sid), &b.pos, &b.sid)));
+        let mut orphans: Vec<String> = Vec::new();
         for e in creates {
             let Some(parent) = parent_ref(&e.parent, &created) else {
-                continue; // parent not in the browser yet: next plan
+                // a parent deleted on this device: never "later" — make it explicit (the
+                // spec's orphan re-parenting belongs to the conflict resolver)
+                if by_sid.get(e.parent.as_str()).is_some_and(|p| p.deleted) {
+                    orphans.push(e.sid.clone());
+                }
+                continue; // otherwise the parent is not in the browser yet: next plan
             };
             let action = match (&e.kind[..], &e.url) {
                 ("url", Some(u)) => ApplyAction::CreateBookmark {
@@ -269,6 +275,12 @@ impl StateDb {
                         break;
                     }
                 }
+            }
+            if (e.fields.contains("parentId") || e.fields.contains("created"))
+                && by_sid.get(e.parent.as_str()).is_some_and(|p| p.deleted)
+            {
+                orphans.push(e.sid.clone());
+                continue;
             }
             if e.fields.contains("parentId") || e.fields.contains("created") {
                 if let Some(parent) = parent_ref(&e.parent, &created) {
@@ -350,12 +362,23 @@ impl StateDb {
                 .iter()
                 .filter(|e| !e.deleted && cid_of.contains_key(&e.sid))
             {
-                if !plan.sid_ops.contains_key(&e.sid) {
+                if !plan.sid_ops.contains_key(&e.sid) && !orphans.contains(&e.sid) {
                     clear_now.push(e.sid.clone());
                 }
             }
         }
         let tx = self.conn.transaction()?;
+        for sid in &orphans {
+            tx.execute(
+                "UPDATE entities SET conflict = 1 WHERE profile_id = ?1 AND sid = ?2",
+                params![pid, sid],
+            )?;
+            tx.execute(
+                "INSERT INTO conflicts (profile_id, sid, kind, detail, created_at)
+                 VALUES (?1, ?2, 'orphan', 'its folder was deleted on this device', strftime('%s','now'))",
+                params![pid, sid],
+            )?;
+        }
         for sid in clear_now {
             tx.execute(
                 "UPDATE entities SET pending_apply = 0, pending_fields = '[]' WHERE profile_id = ?1 AND sid = ?2",
@@ -420,9 +443,15 @@ impl StateDb {
                 rec.applied += 1;
             } else if let Some(r) = ops.iter().filter_map(|o| res.get(o)).find(|r| !ok(r.op_id)) {
                 failed_sids.insert(sid);
+                // A failed remote delete (e.g. folder not empty) leaves the node in the
+                // browser: restore the entity so the browser and the materialised state agree
+                // again (otherwise the next reconcile would re-create it under a new id); the
+                // remote delete is held in the conflict record.
                 tx.execute(
-                    "UPDATE entities SET conflict = 1 WHERE profile_id = ?1 AND sid = ?2",
-                    params![pid, sid],
+                    "UPDATE entities SET conflict = 1, pending_apply = 0, pending_fields = '[]',
+                            deleted = CASE WHEN ?3 THEN 0 ELSE deleted END
+                     WHERE profile_id = ?1 AND sid = ?2",
+                    params![pid, sid, plan.deletes.values().any(|d| d == sid)],
                 )?;
                 tx.execute(
                     "INSERT INTO conflicts (profile_id, sid, kind, detail, created_at)

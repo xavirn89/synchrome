@@ -657,7 +657,16 @@ async fn remote_folder_delete_never_removes_a_local_child_conflict_instead() {
     let fa = a.br.find("Folder A");
     a.br.remove(&fa, true).unwrap();
     w.local(&mut a).await;
-    w.remote(&mut b, 1 << 20).await;
+    let (_, echoes) = w.remote(&mut b, 1 << 20).await;
+    assert_eq!(
+        echoes, 0,
+        "the kept folder is not re-created under a new identity"
+    );
+    assert_eq!(
+        b.db.pending(w.profile).unwrap(),
+        0,
+        "B published only its own child"
+    );
     assert!(
         b.br.tree().iter().any(|n| n.1 == "Only on B"),
         "local data kept"
@@ -934,4 +943,41 @@ async fn joining_device_with_the_same_bookmarks_pairs_instead_of_duplicating() {
     assert_eq!(echoes, 0);
     assert_eq!(b.br.tree(), a.br.tree(), "no duplicates");
     assert_eq!(b.br.nodes.len(), 3 + 7);
+}
+
+#[tokio::test]
+async fn a_remote_child_of_a_locally_deleted_folder_is_an_explicit_orphan_conflict() {
+    let mut w = World::new();
+    let mut a = w.device();
+    let mut b = w.device();
+    build_known(&mut a.br);
+    w.local(&mut a).await;
+    w.remote(&mut b, 1 << 20).await;
+    // B (not yet published) adds a child into Folder A
+    let fa_b = b.br.find("Folder A");
+    b.br.create(&fa_b, "B child", Some("https://b.example/c"));
+    b.db.capture_snapshot(&b.src, "e", 0, &b.br.snapshot(), w.tick())
+        .unwrap();
+    // A deletes Folder A (with its synced children)
+    let fa = a.br.find("Folder A");
+    a.br.remove(&fa, true).unwrap();
+    w.local(&mut a).await;
+    // B: folder kept (not empty), its own child kept, then B publishes the child
+    w.remote(&mut b, 1 << 20).await;
+    assert!(b.br.tree().iter().any(|n| n.1 == "B child"));
+    // A receives a create whose parent it deleted: explicit conflict, nothing stuck
+    w.remote(&mut a, 1 << 20).await;
+    let st =
+        a.db.status(w.profile, a.src.mapping_id)
+            .unwrap()
+            .download
+            .unwrap();
+    assert_eq!((st.state, st.remote_pending), (DownloadState::Conflict, 0));
+    assert!(a
+        .db
+        .open_conflicts(w.profile)
+        .unwrap()
+        .iter()
+        .any(|c| c.1 == "orphan"));
+    assert!(!a.br.tree().iter().any(|n| n.1 == "B child"));
 }

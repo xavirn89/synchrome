@@ -178,16 +178,20 @@ fn capture_error(e: CaptureError, batch_id: String) -> Vec<AppToExt> {
 }
 
 /// Publish this source's profile (bounded), then report its status.
+/// Pull, then publish (never the other way round: a local op must still be "pending" when a
+/// remote op on the same entity arrives, or the conflict would go unnoticed), then report.
 async fn publish_and_status(state: &AppState, src: &Source) -> AppToExt {
     match tokio::time::timeout(
         PUBLISH_TIMEOUT,
-        bookmarks::publish_profile(state, src.profile_id),
+        bookmarks::sync_profile(state, src.profile_id),
     )
     .await
     {
-        Ok(Ok(outcome)) => log(&format!("bookmarks publish -> {outcome:?}")),
-        Ok(Err(e)) => log(&format!("bookmarks publish error: {e}")),
-        Err(_) => log("bookmarks publish timed out; will be retried"),
+        Ok(Ok((pulled, published))) => log(&format!(
+            "bookmarks pull -> {pulled:?}; publish -> {published:?}"
+        )),
+        Ok(Err(e)) => log(&format!("bookmarks sync error: {e}")),
+        Err(_) => log("bookmarks sync timed out; will be retried"),
     }
     let status =
         bookmarks::status_for_mapping(src.mapping_id, src.profile_id).unwrap_or_else(|| {
@@ -257,10 +261,14 @@ async fn pull_and_plan(
     for op in &plan.ops {
         *kinds.entry(apply_kind(&op.action)).or_default() += 1;
     }
+    // order as short codes (cf/cb create folder/bookmark, rn, url, mv, ro, d/D delete
+    // bookmark/folder): shows e.g. children-before-parent deletes without any content
+    let order: Vec<&str> = plan.ops.iter().map(|o| short_kind(&o.action)).collect();
     log(&format!(
-        "bookmarks apply plan ops={} {kinds:?} more={}",
+        "bookmarks apply plan ops={} {kinds:?} more={} order={}",
         plan.ops.len(),
-        plan.more
+        plan.more,
+        order.join(",")
     ));
     let msg = AppToExt::BookmarksApply {
         pull_id,
@@ -274,6 +282,20 @@ async fn pull_and_plan(
         Some(plan)
     };
     vec![msg, status_of(src)]
+}
+
+fn short_kind(a: &synchrome_state::ApplyAction) -> &'static str {
+    use synchrome_state::ApplyAction::*;
+    match a {
+        CreateFolder { .. } => "cf",
+        CreateBookmark { .. } => "cb",
+        Rename { .. } => "rn",
+        SetUrl { .. } => "url",
+        Move { .. } => "mv",
+        Reorder { .. } => "ro",
+        Delete { folder: false, .. } => "d",
+        Delete { folder: true, .. } => "D",
+    }
 }
 
 fn apply_kind(a: &synchrome_state::ApplyAction) -> &'static str {

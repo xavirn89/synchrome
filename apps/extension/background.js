@@ -30,6 +30,7 @@ let queue = []; // [{ n, kind, ... }]
 let needSnapshot = true; // every worker start reconciles the full tree
 let importing = false;
 let suppressUntilSnapshot = false; // see push() and executeApply()
+let suppressedEvents = 0;
 let flushTimer = null;
 let running = null;
 let lastStatus = null;
@@ -66,7 +67,11 @@ function push(ev) {
   // Events while an apply is in progress (and until the reconcile snapshot that follows it
   // is taken) are dropped: that snapshot captures the resulting browser state — the applied
   // remote changes (echoes, no diff) and any concurrent user edit (a real diff) alike.
-  if (importing || suppressUntilSnapshot) return;
+  if (suppressUntilSnapshot) {
+    suppressedEvents += 1; // diagnostics: echoes of applies (and anything covered by the next snapshot)
+    return;
+  }
+  if (importing) return;
   counter += 1;
   queue.push({ n: counter, ...ev });
   if (queue.length > MAX_QUEUE) {

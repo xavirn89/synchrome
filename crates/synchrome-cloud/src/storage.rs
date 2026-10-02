@@ -396,6 +396,31 @@ impl<T: RestTransport> CloudClient<T> {
         .map(|_| ())
     }
 
+    /// Delete one publication row of this account (returns whether a row was deleted).
+    /// Used by validation to simulate a missing event; RLS limits it to own rows.
+    pub async fn delete_store_event(
+        &self,
+        session: &Session,
+        profile_id: Uuid,
+        device_id: Uuid,
+        seq_to: i64,
+    ) -> Result<bool, CloudError> {
+        let bytes = self
+            .rest_call(
+                session,
+                "DELETE",
+                &format!(
+                    "/store_events?profile_id=eq.{profile_id}&device_id=eq.{device_id}&seq_to=eq.{seq_to}&select=id"
+                ),
+                &[("Prefer", "return=representation")],
+                None,
+            )
+            .await?;
+        Ok(serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false))
+    }
+
     pub async fn list_store_events(
         &self,
         session: &Session,
