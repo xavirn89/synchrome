@@ -171,6 +171,33 @@ pub(crate) fn chunk_bodies(
     Ok(out)
 }
 
+/// Whether the process that holds a lease is gone. Holders are processes of THIS machine
+/// sharing this state.sqlite and are named `<pid>-<uuid>`; a holder killed mid-sync (app quit,
+/// host closed by the browser) must not block the profile until the lease expires. Unknown
+/// holder formats, or a PID that is alive (or reused), fall back to the expiry.
+fn holder_is_dead(holder: &str) -> bool {
+    let Some(pid) = holder
+        .split_once('-')
+        .and_then(|(p, _)| p.parse::<i32>().ok())
+        .filter(|p| *p > 0)
+    else {
+        return false;
+    };
+    if pid as u32 == std::process::id() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: kill with signal 0 only checks for existence/permission.
+        let r = unsafe { libc::kill(pid, 0) };
+        r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn acquire(conn: &mut Connection, pid: &str, holder: &str, now: i64) -> Result<bool, StateError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let cur: Option<(String, i64)> = tx
@@ -181,7 +208,7 @@ fn acquire(conn: &mut Connection, pid: &str, holder: &str, now: i64) -> Result<b
         )
         .optional()?;
     if let Some((h, exp)) = cur {
-        if h != holder && exp > now {
+        if h != holder && exp > now && !holder_is_dead(&h) {
             return Ok(false);
         }
     }
@@ -432,4 +459,34 @@ async fn publish_locked<S: JournalSink>(
         chunks: done,
         through,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lease_of_a_dead_local_process_is_taken_over_at_once() {
+        let mut db = StateDb::open_in_memory().unwrap();
+        // a child process that has exited: its PID no longer exists
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        let mine = format!("{}-me", std::process::id());
+        assert!(acquire(&mut db.conn, "p", &format!("{dead}-gone"), 100).unwrap());
+        assert!(
+            acquire(&mut db.conn, "p", &mine, 101).unwrap(),
+            "dead holder"
+        );
+        // a live holder (this process, another holder name) still blocks until expiry
+        let live = format!("{}-other", std::process::id());
+        assert!(
+            !acquire(&mut db.conn, "p", &live, 102).unwrap(),
+            "live holder"
+        );
+        // unknown formats keep the expiry semantics
+        assert!(acquire(&mut db.conn, "q", "h", 100).unwrap());
+        assert!(!acquire(&mut db.conn, "q", "other", 101).unwrap());
+        assert!(acquire(&mut db.conn, "q", "other", 100 + LEASE_SECONDS + 1).unwrap());
+    }
 }

@@ -32,6 +32,28 @@ M = {
 UI_PROCS = []
 
 
+# ------------------------------------------------------------------ rig
+def _start(self, offline=False):
+    """Like ra.Device.start, but tolerant to a worker that is not ready on the first eval."""
+    env = dict(self.env)
+    if offline:
+        env["SUPABASE_URL"] = eb.OFFLINE_URL
+    self.hl = eb.Helium(self.udd, env=env)
+    for i in range(20):
+        try:
+            # deterministic harness: no background polling, only the pulls this script triggers
+            self.hl.js("chrome.alarms.clearAll().then(() => true)")
+            break
+        except RuntimeError:
+            if i == 19:
+                raise
+            time.sleep(0.5)
+    return self.hl
+
+
+ra.Device.start = _start
+
+
 # ------------------------------------------------------------------ helpers
 def titles(d):
     return [r[1] for r in flat(d.tree())]
@@ -355,6 +377,7 @@ def main(creds):
     M["conv_ms"]["case4_keep_local"] = int((time.time() - t4) * 1000)
 
     # ---------------------------------------------------------------- CASES 5 + 6 (one offline session, 4 conflicts)
+    e1_sid = sid("E1")
     offline_edit(b, f"""
       await chrome.bookmarks.update(({find('E1')}).id, {{title: 'E1 by B'}});
       await chrome.bookmarks.update(({find('E2')}).id, {{title: 'E2 by B'}});
@@ -378,7 +401,7 @@ def main(creds):
           destr(e1, "keep_remote") is True and destr(r1, "keep_local") is True and destr(e1, "keep_local") is False and destr(r1, "keep_remote") is False, "")
     n0 = len(jops(a, pid, b.device_id))
     re1 = resolve(b, e1["conflict_id"], "keep_local")
-    new = [o for o in jops(a, pid, b.device_id)[n0:] if o["id"] == sid("E1 by B")]
+    new = [o for o in jops(a, pid, b.device_id)[n0:] if o["id"] == e1_sid]
     ra.pull_b(a)
     check("41 edit vs delete, Keep local: X stays on B, one COMPLETE op (all fields), A gets X back",
           re1.get("outcome") == "resolved" and len(new) == 1 and set(new[0]["fields"] or []) >= {"parentId", "pos", "title", "kind", "root", "url"}
