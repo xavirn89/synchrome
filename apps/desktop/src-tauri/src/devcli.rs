@@ -599,7 +599,12 @@ async fn run_async(args: &[String]) -> i32 {
                 );
             };
             let mode = synchrome_sync::extension_settings::Mode::parse(&arg(3));
-            match crate::ext_settings::set_settings_mode(&state, mid, &arg(2), mode).await {
+            // optional 4th argument: the per-extension denylist as a JSON array of keys/prefix*
+            let exclude = (!arg(4).is_empty())
+                .then(|| serde_json::from_str::<Vec<String>>(&arg(4)).ok())
+                .flatten();
+            match crate::ext_settings::set_settings_mode(&state, mid, &arg(2), mode, exclude).await
+            {
                 Ok(()) => out(serde_json::json!({ "ok": true, "mode": mode.as_str() })),
                 Err(e) => fail(e),
             }

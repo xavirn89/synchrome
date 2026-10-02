@@ -556,7 +556,7 @@ async fn set_extension_settings_mode(
     ext_id: String,
     mode: synchrome_sync::extension_settings::Mode,
 ) -> Result<(), String> {
-    ext_settings::set_settings_mode(&state, mapping_id, &ext_id, mode).await
+    ext_settings::set_settings_mode(&state, mapping_id, &ext_id, mode, None).await
 }
 
 /// Run the extension settings cycle now (reads/writes only if the browser is closed).

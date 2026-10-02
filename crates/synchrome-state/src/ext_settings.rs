@@ -512,11 +512,13 @@ impl StateDb {
                 }
             };
             let c = es::canonical(&v);
-            budget += k.len() + c.len();
-            if budget > es::MAX_AREA_BYTES {
+            // over the area budget: not synchronised (and not charged, so smaller keys after
+            // it still fit); deterministic by key order
+            if budget + k.len() + c.len() > es::MAX_AREA_BYTES {
                 cap.excluded_other += 1;
                 continue;
             }
+            budget += k.len() + c.len();
             cap.keys += 1;
             let id = es::entity_id(ext_id, area, k);
             seen.insert(id.clone());
@@ -544,9 +546,11 @@ impl StateDb {
             }
             e.local_value = Some(c);
         }
-        // keys of this store known here and gone now: deleted locally
+        // keys of this store known here and gone now: deleted locally. A key still in the
+        // store but excluded this time (oversized, invalid, over the area budget) is not gone:
+        // its last synchronised value stays, never a tombstone.
         for (id, e) in rows.iter_mut() {
-            if seen.contains(id) || e.local_value.is_none() {
+            if seen.contains(id) || e.local_value.is_none() || store.contains_key(&e.key) {
                 continue;
             }
             if es::is_sensitive(&e.key, exclude) {

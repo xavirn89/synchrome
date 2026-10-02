@@ -169,10 +169,11 @@ pub async fn set_settings_mode(
     mapping_id: Uuid,
     ext_id: &str,
     mode: synchrome_sync::extension_settings::Mode,
+    exclude: Option<Vec<String>>,
 ) -> Result<(), String> {
     let (account, pid) = bookmarks::own_profile_pub(state, mapping_id)?;
     let mut db = open_db()?;
-    db.set_settings_mode(&account, pid, ext_id, mode, None)
+    db.set_settings_mode(&account, pid, ext_id, mode, exclude)
         .map_err(|e| e.to_string())?;
     drop(db);
     let _ = tokio::time::timeout(

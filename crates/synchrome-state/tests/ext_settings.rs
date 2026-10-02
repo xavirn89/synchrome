@@ -225,6 +225,44 @@ async fn delete_key_and_duplicate_snapshots() {
 }
 
 #[tokio::test]
+async fn keys_still_in_the_store_but_over_a_limit_never_become_tombstones() {
+    let (w, mut a, mut b) = two().await;
+    // ~5.6 MiB of keys sorting before "localCount"/"localTheme": the area budget is spent
+    // before those two (already synchronised) keys are reached
+    let blob = format!("\"{}\"", "b".repeat(60 * 1024));
+    for i in 0..95 {
+        set(&mut a, X, Area::Local, &format!("bulk{i:03}"), &blob);
+    }
+    // an already synchronised key whose value grows past 64 KiB
+    set(
+        &mut a,
+        X,
+        Area::Sync,
+        "syncMode",
+        &format!("\"{}\"", "x".repeat(70 * 1024)),
+    );
+    let (ops, _) = cycle(&w, &mut a).await;
+    assert!(ops > 0 && ops < 95, "only what fits is published: {ops}");
+    assert!(cloud_settings_ops(&w)
+        .iter()
+        .all(|o| o.op != synchrome_sync::OpKind::Delete));
+    let v = a.d.db.settings_view(w.profile, X).unwrap();
+    assert!(v.excluded_other >= 3);
+    cycle(&w, &mut b).await;
+    assert_eq!(get(&b, X, Area::Local, "localTheme"), Some("\"dark\""));
+    assert_eq!(get(&b, X, Area::Local, "localCount"), Some("1"));
+    assert_eq!(get(&b, X, Area::Sync, "syncMode"), Some("\"compact\""));
+    let total: usize = b.stores[&(X.to_string(), Area::Local)]
+        .iter()
+        .map(|(k, v)| k.len() + v.len())
+        .sum();
+    assert!(total <= synchrome_sync::extension_settings::MAX_AREA_BYTES);
+    // stable: nothing more on the next snapshots
+    assert_eq!(cycle(&w, &mut a).await.0, 0);
+    assert_eq!(cycle(&w, &mut b).await.0, 0);
+}
+
+#[tokio::test]
 async fn sensitive_oversized_and_invalid_keys_are_excluded_and_kept_local() {
     let (w, mut a, mut b) = two().await;
     set(
