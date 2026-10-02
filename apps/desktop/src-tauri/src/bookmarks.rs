@@ -12,8 +12,8 @@ use synchrome_auth::{AuthError, Session};
 use synchrome_cloud::TokenState;
 use synchrome_cloud::{CloudClient, CloudError, ReqwestRest, StoreEvent, JOURNAL_CONTENT_TYPE};
 use synchrome_state::{
-    BookmarkSyncStatus, JournalSink, MappingCheck, PublishOutcome, PublishedEvent, SinkError,
-    StateDb,
+    BookmarkSyncStatus, JournalSink, MappingCheck, PublishOutcome, PublishedEvent, PullOutcome,
+    RemoteEvent, SinkError, StateDb,
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -134,6 +134,23 @@ impl<'a> CloudSink<'a> {
 }
 
 impl JournalSink for CloudSink<'_> {
+    async fn list_events(&self, profile_id: Uuid) -> Result<Vec<RemoteEvent>, SinkError> {
+        let rows = with_session!(self, |s, c| c.list_store_events(&s, profile_id))?;
+        Ok(rows
+            .into_iter()
+            .map(|e| RemoteEvent {
+                device_id: e.device_id.to_string(),
+                path: e.path,
+                seq_from: e.seq_from.max(0) as u64,
+                seq_to: e.seq_to.max(0) as u64,
+            })
+            .collect())
+    }
+
+    async fn get_chunk(&self, path: &str) -> Result<Option<Vec<u8>>, SinkError> {
+        with_session!(self, |s, c| c.get_object(&s, path))
+    }
+
     async fn account_id(&self) -> Result<String, SinkError> {
         Ok(self.session().await?.user_id)
     }
@@ -194,16 +211,41 @@ pub async fn publish_with<S: JournalSink>(
         .map_err(|e| e.to_string())
 }
 
-/// Publish every profile with pending ops (background loop, `sync_now`).
-pub async fn publish_all_pending(state: &AppState) -> Vec<(Uuid, Result<PublishOutcome, String>)> {
-    let pending =
-        match open_db().and_then(|db| db.profiles_with_pending().map_err(|e| e.to_string())) {
-            Ok(p) => p,
-            Err(e) => return vec![(Uuid::nil(), Err(e))],
-        };
+/// Pull (download + materialise remote changes) then publish, for one profile.
+pub async fn sync_profile(
+    state: &AppState,
+    profile_id: Uuid,
+) -> Result<(PullOutcome, PublishOutcome), String> {
+    let mut db = open_db()?;
+    let sink = CloudSink::new(state);
+    let holder = format!("{}-{}", std::process::id(), Uuid::new_v4());
+    synchrome_state::sync(&mut db, &sink, profile_id, &holder, now_unix())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Pull only (before a joining device's first snapshot).
+pub async fn pull_profile(state: &AppState, profile_id: Uuid) -> Result<PullOutcome, String> {
+    let mut db = open_db()?;
+    let sink = CloudSink::new(state);
+    let holder = format!("{}-{}", std::process::id(), Uuid::new_v4());
+    synchrome_state::pull(&mut db, &sink, profile_id, &holder, now_unix())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Background cycle: every profile this device keeps state for is pulled and published.
+/// Applying to the browser needs the extension's connection (it asks with bookmarks_pull).
+pub async fn sync_all(
+    state: &AppState,
+) -> Vec<(Uuid, Result<(PullOutcome, PublishOutcome), String>)> {
+    let ids = match open_db().and_then(|db| db.profile_ids().map_err(|e| e.to_string())) {
+        Ok(p) => p,
+        Err(e) => return vec![(Uuid::nil(), Err(e))],
+    };
     let mut out = Vec::new();
-    for p in pending {
-        out.push((p, publish_profile(state, p).await));
+    for p in ids {
+        out.push((p, sync_profile(state, p).await));
     }
     out
 }

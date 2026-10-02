@@ -99,10 +99,10 @@ fn claim(tx: &Transaction<'_>, src: &Source) -> Result<(), CaptureError> {
     Ok(())
 }
 
-fn load_state(tx: &Transaction<'_>, pid: &str) -> Result<BookmarkState, StateError> {
+pub(crate) fn load_state(tx: &Transaction<'_>, pid: &str) -> Result<BookmarkState, StateError> {
     let mut s = BookmarkState::default();
     let mut st = tx.prepare(
-        "SELECT sid, kind, root, parent, pos, title, url, created_at, deleted
+        "SELECT sid, kind, root, parent, pos, title, url, created_at, deleted, pending_apply
          FROM entities WHERE profile_id = ?1",
     )?;
     let rows = st.query_map([pid], |r| {
@@ -116,10 +116,14 @@ fn load_state(tx: &Transaction<'_>, pid: &str) -> Result<BookmarkState, StateErr
             r.get::<_, Option<String>>(6)?,
             r.get::<_, Option<i64>>(7)?,
             r.get::<_, i64>(8)?,
+            r.get::<_, i64>(9)?,
         ))
     })?;
     for r in rows {
-        let (sid, kind, root, parent, pos, title, url, created_at, deleted) = r?;
+        let (sid, kind, root, parent, pos, title, url, created_at, deleted, pending) = r?;
+        if pending != 0 {
+            s.frozen.insert(sid.clone());
+        }
         let e = Entity {
             sid: sid.clone(),
             kind: Kind::parse(&kind).ok_or_else(|| StateError::Corrupt("kind".into()))?,
@@ -214,6 +218,14 @@ fn persist(
         |r| r.get(0),
     )?;
     let mut clk = clock(tx, did)?;
+    // per entity: (HLC per field set by these changes, deleted HLC, last local seq)
+    #[derive(Default)]
+    struct Touch {
+        fields: Vec<(String, String)>,
+        deleted: Option<String>,
+        seq: i64,
+    }
+    let mut touched: std::collections::HashMap<&str, Touch> = Default::default();
     let mut hlc_of: std::collections::HashMap<&str, String> = Default::default();
     for ch in changes {
         let hlc = clk.tick(now_ms)?;
@@ -236,6 +248,16 @@ fn persist(
             params![pid, next_seq, line],
         )?;
         append_chunk(tx, pid, did, next_seq as u64, line.len(), hlc.wall_ms)?;
+        let t = touched.entry(ch.sid()).or_default();
+        match ch {
+            Change::Set { fields, .. } => {
+                for k in fields.keys() {
+                    t.fields.push((k.clone(), op.hlc.clone()));
+                }
+            }
+            Change::Delete { .. } => t.deleted = Some(op.hlc.clone()),
+        }
+        t.seq = next_seq;
         hlc_of.insert(ch.sid(), op.hlc);
         next_seq += 1;
     }
@@ -275,6 +297,30 @@ fn persist(
                 hlc
             ],
         )?;
+        if let Some(t) = touched.get(sid.as_str()) {
+            let cur: String = tx.query_row(
+                "SELECT field_hlc FROM entities WHERE profile_id = ?1 AND sid = ?2",
+                params![pid, sid],
+                |r| r.get(0),
+            )?;
+            let mut fh: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(&cur).unwrap_or_default();
+            for (k, h) in &t.fields {
+                fh.insert(k.clone(), h.clone());
+            }
+            tx.execute(
+                "UPDATE entities SET field_hlc = ?3, local_seq = ?4,
+                        deleted_hlc = COALESCE(?5, deleted_hlc)
+                 WHERE profile_id = ?1 AND sid = ?2",
+                params![
+                    pid,
+                    sid,
+                    serde_json::to_string(&fh).unwrap_or_else(|_| "{}".into()),
+                    t.seq,
+                    t.deleted
+                ],
+            )?;
+        }
     }
     for cid in &state.dirty_index {
         match state.index.get(cid) {
@@ -322,6 +368,32 @@ fn pending_of(tx: &Transaction<'_>, pid: &str) -> Result<u64, StateError> {
 }
 
 impl StateDb {
+    /// Claim the profile for this source without capturing anything (so a joining device can
+    /// pull the remote state BEFORE its first snapshot and pair instead of duplicating).
+    pub fn ensure_claimed(&mut self, src: &Source) -> Result<(), CaptureError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        claim(&tx, src)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether this profile has completed at least one pull.
+    pub fn has_pulled(&self, profile_id: Uuid) -> Result<bool, StateError> {
+        Ok(load_profile(&self.conn, &profile_id.to_string())?.is_some_and(|p| p.remote_checked))
+    }
+
+    /// Every profile this device keeps state for.
+    pub fn profile_ids(&self) -> Result<Vec<Uuid>, StateError> {
+        let mut st = self.conn.prepare("SELECT profile_id FROM profiles")?;
+        let ids = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok().and_then(|s| Uuid::parse_str(&s).ok()))
+            .collect();
+        Ok(ids)
+    }
+
     /// Reconcile a full tree (initial capture, extension start, resync). Idempotent.
     pub fn capture_snapshot(
         &mut self,

@@ -13,6 +13,14 @@ const BOOKMARKS = {
   offline: "Offline",
   error: "Error",
 };
+const DOWNLOAD = {
+  up_to_date: "Up to date",
+  remote_changes: "Remote changes",
+  applying: "Applying",
+  conflict: "Conflict",
+  offline: "Offline",
+  error: "Error",
+};
 const DETAILS = {
   token_missing: "This profile is not linked yet. Map it in the Synchrome app.",
   connected_offline: "Synchrome Cloud is unreachable; bookmark changes are queued in the app.",
@@ -44,6 +52,14 @@ function render(s) {
   }
   const when = b.last_upload_at ? new Date(b.last_upload_at * 1000).toLocaleString() : "never";
   el2.textContent = `Bookmarks: ${BOOKMARKS[b.state] || b.state} · ${b.bookmarks} bookmarks · ${b.pending} pending · last upload ${when}`;
+  const d = b.download;
+  const el3 = document.getElementById("download");
+  if (!d) {
+    el3.textContent = "";
+    return;
+  }
+  const dwhen = d.last_download_at ? new Date(d.last_download_at * 1000).toLocaleString() : "never";
+  el3.textContent = `Download: ${DOWNLOAD[d.state] || d.state} · ${d.remote_pending} remote changes · ${d.conflicts} conflicts · last download ${dwhen}`;
 }
 
 chrome.runtime.sendMessage({ type: "get_status" }, render);

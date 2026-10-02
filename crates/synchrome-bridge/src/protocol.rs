@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-pub use synchrome_state::BookmarkSyncStatus;
+pub use synchrome_state::{ApplyOp, ApplyResult, BookmarkSyncStatus};
 pub use synchrome_sync::bookmarks::{BookmarkEvent, ChromiumNode};
 use uuid::Uuid;
 
@@ -73,6 +73,16 @@ pub enum ExtToApp {
     },
     /// Publish pending ops now (alarm / popup).
     SyncNow,
+    /// Download remote changes and return the next apply plan (sent after the extension
+    /// flushed its own events, so local changes always reach the app before an apply).
+    BookmarksPull {
+        pull_id: String,
+    },
+    /// Results of executing a `bookmarks_apply`.
+    BookmarksApplied {
+        apply_id: String,
+        results: Vec<ApplyResult>,
+    },
 }
 
 /// An event with its delivery number.
@@ -129,10 +139,30 @@ impl ExtToApp {
                 }
                 Ok(())
             }
+            ExtToApp::BookmarksPull { pull_id } => {
+                if id_ok(pull_id) {
+                    Ok(())
+                } else {
+                    Err("invalid_message")
+                }
+            }
+            ExtToApp::BookmarksApplied { apply_id, results } => {
+                if !id_ok(apply_id) {
+                    return Err("invalid_message");
+                }
+                if results.len() > MAX_APPLY_RESULTS {
+                    return Err("too_large");
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
 }
+
+/// Apply plans sent to the extension are capped well below the 1 MB host→extension limit.
+pub const MAX_APPLY_PLAN_BYTES: usize = 512 * 1024;
+pub const MAX_APPLY_RESULTS: usize = 5000;
 
 /// Every handshake outcome the app distinguishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -230,6 +260,14 @@ pub enum AppToExt {
     SyncStatus {
         bookmarks: BookmarkSyncStatus,
     },
+    /// Explicit chrome.bookmarks operations to execute, in order (may be empty).
+    BookmarksApply {
+        pull_id: String,
+        apply_id: String,
+        ops: Vec<ApplyOp>,
+        /// More remote changes remain: pull again after reporting these results.
+        more: bool,
+    },
 }
 
 impl AppToExt {
@@ -241,6 +279,7 @@ impl AppToExt {
             AppToExt::Error { .. } => "error",
             AppToExt::BookmarksAck { .. } => "bookmarks_ack",
             AppToExt::SyncStatus { .. } => "sync_status",
+            AppToExt::BookmarksApply { .. } => "bookmarks_apply",
         }
     }
 }
@@ -349,6 +388,62 @@ mod tests {
             serde_json::from_str::<ExtToApp>(r#"{"type":"sync_now"}"#).unwrap(),
             ExtToApp::SyncNow
         ));
+    }
+
+    #[test]
+    fn apply_messages_round_trip_and_are_bounded() {
+        let ops = vec![
+            ApplyOp {
+                op_id: 1,
+                action: synchrome_state::ApplyAction::CreateFolder {
+                    parent: synchrome_state::NodeRef::Id { id: "1".into() },
+                    title: "F".into(),
+                },
+            },
+            ApplyOp {
+                op_id: 2,
+                action: synchrome_state::ApplyAction::CreateBookmark {
+                    parent: synchrome_state::NodeRef::Op { op: 1 },
+                    title: "B".into(),
+                    url: "https://x/".into(),
+                },
+            },
+            ApplyOp {
+                op_id: 3,
+                action: synchrome_state::ApplyAction::Delete {
+                    id: "9".into(),
+                    folder: true,
+                },
+            },
+        ];
+        let v = serde_json::to_value(AppToExt::BookmarksApply {
+            pull_id: "p".into(),
+            apply_id: "a".into(),
+            ops,
+            more: false,
+        })
+        .unwrap();
+        assert_eq!(v["type"], "bookmarks_apply");
+        assert_eq!(v["ops"][0]["action"], "create_folder");
+        assert_eq!(v["ops"][0]["parent"]["id"], "1");
+        assert_eq!(v["ops"][1]["parent"]["op"], 1);
+        let back: ExtToApp = serde_json::from_str(
+            r#"{"type":"bookmarks_applied","apply_id":"a","results":[{"op_id":1,"ok":true,"id":"55"},{"op_id":3,"ok":false,"error":"not_empty"}]}"#,
+        )
+        .unwrap();
+        assert!(back.validate().is_ok());
+        let many = format!(
+            r#"{{"type":"bookmarks_applied","apply_id":"a","results":[{}]}}"#,
+            (0..=MAX_APPLY_RESULTS)
+                .map(|i| format!(r#"{{"op_id":{i},"ok":true}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let many: ExtToApp = serde_json::from_str(&many).unwrap();
+        assert_eq!(many.validate(), Err("too_large"));
+        let pull: ExtToApp =
+            serde_json::from_str(r#"{"type":"bookmarks_pull","pull_id":""}"#).unwrap();
+        assert_eq!(pull.validate(), Err("invalid_message"));
     }
 
     #[test]

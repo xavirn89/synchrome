@@ -45,8 +45,18 @@ struct Persisted {
     created_at_unix: i64,
 }
 
+/// Development override of the data directory, so one machine can host several simulated
+/// devices (each with its own device.json, state.sqlite, registry and logs). Honoured only in
+/// debug builds; release builds always use the platform directory.
+pub const DEV_DATA_DIR_ENV: &str = "SYNCHROME_DATA_DIR";
+
 /// The platform's application data directory for Synchrome.
 pub fn app_data_dir() -> Option<PathBuf> {
+    if cfg!(debug_assertions) {
+        if let Some(d) = std::env::var_os(DEV_DATA_DIR_ENV).filter(|d| !d.is_empty()) {
+            return Some(PathBuf::from(d));
+        }
+    }
     dirs::data_dir().map(|d| d.join(APP_DIR_NAME))
 }
 

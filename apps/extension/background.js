@@ -29,6 +29,7 @@ let counter = 0; // event number within this epoch
 let queue = []; // [{ n, kind, ... }]
 let needSnapshot = true; // every worker start reconciles the full tree
 let importing = false;
+let suppressUntilSnapshot = false; // see push() and executeApply()
 let flushTimer = null;
 let running = null;
 let lastStatus = null;
@@ -62,7 +63,10 @@ function capturable(node) {
 }
 
 function push(ev) {
-  if (importing) return;
+  // Events while an apply is in progress (and until the reconcile snapshot that follows it
+  // is taken) are dropped: that snapshot captures the resulting browser state — the applied
+  // remote changes (echoes, no diff) and any concurrent user edit (a real diff) alike.
+  if (importing || suppressUntilSnapshot) return;
   counter += 1;
   queue.push({ n: counter, ...ev });
   if (queue.length > MAX_QUEUE) {
@@ -98,6 +102,8 @@ chrome.bookmarks.onImportEnded.addListener(() => {
 });
 
 async function snapshotParts() {
+  // From here on events are queued again; anything earlier is covered by this tree.
+  suppressUntilSnapshot = false;
   const covers = counter;
   const [root] = await chrome.bookmarks.getTree();
   const nodes = [];
@@ -302,7 +308,10 @@ async function runOnce(syncNow) {
       if (!(await sendEvents(p))) return lastStatus;
       sent = true;
     }
-    if (!sent && syncNow) {
+    if (hello.status === "connected") {
+      // local changes are already with the app; now download and apply remote ones
+      await pullAndApply(p);
+    } else if (!sent && syncNow) {
       p.post({ type: "sync_now" });
       await p.wait((m) => m.type === "sync_status", ACK_TIMEOUT_MS);
     }
@@ -310,6 +319,108 @@ async function runOnce(syncNow) {
   } finally {
     p.close();
   }
+}
+
+// ---------------------------------------------------------------- remote apply
+const MAX_PULL_ROUNDS = 20;
+
+function applyError(e) {
+  const m = String((e && e.message) || e);
+  if (/can't find/i.test(m)) return "not_found";
+  if (/non-empty/i.test(m)) return "not_empty";
+  return "failed";
+}
+
+// Execute explicit operations from the app, in order. Each is idempotent against the live
+// tree (rename/URL/move/reorder compare first; a missing node on delete is "not_found",
+// which the app treats as done). Folder deletes are NOT recursive: a folder that still holds
+// something the app did not delete fails with "not_empty" and becomes a conflict.
+async function executeApply(ops) {
+  suppressUntilSnapshot = true;
+  needSnapshot = true;
+  const made = new Map();
+  const ref = (r) => (r && r.id) || made.get(r && r.op) || null;
+  const results = [];
+  for (const op of ops) {
+    try {
+      let id = null;
+      switch (op.action) {
+        case "create_folder":
+        case "create_bookmark": {
+          const parentId = ref(op.parent);
+          if (!parentId) throw new Error("Can't find parent");
+          const spec = { parentId, title: op.title };
+          if (op.action === "create_bookmark") spec.url = op.url;
+          const n = await chrome.bookmarks.create(spec);
+          id = n.id;
+          made.set(op.op_id, id);
+          break;
+        }
+        case "rename": {
+          const [n] = await chrome.bookmarks.get(op.id);
+          if (n.title !== op.title) await chrome.bookmarks.update(op.id, { title: op.title });
+          break;
+        }
+        case "set_url": {
+          const [n] = await chrome.bookmarks.get(op.id);
+          if (n.url !== op.url) await chrome.bookmarks.update(op.id, { url: op.url });
+          break;
+        }
+        case "move": {
+          const [n] = await chrome.bookmarks.get(op.id);
+          const parentId = ref(op.parent);
+          if (!parentId) throw new Error("Can't find parent");
+          if (n.parentId !== parentId) await chrome.bookmarks.move(op.id, { parentId });
+          break;
+        }
+        case "reorder": {
+          const parentId = ref(op.parent);
+          if (!parentId) throw new Error("Can't find parent");
+          for (let i = 0; i < op.children.length; i++) {
+            const c = ref(op.children[i]);
+            if (!c) continue;
+            const kids = await chrome.bookmarks.getChildren(parentId);
+            const cur = kids.findIndex((k) => k.id === c);
+            if (cur < 0 || cur === i) continue;
+            // chrome.bookmarks.move counts the index before removing the node
+            await chrome.bookmarks.move(c, { parentId, index: cur < i ? i + 1 : i });
+          }
+          break;
+        }
+        case "delete":
+          await chrome.bookmarks.remove(op.id); // non-recursive by design
+          break;
+        default:
+          throw new Error("unknown action");
+      }
+      results.push({ op_id: op.op_id, ok: true, id });
+    } catch (e) {
+      results.push({ op_id: op.op_id, ok: false, error: applyError(e) });
+    }
+  }
+  return results;
+}
+
+async function pullAndApply(p) {
+  for (let round = 0; round < MAX_PULL_ROUNDS; round++) {
+    const pullId = crypto.randomUUID();
+    const status = statusAfter(p);
+    p.post({ type: "bookmarks_pull", pull_id: pullId });
+    const plan = await p.wait((m) => m.type === "bookmarks_apply" && m.pull_id === pullId, ACK_TIMEOUT_MS);
+    if (!plan) return false;
+    await status;
+    if (!plan.ops || !plan.ops.length) return true;
+    const results = await executeApply(plan.ops);
+    const st = statusAfter(p);
+    p.post({ type: "bookmarks_applied", apply_id: plan.apply_id, results });
+    const ack = await p.wait(isAck(plan.apply_id), ACK_TIMEOUT_MS);
+    if (!ack) return false;
+    await st;
+    // reconcile right away: the snapshot shows the app the browser as it now is
+    if (!(await sendSnapshot(p, true))) return false;
+    if (!plan.more) return true;
+  }
+  return true;
 }
 
 function run(syncNow = false) {
@@ -344,7 +455,9 @@ function schedule(ms, afterRun = false) {
   }, afterRun ? Math.max(ms, 500) : ms);
 }
 
-chrome.alarms.create(ALARM, { periodInMinutes: 5 });
+// Remote changes are polled: the alarm is the wake-up (no Realtime yet); the app's own
+// background loop downloads and materialises in between, so this only applies.
+chrome.alarms.create(ALARM, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === ALARM) run(true);
 });

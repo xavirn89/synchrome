@@ -191,6 +191,10 @@ pub struct BookmarkState {
     pub dirty_entities: BTreeSet<String>,
     /// Chromium ids whose index entry was added, changed or removed since load.
     pub dirty_index: BTreeSet<String>,
+    /// Entities with a remote change materialised but not yet applied to the browser. What the
+    /// browser reports for them is (possibly) stale, so they never emit local changes; the
+    /// apply plan brings the browser to them instead. Index entries are still maintained.
+    pub frozen: HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -318,6 +322,9 @@ impl BookmarkState {
 
     /// Write `want` into the entity (creating it when absent) and return the changed fields.
     fn upsert(&mut self, want: Entity, creating: bool) -> Option<Change> {
+        if self.frozen.contains(&want.sid) {
+            return None;
+        }
         let mut f = Fields::new();
         let sid = want.sid.clone();
         match self.entities.get(&sid).filter(|e| !e.deleted && !creating) {
@@ -373,6 +380,9 @@ impl BookmarkState {
     }
 
     fn delete(&mut self, sid: &str) -> Option<Change> {
+        if self.frozen.contains(sid) {
+            return None;
+        }
         let e = self.entities.get_mut(sid)?;
         if e.deleted {
             return None;
@@ -1257,6 +1267,34 @@ mod tests {
         ops.reverse(); // order of arrival does not matter
         let m = materialize(&ops);
         assert_eq!(render_tree(&m), render_tree(&s));
+    }
+
+    #[test]
+    fn frozen_entities_never_emit_local_changes_but_keep_their_index() {
+        let mut s = BookmarkState::default();
+        reconcile(&mut s, &known_tree());
+        let b1 = s.index["12"].clone();
+        s.frozen.insert(b1.clone());
+        // browser still shows the old title while a remote rename is pending apply
+        let mut v = known_tree();
+        v.iter_mut().find(|n| n.id == "12").unwrap().title = "stale".into();
+        assert!(reconcile(&mut s, &v).is_empty());
+        assert!(apply_event(
+            &mut s,
+            &BookmarkEvent::Changed {
+                id: "12".into(),
+                title: Some("stale".into()),
+                url: None
+            }
+        )
+        .unwrap()
+        .is_empty());
+        assert!(
+            apply_event(&mut s, &BookmarkEvent::Removed { id: "12".into() })
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!s.entities[&b1].deleted);
     }
 
     #[test]

@@ -16,13 +16,14 @@ use crate::local_token;
 use crate::{bookmarks, AppState};
 use std::io::Write as _;
 use std::time::Duration;
+use synchrome_bridge::protocol::MAX_APPLY_PLAN_BYTES;
 use synchrome_bridge::{
     decode, read_frame, resolve, write_frame, AckResult, AppToExt, AssemblyError, CloudBackend,
     ExtToApp, FrameError, HandshakeContext, HandshakeReply, HandshakeStatus, SnapshotAssembly,
     WireToken,
 };
 use synchrome_cloud::ReqwestRest;
-use synchrome_state::{CaptureError, CaptureOutcome, Source};
+use synchrome_state::{ApplyPlan, CaptureError, CaptureOutcome, Source};
 use synchrome_types::synchrome_extension_origin;
 use uuid::Uuid;
 
@@ -145,6 +146,10 @@ async fn handle_hello(
 struct Conn {
     source: Option<Source>,
     assembly: SnapshotAssembly,
+    /// The hello resolved as `connected_offline`: capture only, no download/apply.
+    offline: bool,
+    /// The apply plan last sent to the extension (results are matched against it).
+    plan: Option<ApplyPlan>,
 }
 
 fn reject(code: &'static str, message: &str, batch_id: String) -> Vec<AppToExt> {
@@ -193,9 +198,95 @@ async fn publish_and_status(state: &AppState, src: &Source) -> AppToExt {
                 pending: 0,
                 last_upload_at: None,
                 error: Some("local state unavailable".into()),
+                download: None,
             }
         });
     AppToExt::SyncStatus { bookmarks: status }
+}
+
+fn status_of(src: &Source) -> AppToExt {
+    match bookmarks::status_for_mapping(src.mapping_id, src.profile_id) {
+        Some(st) => AppToExt::SyncStatus { bookmarks: st },
+        None => AppToExt::Error {
+            code: "local_state",
+            message: "local state unavailable".into(),
+        },
+    }
+}
+
+/// Pull (download + materialise), publish pending local ops, then hand the extension the
+/// next apply plan (possibly empty). Offline connections get an empty plan.
+async fn pull_and_plan(
+    state: &AppState,
+    conn: &mut Conn,
+    src: &Source,
+    pull_id: String,
+) -> Vec<AppToExt> {
+    let empty = |pull_id: String| AppToExt::BookmarksApply {
+        pull_id,
+        apply_id: String::new(),
+        ops: vec![],
+        more: false,
+    };
+    if conn.offline {
+        return vec![empty(pull_id), status_of(src)];
+    }
+    match tokio::time::timeout(
+        PUBLISH_TIMEOUT,
+        bookmarks::sync_profile(state, src.profile_id),
+    )
+    .await
+    {
+        Ok(Ok((pulled, published))) => log(&format!(
+            "bookmarks pull -> {pulled:?}; publish -> {published:?}"
+        )),
+        Ok(Err(e)) => log(&format!("bookmarks sync error: {e}")),
+        Err(_) => log("bookmarks sync timed out; will be retried"),
+    }
+    let plan = match bookmarks::open_db().and_then(|mut db| {
+        db.plan_apply(src.profile_id, MAX_APPLY_PLAN_BYTES)
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(p) => p,
+        Err(e) => {
+            log(&format!("bookmarks apply plan error: {e}"));
+            return vec![empty(pull_id), status_of(src)];
+        }
+    };
+    let mut kinds: std::collections::BTreeMap<&str, usize> = Default::default();
+    for op in &plan.ops {
+        *kinds.entry(apply_kind(&op.action)).or_default() += 1;
+    }
+    log(&format!(
+        "bookmarks apply plan ops={} {kinds:?} more={}",
+        plan.ops.len(),
+        plan.more
+    ));
+    let msg = AppToExt::BookmarksApply {
+        pull_id,
+        apply_id: plan.apply_id.clone(),
+        ops: plan.ops.clone(),
+        more: plan.more,
+    };
+    conn.plan = if plan.ops.is_empty() {
+        None
+    } else {
+        Some(plan)
+    };
+    vec![msg, status_of(src)]
+}
+
+fn apply_kind(a: &synchrome_state::ApplyAction) -> &'static str {
+    use synchrome_state::ApplyAction::*;
+    match a {
+        CreateFolder { .. } => "create_folder",
+        CreateBookmark { .. } => "create_bookmark",
+        Rename { .. } => "rename",
+        SetUrl { .. } => "set_url",
+        Move { .. } => "move",
+        Reorder { .. } => "reorder",
+        Delete { .. } => "delete",
+    }
 }
 
 async fn handle_bookmarks(
@@ -209,6 +300,8 @@ async fn handle_bookmarks(
             snapshot_id, part, ..
         } => format!("{snapshot_id}:{part}"),
         ExtToApp::BookmarksEvents { batch_id, .. } => batch_id.clone(),
+        ExtToApp::BookmarksPull { pull_id } => pull_id.clone(),
+        ExtToApp::BookmarksApplied { apply_id, .. } => apply_id.clone(),
         _ => String::new(),
     };
     let Some(src) = conn.source.clone() else {
@@ -228,6 +321,44 @@ async fn handle_bookmarks(
     let now = synchrome_sync::hlc::now_ms();
     let outcome = match msg {
         ExtToApp::SyncNow => return vec![publish_and_status(state, &src).await],
+        ExtToApp::BookmarksPull { pull_id } => {
+            drop(db);
+            return pull_and_plan(state, conn, &src, pull_id).await;
+        }
+        ExtToApp::BookmarksApplied { apply_id, results } => {
+            let plan = match conn.plan.take() {
+                Some(p) if p.apply_id == apply_id => p,
+                other => {
+                    conn.plan = other;
+                    return reject(
+                        "unknown_apply",
+                        "no such apply plan on this connection",
+                        batch_id,
+                    );
+                }
+            };
+            let rec = db.record_apply(src.profile_id, &plan, &results, bookmarks::now_unix());
+            log(&format!(
+                "bookmarks applied results={} -> {:?}",
+                results.len(),
+                rec.as_ref().map_err(|e| e.to_string())
+            ));
+            let pending = db.pending(src.profile_id).unwrap_or(0);
+            drop(db);
+            return vec![
+                AppToExt::BookmarksAck {
+                    batch_id,
+                    result: if rec.is_ok() {
+                        AckResult::Applied
+                    } else {
+                        AckResult::Rejected
+                    },
+                    ops: rec.map(|r| r.applied).unwrap_or(0),
+                    pending,
+                },
+                status_of(&src),
+            ];
+        }
         ExtToApp::BookmarksSnapshot {
             snapshot_id,
             epoch,
@@ -264,6 +395,26 @@ async fn handle_bookmarks(
                     }]
                 }
                 Ok(Some(full)) => {
+                    // A joining device pulls the remote state BEFORE its first snapshot, so
+                    // its local nodes pair with existing entities instead of duplicating.
+                    if !conn.offline
+                        && !db.has_pulled(src.profile_id).unwrap_or(true)
+                        && db.ensure_claimed(&src).is_ok()
+                    {
+                        drop(db);
+                        let r = tokio::time::timeout(
+                            PUBLISH_TIMEOUT,
+                            bookmarks::pull_profile(state, src.profile_id),
+                        )
+                        .await;
+                        log(&format!("bookmarks bootstrap pull -> {r:?}"));
+                        db = match bookmarks::open_db() {
+                            Ok(db) => db,
+                            Err(_) => {
+                                return reject("local_state", "local state unavailable", batch_id)
+                            }
+                        };
+                    }
                     let n = full.nodes.len();
                     let r = db.capture_snapshot(
                         &src,
@@ -328,6 +479,8 @@ async fn serve() -> i32 {
     let mut conn = Conn {
         source: None,
         assembly: SnapshotAssembly::default(),
+        offline: false,
+        plan: None,
     };
     let mut timeout = FIRST_FRAME_TIMEOUT;
     let (mut frames_in, mut frames_out) = (0u32, 0u32);
@@ -383,6 +536,8 @@ async fn serve() -> i32 {
                     r.status
                 ));
                 conn.source = source;
+                conn.offline = r.status == HandshakeStatus::ConnectedOffline;
+                conn.plan = None;
                 vec![AppToExt::HelloResult(r)]
             }
             Ok(msg) => handle_bookmarks(&state, &mut conn, msg, body.len()).await,

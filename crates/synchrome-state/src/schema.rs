@@ -74,11 +74,51 @@ CREATE TABLE IF NOT EXISTS lease (
 );
 ";
 
+/// v2 (M1 slice 8, remote apply): per-field HLCs and local/remote bookkeeping per entity,
+/// per-remote-device download cursors, conflict records, download status per profile.
+const V2: &str = "
+ALTER TABLE entities ADD COLUMN field_hlc TEXT NOT NULL DEFAULT '{}';   -- field -> HLC of its value
+ALTER TABLE entities ADD COLUMN deleted_hlc TEXT;
+ALTER TABLE entities ADD COLUMN local_seq INTEGER NOT NULL DEFAULT 0;  -- seq of the last LOCAL op
+ALTER TABLE entities ADD COLUMN pending_apply INTEGER NOT NULL DEFAULT 0; -- remote change not yet in the browser
+ALTER TABLE entities ADD COLUMN pending_fields TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE entities ADD COLUMN conflict INTEGER NOT NULL DEFAULT 0;   -- remote apply stopped for it
+ALTER TABLE profiles ADD COLUMN last_download_at INTEGER;
+ALTER TABLE profiles ADD COLUMN download_error TEXT;
+ALTER TABLE profiles ADD COLUMN download_error_kind TEXT;
+ALTER TABLE profiles ADD COLUMN applying_since INTEGER;
+CREATE TABLE IF NOT EXISTS remote_cursors (
+    profile_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,                 -- the remote (publishing) device
+    applied_through INTEGER NOT NULL DEFAULT 0, -- last remote seq materialised
+    gap_at INTEGER,                          -- seq we are waiting for (missing chunk/event)
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (profile_id, device_id)
+);
+CREATE TABLE IF NOT EXISTS conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id TEXT NOT NULL,
+    sid TEXT NOT NULL,
+    kind TEXT NOT NULL,                      -- local_pending | apply_failed
+    remote_device TEXT,
+    remote_seq INTEGER,
+    remote_line TEXT,                        -- the held remote op (not applied)
+    detail TEXT,
+    created_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open'
+);
+CREATE INDEX IF NOT EXISTS conflicts_open_idx ON conflicts (profile_id, status);
+";
+
 pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if v < 1 {
         conn.execute_batch(V1)?;
         conn.pragma_update(None, "user_version", 1)?;
+    }
+    if v < 2 {
+        conn.execute_batch(&format!("BEGIN; {V2} COMMIT;"))?;
+        conn.pragma_update(None, "user_version", 2)?;
     }
     Ok(())
 }

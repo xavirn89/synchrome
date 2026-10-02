@@ -83,6 +83,16 @@ pub trait JournalSink: Sync {
         &self,
         ev: &PublishedEvent,
     ) -> impl Future<Output = Result<(), SinkError>> + Send;
+    /// Journal publications of a profile (all devices; the puller filters its own).
+    fn list_events(
+        &self,
+        profile_id: Uuid,
+    ) -> impl Future<Output = Result<Vec<crate::pull::RemoteEvent>, SinkError>> + Send;
+    /// One journal chunk; `None` if it does not exist (yet).
+    fn get_chunk(
+        &self,
+        path: &str,
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, SinkError>> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +254,61 @@ pub async fn publish<S: JournalSink>(
     out
 }
 
+/// Pull (download + materialise) then publish, under one lease. The usual cycle: the pull
+/// before the push is what lets local and remote changes meet in the materialised state.
+pub async fn sync<S: JournalSink>(
+    db: &mut StateDb,
+    sink: &S,
+    profile_id: Uuid,
+    holder: &str,
+    now: i64,
+) -> Result<(crate::pull::PullOutcome, PublishOutcome), StateError> {
+    let pid = profile_id.to_string();
+    if load_profile(&db.conn, &pid)?.is_none() {
+        return Ok((
+            crate::pull::PullOutcome::NothingToDo,
+            PublishOutcome::NothingToDo,
+        ));
+    }
+    if !acquire(&mut db.conn, &pid, holder, now)? {
+        return Ok((crate::pull::PullOutcome::NothingToDo, PublishOutcome::Busy));
+    }
+    let pulled = crate::pull::pull_locked(db, sink, profile_id, now).await;
+    let published = match &pulled {
+        Ok(_) => {
+            let row = load_profile(&db.conn, &pid)?;
+            if row.is_some_and(|r| r.next_seq - 1 > r.published_through) {
+                publish_locked(db, sink, profile_id, &pid, now).await
+            } else {
+                Ok(PublishOutcome::NothingToDo)
+            }
+        }
+        Err(_) => Ok(PublishOutcome::NothingToDo),
+    };
+    release(&db.conn, &pid, holder)?;
+    Ok((pulled?, published?))
+}
+
+/// Pull only, under the lease.
+pub async fn pull<S: JournalSink>(
+    db: &mut StateDb,
+    sink: &S,
+    profile_id: Uuid,
+    holder: &str,
+    now: i64,
+) -> Result<crate::pull::PullOutcome, StateError> {
+    let pid = profile_id.to_string();
+    if load_profile(&db.conn, &pid)?.is_none() {
+        return Ok(crate::pull::PullOutcome::NothingToDo);
+    }
+    if !acquire(&mut db.conn, &pid, holder, now)? {
+        return Ok(crate::pull::PullOutcome::NothingToDo);
+    }
+    let r = crate::pull::pull_locked(db, sink, profile_id, now).await;
+    release(&db.conn, &pid, holder)?;
+    r
+}
+
 async fn publish_locked<S: JournalSink>(
     db: &mut StateDb,
     sink: &S,
@@ -301,23 +366,18 @@ async fn publish_locked<S: JournalSink>(
         }
         Err(e) => return fail(db, e, 0),
     }
-    // 3. first upload: refuse to mix with another device's journals (no merge yet)
+    // 3. never publish before having pulled once: the remote state must be materialised
+    //    first so that a joining device pairs its local nodes with existing entities
+    //    instead of duplicating them (bootstrap, docs/03 §5)
     if !row.remote_checked {
-        match sink.journal_devices(profile_id).await {
-            Ok(devs) if devs.iter().any(|d| d != &row.device_id) => {
-                return block(
-                    db,
-                    "remote_data",
-                    "this Synchrome profile already has bookmarks from another device; merging arrives with the download slice",
-                )
+        match crate::pull::pull_locked(db, sink, profile_id, now).await? {
+            crate::pull::PullOutcome::Pulled(_) | crate::pull::PullOutcome::NothingToDo => {}
+            crate::pull::PullOutcome::Blocked { kind } => {
+                return Ok(PublishOutcome::Blocked { kind })
             }
-            Ok(_) => {
-                db.conn.execute(
-                    "UPDATE profiles SET remote_checked = 1 WHERE profile_id = ?1",
-                    [pid],
-                )?;
+            crate::pull::PullOutcome::Failed { kind } => {
+                return Ok(PublishOutcome::Failed { kind, chunks: 0 })
             }
-            Err(e) => return fail(db, e, 0),
         }
     }
     // 4. seal the open chunk: from now on its bytes never change (a retry re-sends exactly

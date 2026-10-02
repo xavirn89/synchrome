@@ -464,7 +464,8 @@ async fn unmap_local_profile(state: State<'_, AppState>, mapping_id: Uuid) -> Re
     Ok(())
 }
 
-/// Upload this mapping's pending bookmark changes now. Returns the new bookmarks status.
+/// Sync this mapping's bookmarks now: download + materialise remote changes, then upload
+/// pending local ones. Returns the new bookmarks status.
 #[tauri::command]
 async fn publish_bookmarks(
     state: State<'_, AppState>,
@@ -478,7 +479,8 @@ async fn publish_bookmarks(
         return Ok(None);
     };
     drop(db);
-    bookmarks::publish_profile(&state, profile_id).await?;
+    // pull before push (remote changes are materialised; the extension applies them)
+    bookmarks::sync_profile(&state, profile_id).await?;
     Ok(bookmarks::status_for_mapping(mapping_id, profile_id))
 }
 
@@ -562,7 +564,9 @@ pub fn run() {
             tauri::async_runtime::spawn(async {
                 let state = AppState::new();
                 loop {
-                    let _ = bookmarks::publish_all_pending(&state).await;
+                    // pull (download + materialise) then publish; the extension applies
+                    // materialised remote changes on its next connection
+                    let _ = bookmarks::sync_all(&state).await;
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 }
             });

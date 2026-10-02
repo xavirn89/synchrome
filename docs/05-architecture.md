@@ -128,6 +128,8 @@ Concrete form of `observe`/`event`/`command` above for the `bookmarks` collectio
 | app → ext | `sync_status { bookmarks: { state, count, pending, last_upload_at } }` | after the publication attempt that follows an ack or `sync_now` |
 | app → ext | `error { code }` | `not_confirmed`, `source_conflict`, `too_large`, `invalid_message`, `snapshot_incomplete` |
 
+Remote apply (M1 slice 8): after flushing its own events the extension sends `bookmarks_pull { pull_id }`; the app pulls (download + materialise), publishes its pending ops, and answers `bookmarks_apply { pull_id, apply_id, ops[], more }` + `sync_status` — ops are `create_folder` / `create_bookmark` (parent = Chromium id or an earlier op), `rename`, `set_url`, `move`, `reorder` (exact child order), `delete` (non-recursive), ≤ 512 KiB per plan. The extension executes them in order with chrome.bookmarks and replies `bookmarks_applied { apply_id, results[] }` (≤ 5 000; `{ op_id, ok, id?, error? }`, errors `not_found` / `not_empty` / `failed`), receives `bookmarks_ack` + `sync_status`, then sends a forced reconcile snapshot; it repeats while `more`. Connections that resolved as `connected_offline` get an empty plan.
+
 The extension keeps unacknowledged events only in memory; a lost service worker is covered by the snapshot reconcile it performs at every start. The durable queue is the app's journal outbox.
 
 ### 4.1 Which profile is this extension instance?

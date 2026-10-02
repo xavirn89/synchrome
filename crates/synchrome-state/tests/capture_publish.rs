@@ -14,6 +14,7 @@ const T0: u64 = 1_790_900_000_000; // 2026-10-02
 struct Cloud {
     objects: HashMap<(String, String), Vec<u8>>, // (account, path) -> bytes
     events: HashSet<(String, String, u64)>,      // (account, profile, seq_to)
+    event_rows: Vec<(String, PublishedEvent)>,
     puts: usize,
 }
 
@@ -82,12 +83,37 @@ impl JournalSink for Sink<'_> {
             *f = false;
             return Err(SinkError::Offline("connection reset".into()));
         }
-        self.cloud
+        let mut c = self.cloud.lock().unwrap();
+        if c.events
+            .insert((a.clone(), ev.profile_id.to_string(), ev.seq_to))
+        {
+            c.event_rows.push((a, ev.clone()));
+        }
+        Ok(())
+    }
+    async fn list_events(&self, profile: Uuid) -> Result<Vec<RemoteEvent>, SinkError> {
+        let a = self.acct()?;
+        let c = self.cloud.lock().unwrap();
+        Ok(c.event_rows
+            .iter()
+            .filter(|(acc, e)| acc == &a && e.profile_id == profile)
+            .map(|(_, e)| RemoteEvent {
+                device_id: e.device_id.to_string(),
+                path: e.path.clone(),
+                seq_from: e.seq_from,
+                seq_to: e.seq_to,
+            })
+            .collect())
+    }
+    async fn get_chunk(&self, path: &str) -> Result<Option<Vec<u8>>, SinkError> {
+        let a = self.acct()?;
+        Ok(self
+            .cloud
             .lock()
             .unwrap()
-            .events
-            .insert((a, ev.profile_id.to_string(), ev.seq_to));
-        Ok(())
+            .objects
+            .get(&(a, path.to_string()))
+            .cloned())
     }
 }
 
@@ -675,31 +701,39 @@ async fn one_source_per_profile_and_remote_data_gate() {
         0
     );
 
-    // remote data gate: another device already published this profile
+    // first publication of a profile pulls first: another device's journal is materialised
+    // before anything local goes up (bootstrap pairing instead of the old refusal)
     let f2 = fx();
-    let mut sink = Sink::new(&cloud, &f2.account, f2.src.mapping_id);
-    cloud.lock().unwrap().objects.insert(
-        (
-            f2.account.clone(),
-            format!(
-                "profiles/{}/journal/{}/2026/10/00000001.jsonl",
-                f2.src.profile_id,
-                Uuid::new_v4()
-            ),
-        ),
-        b"{}\n".to_vec(),
+    let sink = Sink::new(&cloud, &f2.account, f2.src.mapping_id);
+    let other_dev = Uuid::new_v4();
+    let mut a = StateDb::open_in_memory().unwrap();
+    let src_a = Source {
+        device_id: other_dev,
+        mapping_id: f2.src.mapping_id,
+        ..f2.src.clone()
+    };
+    a.capture_snapshot(&src_a, "ea", 0, &known(), T0).unwrap();
+    publish(&mut a, &sink, f2.src.profile_id, "ha", 1)
+        .await
+        .unwrap();
+    db.capture_snapshot(&f2.src, "e1", 0, &roots(), T0).unwrap();
+    assert_eq!(db.pending(f2.src.profile_id).unwrap(), 0);
+    let (pulled, published) = sync(&mut db, &sink, f2.src.profile_id, "h", 2)
+        .await
+        .unwrap();
+    assert!(
+        matches!(pulled, PullOutcome::Pulled(PullStats { ops: 6, .. })),
+        "{pulled:?}"
     );
-    db.capture_snapshot(&f2.src, "e1", 0, &known(), T0).unwrap();
+    assert_eq!(published, PublishOutcome::NothingToDo);
     assert_eq!(
-        publish(&mut db, &sink, f2.src.profile_id, "h", 1)
-            .await
-            .unwrap(),
-        PublishOutcome::Blocked {
-            kind: "remote_data".into()
-        }
+        db.status(f2.src.profile_id, f2.src.mapping_id)
+            .unwrap()
+            .download
+            .unwrap()
+            .remote_pending,
+        6
     );
-    sink.offline = false;
-    assert_eq!(db.pending(f2.src.profile_id).unwrap(), 6);
 }
 
 #[tokio::test]

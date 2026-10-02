@@ -107,6 +107,55 @@ async fn run_async(args: &[String]) -> i32 {
                 }
             }
         }
+        // Delete THIS device's row (cascades to its mappings) and forget its local bookmarks state.
+        "--dev-delete-this-device" => {
+            let session = match state.session().await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let (cloud, me) = match (state.cloud(), state.device()) {
+                (Ok(c), Ok(d)) => (c, d.clone()),
+                _ => return fail("not configured"),
+            };
+            let deleted = cloud.delete_device(&session, me.device_id).await;
+            if let Ok(mut db) = bookmarks::open_db() {
+                for p in db.profile_ids().unwrap_or_default() {
+                    let _ = db.forget_profile(p);
+                }
+            }
+            out(serde_json::json!({ "device_id": me.device_id, "deleted": deleted.is_ok() }))
+        }
+        // Map a local (disposable) profile to an EXISTING cloud profile (second device).
+        "--dev-map-existing" => {
+            let (Ok(pid), kind, dir) = (Uuid::parse_str(&arg(1)), arg(2), arg(3)) else {
+                return fail("bad profile id");
+            };
+            let kind: BrowserKind = match serde_json::from_value(serde_json::json!(kind)) {
+                Ok(k) => k,
+                Err(e) => return fail(e),
+            };
+            let session = match state.session().await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let (cloud, me) = match (state.cloud(), state.device()) {
+                (Ok(c), Ok(d)) => (c, d.clone()),
+                _ => return fail("not configured"),
+            };
+            if let Err(e) = cloud.upsert_device(&session, &me).await {
+                return fail(e);
+            }
+            match cloud
+                .map_local_profile(&session, pid, me.device_id, kind, &dir)
+                .await
+            {
+                Ok(m) => out(serde_json::json!({
+                    "mapping_id": m.id, "profile_id": m.profile_id, "device_id": m.device_id,
+                    "token_hint": m.mapping_token.hint(), "token_state": m.token_state,
+                })),
+                Err(e) => fail(e),
+            }
+        }
         "--dev-write-token" => {
             let (id, udd) = (arg(1), PathBuf::from(arg(2)));
             let Ok(id) = Uuid::parse_str(&id) else {
@@ -360,6 +409,51 @@ async fn run_async(args: &[String]) -> i32 {
                     "refresh_token_rotated": before != after,
                     "status": bookmarks::status_for_mapping(mid, pid),
                 })),
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-sync" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad mapping id");
+            };
+            let pid = match bookmarks::open_db()
+                .and_then(|d| d.profile_for_mapping(mid).map_err(|e| e.to_string()))
+            {
+                Ok(Some(p)) => p,
+                Ok(None) => return fail("no local bookmarks state for this mapping"),
+                Err(e) => return fail(e),
+            };
+            match bookmarks::sync_profile(&state, pid).await {
+                Ok((pulled, published)) => out(serde_json::json!({
+                    "pull": format!("{pulled:?}"),
+                    "publish": format!("{published:?}"),
+                    "status": bookmarks::status_for_mapping(mid, pid),
+                })),
+                Err(e) => fail(e),
+            }
+        }
+        // Open conflicts (entity ids and kinds only) and remote cursors.
+        "--dev-conflicts" => {
+            let Ok(pid) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad profile id");
+            };
+            match bookmarks::open_db()
+                .and_then(|d| d.open_conflicts(pid).map_err(|e| e.to_string()))
+            {
+                Ok(c) => out(serde_json::json!({
+                    "conflicts": c.iter().map(|(sid, kind, dev, seq)| serde_json::json!({"id": sid, "kind": kind, "remote_device": dev, "remote_seq": seq})).collect::<Vec<_>>(),
+                })),
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-remote-cursor" => {
+            let (Ok(pid), dev) = (Uuid::parse_str(&arg(1)), arg(2)) else {
+                return fail("bad profile id");
+            };
+            match bookmarks::open_db()
+                .and_then(|d| d.remote_cursor(pid, &dev).map_err(|e| e.to_string()))
+            {
+                Ok(c) => out(serde_json::json!({ "applied_through": c })),
                 Err(e) => fail(e),
             }
         }
@@ -669,6 +763,15 @@ impl synchrome_state::JournalSink for FaultAfterUpload<'_> {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         r
+    }
+    async fn list_events(
+        &self,
+        p: Uuid,
+    ) -> Result<Vec<synchrome_state::RemoteEvent>, synchrome_state::SinkError> {
+        self.inner.list_events(p).await
+    }
+    async fn get_chunk(&self, path: &str) -> Result<Option<Vec<u8>>, synchrome_state::SinkError> {
+        self.inner.get_chunk(path).await
     }
     async fn record_event(
         &self,

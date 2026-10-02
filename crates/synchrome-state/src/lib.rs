@@ -6,14 +6,19 @@
 //! native-host processes (capture) and the app (publication); every capture batch is one
 //! `BEGIN IMMEDIATE` transaction, so an ack sent after commit is never lost.
 
+mod apply;
 mod capture;
 mod publish;
+mod pull;
 mod schema;
 
+pub use apply::{ApplyAction, ApplyOp, ApplyPlan, ApplyRecord, ApplyResult, NodeRef};
 pub use capture::{CaptureError, CaptureOutcome, Source};
 pub use publish::{
-    publish, JournalSink, MappingCheck, PublishOutcome, PublishedEvent, SinkError, LEASE_SECONDS,
+    publish, pull, sync, JournalSink, MappingCheck, PublishOutcome, PublishedEvent, SinkError,
+    LEASE_SECONDS,
 };
+pub use pull::{PullOutcome, PullStats, RemoteEvent};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -70,6 +75,28 @@ pub enum BookmarksSyncState {
     Error,
 }
 
+/// What the UI shows for `Bookmarks download: …`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadState {
+    UpToDate,
+    RemoteChanges,
+    Applying,
+    Conflict,
+    Offline,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DownloadStatus {
+    pub state: DownloadState,
+    pub last_download_at: Option<i64>,
+    /// Entities with remote changes not yet applied to the browser.
+    pub remote_pending: u64,
+    pub conflicts: u64,
+    pub error: Option<String>,
+}
+
 /// Token-free, URL-free status for the webview and the extension popup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BookmarkSyncStatus {
@@ -79,6 +106,7 @@ pub struct BookmarkSyncStatus {
     pub pending: u64,
     pub last_upload_at: Option<i64>,
     pub error: Option<String>,
+    pub download: Option<DownloadStatus>,
 }
 
 impl BookmarkSyncStatus {
@@ -90,6 +118,7 @@ impl BookmarkSyncStatus {
             pending: 0,
             last_upload_at: None,
             error: None,
+            download: None,
         }
     }
 }
@@ -214,7 +243,6 @@ impl StateDb {
         let blocking = matches!(
             p.last_error_kind.as_deref(),
             Some("mapping_deleted")
-                | Some("remote_data")
                 | Some("other_account")
                 | Some("not_signed_in")
                 | Some("forbidden")
@@ -234,6 +262,7 @@ impl StateDb {
         } else {
             BookmarksSyncState::UpToDate
         };
+        let download = self.download_status(&pid)?;
         Ok(BookmarkSyncStatus {
             state,
             bookmarks: bookmarks as u64,
@@ -241,6 +270,42 @@ impl StateDb {
             pending,
             last_upload_at: p.last_upload_at,
             error: if pending > 0 { p.last_error } else { None },
+            download: Some(download),
+        })
+    }
+
+    fn download_status(&self, pid: &str) -> Result<DownloadStatus, StateError> {
+        type Row = (Option<i64>, Option<String>, Option<String>, Option<i64>);
+        let (last, err, kind, applying): Row = self.conn.query_row(
+            "SELECT last_download_at, download_error, download_error_kind, applying_since
+             FROM profiles WHERE profile_id = ?1",
+            [pid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        let remote_pending = pull::remote_pending(&self.conn, pid)?;
+        let conflicts: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT sid) FROM conflicts WHERE profile_id = ?1 AND status = 'open'",
+            [pid],
+            |r| r.get(0),
+        )?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let state = match kind.as_deref() {
+            Some("offline") => DownloadState::Offline,
+            Some(_) => DownloadState::Error,
+            None if conflicts > 0 => DownloadState::Conflict,
+            None if applying.is_some_and(|t| now - t < 120) => DownloadState::Applying,
+            None if remote_pending > 0 => DownloadState::RemoteChanges,
+            None => DownloadState::UpToDate,
+        };
+        Ok(DownloadStatus {
+            state,
+            last_download_at: last,
+            remote_pending,
+            conflicts: conflicts as u64,
+            error: err,
         })
     }
 
@@ -267,6 +332,8 @@ impl StateDb {
             "chunks",
             "ext_cursor",
             "lease",
+            "remote_cursors",
+            "conflicts",
             "profiles",
         ] {
             tx.execute(&format!("DELETE FROM {t} WHERE profile_id = ?1"), [&pid])?;

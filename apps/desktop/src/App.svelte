@@ -53,6 +53,14 @@
     offline: { label: "Offline", cls: "warn" },
     error: { label: "Error", cls: "bad" },
   };
+  const DL_STATUS = {
+    up_to_date: { label: "Up to date", cls: "ok" },
+    remote_changes: { label: "Remote changes", cls: "info" },
+    applying: { label: "Applying", cls: "info" },
+    conflict: { label: "Conflict", cls: "bad" },
+    offline: { label: "Offline", cls: "warn" },
+    error: { label: "Error", cls: "bad" },
+  };
   const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "never");
   let connectorMsg = $state({});
 
@@ -392,10 +400,20 @@
                               <span class="pdir">{bm.pending} pending</span>
                               {#if bm.pending > 0}
                                 <button class="tiny-btn" onclick={() => uploadNow(m)} disabled={busyKey === `upload:${m.id}`}
-                                  title="Uploads the queued bookmark changes to Synchrome Cloud now.">Upload now</button>
+                                  title="Downloads remote changes and uploads the queued local ones now.">Sync now</button>
                               {/if}
                               {#if bm.error}<span class="small bad">{bm.error}</span>{/if}
                             </div>
+                            {#if bm.download}
+                              <div class="bookmarks-row">
+                                <span class="small">Bookmarks download</span>
+                                <span class="badge small {DL_STATUS[bm.download.state]?.cls ?? 'muted'}">{DL_STATUS[bm.download.state]?.label ?? bm.download.state}</span>
+                                <span class="pdir">last download {when(bm.download.last_download_at)}</span>
+                                <span class="pdir">{bm.download.remote_pending} remote changes pending</span>
+                                <span class="pdir">{bm.download.conflicts} conflicts</span>
+                                {#if bm.download.error}<span class="small bad">{bm.download.error}</span>{/if}
+                              </div>
+                            {/if}
                           {/if}
                         {:else}
                           <button class="tiny-btn" onclick={() => createAndMap(b, p)} disabled={busyKey === `map:${key}`}>

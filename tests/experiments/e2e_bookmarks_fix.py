@@ -17,6 +17,8 @@ import e2e_bookmarks as eb  # noqa: E402
 
 check, dev = h.check, h.dev
 latency = {}
+# per connection since slice 8: hello, the capture message, then a pull (empty plan)
+SENT = ["hello_result", "bookmarks_ack,sync_status", "bookmarks_apply,sync_status"]
 
 
 def log_since(mark):
@@ -102,9 +104,9 @@ def main(creds):
     print("     forced snapshot connection:", json.dumps(s))
     check("5 forced equivalent snapshot received by the host on ONE isolated connection",
           s["starts"] == 1 and s["ends"] == 1 and s["hellos"] == 1 and len(s["snapshots"]) == 1 and not s["events"]
-          and s["frames"] and s["frames"][0][1:] == ("2", "3"), "")
+          and s["frames"] and s["frames"][0][1:] == ("3", "5"), "")
     check("6 isolated snapshot = 0 ops, 0 new chunks, 0 new store_events; ack then sync_status",
-          s["snapshots"] == ["Ok(Applied { ops: 0, pending: 0 })"] and s["sent"] == ["hello_result", "bookmarks_ack,sync_status"]
+          s["snapshots"] == ["Ok(Applied { ops: 0, pending: 0 })"] and s["sent"] == SENT
           and c1.get("ops") == c0.get("ops") and len(c1["chunks"]) == len(c0["chunks"]) and c1.get("store_events") == c0.get("store_events"),
           f"sent={s['sent']} ops={c1.get('ops')} chunks={len(c1['chunks'])} events={c1.get('store_events')}")
     check("6b no 30 s stall: the forced snapshot round trip completed quickly", dur < 10_000, f"{dur} ms")
@@ -133,8 +135,8 @@ def main(creds):
               and s["events"] == ["Ok(Applied { ops: 1, pending: 1 })"] and len(delta) == 1 and len(ops) == 1 and ops[0]["fields"] == fields
               and cur.get("ops") == prev.get("ops") + 1 and cur.get("store_events") == prev.get("store_events") + 1,
               json.dumps({"ops": ops, "events": s["events"]}))
-        check(f"{label}b {name}: ack then sync_status, frames in/out 2/3, latency {latency[name + '_ms']} ms (< 10 s, no 30 s stall)",
-              s["sent"] == ["hello_result", "bookmarks_ack,sync_status"] and s["frames"] and s["frames"][0][1:] == ("2", "3")
+        check(f"{label}b {name}: ack then sync_status, frames in/out 3/5, latency {latency[name + '_ms']} ms (< 10 s, no 30 s stall)",
+              s["sent"] == SENT and s["frames"] and s["frames"][0][1:] == ("3", "5")
               and 0 < latency[name + "_ms"] < 10_000, f"sent={s['sent']} conn_ms={s['frames'][0][0] if s['frames'] else None}")
         prev = cur
 
