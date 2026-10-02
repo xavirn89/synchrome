@@ -627,6 +627,140 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // Browser preferences: mode (off | recommended), one cycle now, the profile's state.
+        "--dev-prefs-mode" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-prefs-mode <mapping> <off|recommended>");
+            };
+            let mode = synchrome_sync::browser_prefs::Mode::parse(&arg(2));
+            match crate::browser_prefs::set_prefs_mode(&state, mid, mode).await {
+                Ok(()) => out(serde_json::json!({ "ok": true, "mode": mode.as_str() })),
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-prefs-cycle" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-prefs-cycle <mapping>");
+            };
+            match crate::browser_prefs::prefs_sync_now(&state, mid).await {
+                Ok(r) => out(serde_json::json!({ "report": r })),
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-prefs-view" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-prefs-view <mapping>");
+            };
+            match crate::browser_prefs::prefs_for_mapping(&state, mid) {
+                Ok(v) => out(serde_json::json!({ "prefs": v })),
+                Err(e) => fail(e),
+            }
+        }
+        // Write logical allowlisted values into a closed profile's Preferences through the
+        // product writer (no cloud): --dev-write-prefs <udd> <profile> <kind> <{"path": value|null}>
+        "--dev-write-prefs" => {
+            let udd = std::path::PathBuf::from(arg(1));
+            let Ok(map) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&arg(4))
+            else {
+                return fail("usage: --dev-write-prefs <udd> <profile> <kind> <json object>");
+            };
+            let raw: Vec<synchrome_browser::PrefEdit> = map
+                .iter()
+                .flat_map(|(p, v)| {
+                    synchrome_sync::browser_prefs::edits_for(
+                        &arg(3),
+                        p,
+                        (!v.is_null()).then_some(v),
+                    )
+                })
+                .map(|e| synchrome_browser::PrefEdit {
+                    path: e.path,
+                    value: e.value,
+                })
+                .collect();
+            let backups = match crate::local_token::app_data_dir() {
+                Ok(d) => d.join("backups").join("browser-preferences"),
+                Err(e) => return fail(e),
+            };
+            match synchrome_browser::apply_preferences(
+                &udd,
+                &arg(2),
+                &raw,
+                &synchrome_sync::browser_prefs::writable,
+                &backups,
+            ) {
+                Ok(r) => out(
+                    serde_json::json!({ "changed": r.changed, "backup": r.backup_path.is_some(), "bytes_before": r.bytes_before, "bytes_after": r.bytes_after }),
+                ),
+                Err(e) => fail(e),
+            }
+        }
+        // A closed profile's Preferences: the allowlisted logical values (non-sensitive by
+        // construction) and digests of everything else (to prove it stays unchanged).
+        "--dev-read-prefs" => {
+            let udd = std::path::PathBuf::from(arg(1));
+            let kind = if arg(3).is_empty() {
+                "helium".to_string()
+            } else {
+                arg(3)
+            };
+            let path = synchrome_browser::preferences_path(&udd, &arg(2));
+            let doc = match synchrome_browser::read_preferences(&udd, &arg(2)) {
+                Ok(d) => d,
+                Err(e) => return fail(e),
+            };
+            let major = synchrome_browser::browser_last_version(&udd)
+                .and_then(|v| synchrome_sync::browser_prefs::major_of(&v));
+            let (values, skipped) = synchrome_sync::browser_prefs::extract(&doc, &kind, major);
+            let mut rest = doc.clone();
+            let mut raw = serde_json::Map::new();
+            for p in synchrome_sync::browser_prefs::ALLOWLIST
+                .iter()
+                .map(|s| s.path)
+                .chain([synchrome_sync::browser_prefs::HELIUM_BOOKMARK_BAR_STATE])
+            {
+                let segs: Vec<&str> = p.split('.').collect();
+                let (last, parents) = segs.split_last().unwrap();
+                if let Some(serde_json::Value::Object(m)) = parents
+                    .iter()
+                    .try_fold(&mut rest, |d, k| d.as_object_mut()?.get_mut(*k))
+                {
+                    if let Some(v) = m.remove(*last) {
+                        raw.insert(p.to_string(), v);
+                    }
+                }
+                // parents left empty are pruned (both before and after a write alike)
+                for depth in (1..segs.len()).rev() {
+                    let (k, pp) = segs[..depth].split_last().unwrap();
+                    let Some(serde_json::Value::Object(m)) = pp
+                        .iter()
+                        .try_fold(&mut rest, |d, k| d.as_object_mut()?.get_mut(*k))
+                    else {
+                        break;
+                    };
+                    if m.get(*k)
+                        .is_some_and(|v| v.as_object().is_some_and(|o| o.is_empty()))
+                    {
+                        m.remove(*k);
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            let secure =
+                std::fs::read(udd.join(arg(2)).join("Secure Preferences")).unwrap_or_default();
+            let sha = |b: &[u8]| {
+                synchrome_bridge::token_sha256(&String::from_utf8_lossy(b))[..12].to_string()
+            };
+            out(serde_json::json!({
+                "values": values, "skipped": skipped, "raw": raw, "major": major,
+                "rest_sha": sha(serde_json::to_string(&rest).unwrap_or_default().as_bytes()),
+                "file_sha": sha(&bytes), "size": bytes.len(),
+                "secure_sha": sha(&secure),
+            }))
+        }
         // Held remote ops of one conflict, in merge order: device, seq, HLC.
         "--dev-conflict-held" => match bookmarks::open_db()
             .and_then(|d| d.conflict_held(&arg(1)).map_err(|e| e.to_string()))
@@ -758,6 +892,22 @@ async fn run_async(args: &[String]) -> i32 {
                         "ver": f.and_then(|f| f.get("ver").cloned()),
                         // a digest only: values never leave the harness output
                         "value_sha": value.map(|v| synchrome_bridge::token_sha256(&synchrome_sync::extension_settings::canonical(v))[..16].to_string()),
+                    })
+                })
+                .collect::<Vec<_>>());
+            // browser preference ops: allowlisted paths and their (non-sensitive) values
+            v["prefs_ops"] = serde_json::json!(ops
+                .iter()
+                .filter(|o| o.col == synchrome_sync::browser_prefs::COLLECTION)
+                .map(|o| {
+                    let f = o.fields.as_ref();
+                    serde_json::json!({
+                        "seq": o.seq, "by": o.by, "id": o.id, "hlc": o.hlc,
+                        "op": if o.op == synchrome_sync::OpKind::Delete { "delete" } else { "set" },
+                        "fields": f.map(|f| f.keys().cloned().collect::<Vec<_>>()),
+                        "value": f.and_then(|f| f.get("value").cloned()),
+                        "bk": f.and_then(|f| f.get("bk").cloned()),
+                        "maj": f.and_then(|f| f.get("maj").cloned()),
                     })
                 })
                 .collect::<Vec<_>>());

@@ -240,6 +240,7 @@ All ran against throwaway `--user-data-dir` profiles in `--headless=new` mode, s
 3. **Lock probing** on the live Helium profile: SQLite direct open → "database is locked" for `History`, `Favicons`, `Web Data`, `Top Sites`; file copy → integrity ok; LevelDB `LOCK` flock held for 3 of 5 extension stores.
 4. **LevelDB log parsing** of three extension stores: keys plain, values JSON, 197 ops in a 6 KB log.
 5. **macOS TCC probing** with the harness sandbox disabled: EPERM map in §8.7.
+6. **E13 browser preferences** (Helium 154, Chrome 154, slice 12): which candidate prefs are untracked, persisted in `Preferences` and keep an external edit; Helium's `bookmark_bar.visibility_state`; `intl.selected_languages` as the source of `accept_languages`; the product writer validated on a real Helium. Details and table: `tests/experiments/RESULTS.md` §E13; normative result: `docs/03` §3.6.
 
 6. **e12_profile_creation** (Helium, Chrome): create a profile with `--profile-directory`, rename it via `Local State` while closed, relaunch → name sticks; sequential creation works. PASS.
 7. **e3_external_extension** (Helium, Chrome): Google Chrome does not read `<user-data-dir>/External Extensions/` (only its fixed system path); Helium (Chromium-branded) does read it and issues the external update request. Descriptors are per-browser-install, not per-profile.

@@ -252,6 +252,12 @@ pub async fn sync_all(
             crate::ext_settings::settings_cycle(state, p),
         )
         .await;
+        // browser preferences: likewise, only while that profile's browser is closed
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            crate::browser_prefs::prefs_cycle(state, p),
+        )
+        .await;
     }
     out
 }

@@ -231,6 +231,42 @@ CREATE TABLE IF NOT EXISTS ext_settings_config (
 );
 ";
 
+/// v6 (slice 12): browser preferences (allowlisted `Preferences` paths, per path LWW).
+const V6: &str = "
+CREATE TABLE IF NOT EXISTS browser_preferences_entities (
+    profile_id TEXT NOT NULL,
+    path TEXT NOT NULL,                      -- preference path, e.g. bookmark_bar.show_on_all_tabs
+    -- shared (published) state
+    value TEXT,                              -- canonical JSON (NULL when deleted)
+    deleted INTEGER NOT NULL DEFAULT 0,
+    writer_kind TEXT,                        -- browser kind of the device that wrote the value
+    writer_major INTEGER,                    -- its browser major
+    field_hlc TEXT NOT NULL DEFAULT '{}',
+    deleted_hlc TEXT,
+    hlc TEXT NOT NULL DEFAULT '',
+    local_seq INTEGER NOT NULL DEFAULT 0,    -- local pending: local_seq > published_through
+    base TEXT,
+    -- this device
+    local_value TEXT,                        -- last observed logical value (NULL = absent / default)
+    observed_at INTEGER,
+    pending_apply INTEGER NOT NULL DEFAULT 0,-- remote pending: value to write into Preferences
+    compat TEXT,                             -- last apply check: ok | unsupported | version_mismatch | invalid
+    conflict INTEGER NOT NULL DEFAULT 0,     -- frozen by an open conflict
+    PRIMARY KEY (profile_id, path)
+);
+CREATE TABLE IF NOT EXISTS browser_preferences_config (
+    profile_id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL DEFAULT 'off',        -- off | recommended (per device, opt-in)
+    status TEXT,                             -- last cycle: waiting | synced | version_mismatch | error
+    error TEXT,
+    browser_kind TEXT,                       -- observed at the last capture
+    browser_major INTEGER,
+    invalid INTEGER NOT NULL DEFAULT 0,      -- allowlisted paths present here with a value outside the schema
+    last_capture_at INTEGER,
+    last_apply_at INTEGER
+);
+";
+
 pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if v < 1 {
@@ -266,6 +302,10 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     if v < 5 {
         conn.execute_batch(&format!("BEGIN; {V5} COMMIT;"))?;
         conn.pragma_update(None, "user_version", 5)?;
+    }
+    if v < 6 {
+        conn.execute_batch(&format!("BEGIN; {V6} COMMIT;"))?;
+        conn.pragma_update(None, "user_version", 6)?;
     }
     Ok(())
 }

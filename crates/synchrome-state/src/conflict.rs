@@ -609,6 +609,9 @@ pub(crate) fn options(c: &Row) -> Vec<Resolution> {
     if c.col == synchrome_sync::extension_settings::COLLECTION {
         return crate::ext_settings::options(c);
     }
+    if c.col == synchrome_sync::browser_prefs::COLLECTION {
+        return crate::browser_prefs::options(c);
+    }
     match (c.kind, c.subtype) {
         (ConflictKind::LocalPending, ConflictSubtype::EditEdit) => {
             let mut v = vec![KeepLocal, KeepRemote];
@@ -1439,6 +1442,9 @@ impl StateDb {
         if c.col == synchrome_sync::extension_settings::COLLECTION {
             return crate::ext_settings::resolve(tx, &c, res, &prof.device_id, published, now_ms);
         }
+        if c.col == synchrome_sync::browser_prefs::COLLECTION {
+            return crate::browser_prefs::resolve(tx, &c, res, &prof.device_id, published, now_ms);
+        }
         let c = if c.kind != ConflictKind::Orphan {
             if !recompute(&tx, &c, published, now)? {
                 tx.commit()?;
@@ -2008,6 +2014,8 @@ impl StateDb {
                 "extension"
             } else if c.col == synchrome_sync::extension_settings::COLLECTION {
                 "setting"
+            } else if c.col == synchrome_sync::browser_prefs::COLLECTION {
+                "preference"
             } else {
                 e.map(|e| e.kind.as_str()).unwrap_or("url")
             }
@@ -2169,7 +2177,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 5);
+        assert_eq!(n, 6);
     }
 
     #[test]

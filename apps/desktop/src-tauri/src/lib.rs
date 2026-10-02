@@ -9,6 +9,7 @@
 //! (see [`local_token`]); the same binary serves as native messaging host (see [`host`]).
 
 mod bookmarks;
+mod browser_prefs;
 #[cfg(debug_assertions)]
 mod devcli;
 mod ext_settings;
@@ -568,6 +569,34 @@ async fn extension_settings_sync_now(
     ext_settings::settings_sync_now(&state, mapping_id).await
 }
 
+/// Browser preferences state of a mapping of THIS device (counts only, never values).
+#[tauri::command]
+fn list_browser_preferences(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+) -> Result<synchrome_state::PrefsView, String> {
+    browser_prefs::prefs_for_mapping(&state, mapping_id)
+}
+
+/// Off / Sync recommended preferences, on THIS device (opt-in).
+#[tauri::command]
+async fn set_browser_preferences_mode(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+    mode: synchrome_sync::browser_prefs::Mode,
+) -> Result<(), String> {
+    browser_prefs::set_prefs_mode(&state, mapping_id, mode).await
+}
+
+/// Run the browser preferences cycle now (reads/writes only if the browser is closed).
+#[tauri::command]
+async fn browser_preferences_sync_now(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+) -> Result<browser_prefs::CycleReport, String> {
+    browser_prefs::prefs_sync_now(&state, mapping_id).await
+}
+
 /// Retry writing the mapping token into the local extension store (browser must be closed).
 #[tauri::command]
 async fn write_mapping_token_local(
@@ -743,6 +772,9 @@ pub fn run() {
             list_extension_settings,
             set_extension_settings_mode,
             extension_settings_sync_now,
+            list_browser_preferences,
+            set_browser_preferences_mode,
+            browser_preferences_sync_now,
             dev_ui_report
         ])
         .run(tauri::generate_context!())

@@ -224,3 +224,27 @@ Procedure (disposable profile): deterministic ext id `bahaodcchlkcffhkjkemenhdom
 **Verdict: PASS** (Helium; browser-independent mechanism, Chrome CLI load unavailable but the format/semantics are identical).
 
 > Note: `e8_seed.js` references `classic-level` installed under `/tmp/e8seed/` for the experiment; it is not a repo dependency. Production writes the store with the Rust LevelDB codec.
+
+## E13 — Browser preferences allowlist (M1 slice 12, 2026-10-02)
+
+Scripts: `e13_preferences.py`, `e13b_prefs_detail.py`, `e13d_writer_on_helium.py`. Disposable `--user-data-dir` profiles, `--headless=new`, Helium 0.18.2.1 (Chromium 154.0.8037.92) and Google Chrome 154.0.8037.93; values set through `chrome.settingsPrivate` on `chrome://settings` (the settings page's own API) and/or edited in `Preferences` with the browser closed, then read back after a relaunch.
+
+| path | type | stored | external edit kept | verdict |
+|---|---|---|---|---|
+| `browser.show_home_button`, `homepage`, `homepage_is_newtabpage` | bool / url / bool | `Secure Preferences` + MAC (both) | **no** (reset) | excluded: tracked prefs |
+| `download.prompt_for_download` | bool, default false (both) | `Preferences` | yes | **allowlist** |
+| `browser.enable_spellchecking` | bool, default true (both) | `Preferences` | yes | **allowlist** |
+| `intl.selected_languages` | string, default from the OS | `Preferences` | yes; `accept_languages` recomputed from it | **allowlist** |
+| `intl.accept_languages` | string | `Preferences` | **no** (recomputed from `selected_languages`) | excluded: derived |
+| `spellcheck.dictionaries` | list | `Preferences` | **no** (recomputed at startup) | excluded |
+| `spellcheck.use_spelling_service` | bool | `Preferences` | yes | excluded: sends text to Google |
+| `translate.enabled` | bool, default **false in Helium, true in Chrome** | `Preferences` | yes | excluded: diverging defaults, Google service |
+| `bookmark_bar.show_on_all_tabs` | bool, default false (both) | `Preferences` | Chrome yes; **Helium: overridden by `bookmark_bar.visibility_state`** | **allowlist** with the Helium representation |
+| `download.default_directory` | string (local path) | — | — | excluded: local path |
+
+**Helium's bookmark bar.** Helium 154 also keeps `bookmark_bar.visibility_state` (0 = shown on all tabs, 1 and 2 = not); when present it wins: an external `show_on_all_tabs: false` next to `visibility_state: 0` was reverted to true, removing `visibility_state` makes `show_on_all_tabs` authoritative, and Helium's own UI writes "hide" as `{show_on_all_tabs: false}` without `visibility_state` and "show" as `{show_on_all_tabs: true, visibility_state: 0}`. Chrome ignores `visibility_state`.
+
+**Other facts.** `<user-data-dir>/Last Version` holds the full browser version in both (`154.0.8037.92`). `Preferences` is one line, top-level keys sorted, `<` not escaped; a relaunch without changes rewrites it (`NewTabPage`, `in_product_help`, `profile`, `sessions`, …), so byte preservation is only meaningful for Synchrome's own write, not across a browser run. No `prefs.preference_reset_time` marker after any external edit of an untracked path.
+
+**E13d — the product writer on a real Helium.** `--dev-write-prefs` (the slice's `apply_preferences`) wrote the four allowlisted values with Helium closed: the rest of the document (everything but the allowlist) digest-identical, `Secure Preferences` untouched, a backup outside the profile; after relaunch Helium showed all four (and recomputed `accept_languages`); writing `false` for the bookmark bar after Helium had re-added `visibility_state: 0` was effective; removing `download.prompt_for_download` gave the default. **Verdict: PASS.**
+

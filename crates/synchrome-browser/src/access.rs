@@ -98,7 +98,7 @@ fn pid_alive(pid: i32) -> bool {
 }
 
 #[cfg(unix)]
-fn local_hostname() -> String {
+pub(crate) fn local_hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: buf is valid for buf.len() bytes; gethostname NUL-terminates on success.
     let r = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };

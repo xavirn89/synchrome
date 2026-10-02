@@ -136,6 +136,35 @@
     } catch (e) { actionError = String(e); }
     finally { busyKey = null; }
   }
+  // Browser preferences (allowlist), per mapping of this device
+  const P_STATE = { ...S_STATE, unsupported: { label: "Unsupported", cls: "muted" } };
+  const P_MODE = { off: "Off", recommended: "Sync recommended preferences" };
+  let prefList = $state({});  // mapping id -> PrefsView
+  let prefMode = $state({});  // mapping id -> chosen mode (before confirming)
+  let prefMsg = $state({});
+  async function loadPrefs(m) {
+    try { prefList = { ...prefList, [m.id]: await invoke("list_browser_preferences", { mappingId: m.id }) }; }
+    catch (e) { /* no local profile state yet for this mapping */ }
+  }
+  async function applyPrefsMode(m, mode) {
+    busyKey = `prefs:${m.id}`; actionError = null;
+    try {
+      await invoke("set_browser_preferences_mode", { mappingId: m.id, mode });
+      prefMode = { ...prefMode, [m.id]: undefined };
+      prefMsg = { ...prefMsg, [m.id]: `Browser preferences: ${P_MODE[mode]}.` };
+      await loadPrefs(m);
+    } catch (e) { actionError = String(e); }
+    finally { busyKey = null; }
+  }
+  async function prefsNow(m) {
+    busyKey = `prefs:${m.id}`; actionError = null;
+    try {
+      const r = await invoke("browser_preferences_sync_now", { mappingId: m.id });
+      prefMsg = { ...prefMsg, [m.id]: r.browser_running ? "The browser is open: preferences are read and written when it is closed." : `Preferences synced (${r.captured_ops} changes sent, ${r.paths_written} written).` };
+      await loadPrefs(m);
+    } catch (e) { actionError = String(e); }
+    finally { busyKey = null; }
+  }
   let extOpen = $state({});
   let extList = $state({});
   let extConfirm = $state(null);
@@ -197,7 +226,7 @@
   /// Rows of the Local vs Remote comparison. A remote value absent means "unchanged there".
   function compareRows(c) {
     const has = (side, g) => side.changed.includes(g);
-    if (c.item_kind === "setting") {
+    if (c.item_kind === "setting" || c.item_kind === "preference") {
       const rows = [
         { k: "Exists", l: c.local.exists ? "yes" : "deleted", r: c.remote.exists ? "yes" : "deleted" },
         { k: "Value", l: c.local.value ?? "—", r: c.remote.exists ? (c.remote.value ?? "—") : "—" },
@@ -297,6 +326,7 @@
       for (const m of mappings) {
         if (conflictsOpen[m.id]) await loadConflicts(m);
         if (extOpen[m.id]) { await loadExtensions(m); await loadSettings(m); }
+        if (m.display_status === "extension_confirmed") await loadPrefs(m);
       }
     } catch (e) {
       cloudDataError = String(e);
@@ -517,7 +547,7 @@
               {#each closed as c (c.conflict_id)}
                 <li class="row-item">
                   <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
-                  <span class="pname">{c.item_kind === "folder" ? "Folder" : c.item_kind === "extension" ? "Extension" : c.item_kind === "setting" ? "Extension setting" : "Bookmark"} “{c.name}”</span>
+                  <span class="pname">{c.item_kind === "folder" ? "Folder" : c.item_kind === "extension" ? "Extension" : c.item_kind === "setting" ? "Extension setting" : c.item_kind === "preference" ? "Browser preference" : "Bookmark"} “{c.name}”</span>
                   <span class="pdir">{c.status === "superseded" ? (c.detail ?? "no longer needed") : RES_DONE[c.resolution] ?? c.resolution}{c.resolution_ops ? ` · ${c.resolution_ops} change${c.resolution_ops === 1 ? "" : "s"} published${c.upload_pending ? " (uploading)" : ""}` : ""}</span>
                   <span class="pdir">{when(c.resolved_at)}</span>
                   {#if resolvedMsg[c.conflict_id]}<span class="ok small">{resolvedMsg[c.conflict_id]}</span>{/if}
@@ -598,6 +628,32 @@
         <p class="hint tiny">Installing opens the official store page; removing asks for confirmation. Nothing is installed or uninstalled automatically.</p>
       </div>
     {/if}
+  {/if}
+  {#if m.display_status === "extension_confirmed"}
+    {@const pv = prefList[m.id]}
+    {@const chosen = prefMode[m.id] ?? pv?.mode ?? "off"}
+    <div class="bookmarks-row prefs-row">
+      <span class="small">Browser preferences</span>
+      {#if pv}<span class="badge small {P_STATE[pv.state]?.cls ?? 'muted'}">{P_STATE[pv.state]?.label ?? pv.state}</span>{/if}
+      <select value={chosen} onchange={(e) => (prefMode = { ...prefMode, [m.id]: e.currentTarget.value })} disabled={busyKey === `prefs:${m.id}`}>
+        <option value="off">Off</option><option value="recommended">Sync recommended preferences</option>
+      </select>
+      {#if chosen !== (pv?.mode ?? "off")}
+        <button class="tiny-btn" onclick={() => applyPrefsMode(m, chosen)} disabled={busyKey === `prefs:${m.id}`}>{chosen === "off" ? "Disable" : "Enable"}</button>
+      {/if}
+      {#if pv && pv.mode !== "off"}
+        <span class="pdir">{pv.synced} preferences synced · {pv.unsupported} unsupported · {pv.pending} pending · {pv.conflicts} conflicts</span>
+        {#if ["error", "waiting_for_browser_close", "version_mismatch", "unsupported"].includes(pv.state)}
+          <button class="tiny-btn" onclick={() => prefsNow(m)} disabled={busyKey === `prefs:${m.id}`}>Retry</button>
+        {/if}
+        {#if pv.conflicts > 0}<button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Review conflicts</button>{/if}
+        {#if pv.error}<span class="small bad">{pv.error}</span>{/if}
+      {/if}
+      {#if chosen !== "off"}
+        <span class="small warn">Browser preferences may affect how your browser behaves on this device.</span>
+      {/if}
+      {#if prefMsg[m.id]}<span class="ok small" role="status">{prefMsg[m.id]}</span>{/if}
+    </div>
   {/if}
 {/snippet}
 

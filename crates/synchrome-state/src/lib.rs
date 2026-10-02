@@ -7,6 +7,7 @@
 //! `BEGIN IMMEDIATE` transaction, so an ack sent after commit is never lost.
 
 mod apply;
+mod browser_prefs;
 mod capture;
 mod conflict;
 mod ext;
@@ -16,6 +17,7 @@ mod pull;
 mod schema;
 
 pub use apply::{ApplyAction, ApplyOp, ApplyPlan, ApplyRecord, ApplyResult, NodeRef};
+pub use browser_prefs::{PrefsCapture, PrefsConfig, PrefsError, PrefsPlan, PrefsState, PrefsView};
 pub use capture::{CaptureError, CaptureOutcome, Source};
 pub use conflict::{
     ConflictKind, ConflictStatus, ConflictSubtype, ConflictView, Group, OptionView, Resolution,
@@ -382,6 +384,8 @@ impl StateDb {
             "ext_entities",
             "ext_settings_entities",
             "ext_settings_config",
+            "browser_preferences_entities",
+            "browser_preferences_config",
             "chromium_index",
             "ops",
             "chunks",

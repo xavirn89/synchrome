@@ -10,6 +10,7 @@ mod discovery;
 pub mod ext_storage;
 pub mod native_host;
 mod paths;
+pub mod prefs_file;
 
 pub use access::{detect_access, is_browser_running};
 pub use discovery::discover_browsers;
@@ -20,6 +21,10 @@ pub use ext_storage::{
 };
 pub use native_host::{host_manifest, install_native_host};
 pub use paths::user_data_dir;
+pub use prefs_file::{
+    apply_preferences, browser_last_version, preferences_path, read_preferences, PrefEdit,
+    PrefsError, PrefsReport,
+};
 
 use thiserror::Error;
 
