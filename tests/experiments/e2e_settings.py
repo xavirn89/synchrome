@@ -78,9 +78,11 @@ def cycle(d, offline=False):
 
 
 def closed_cycle(d, fixtures=(DUMMY_DIR,), offline=False):
+    """Close the browser, run a cycle, open it again (offline stays offline: an online
+    browser's native host would publish the captured ops at once)."""
     xe.stop(d)
     r = cycle(d, offline=offline)
-    xe.start(d, fixtures=list(fixtures))
+    xe.start(d, offline=offline, fixtures=list(fixtures))
     return r
 
 
@@ -183,22 +185,25 @@ def main(creds):
           and a.hl.js(f"chrome.management.get('{DUMMY}').then(e => e.version)") == "1.0.0", f"profile={pid}")
     off_a, off_b = sview(a), sview(b)
     ui, J, ok, row = ui_state(b)
-    ui.js(J + "const s = srow().querySelector('select'); s.value = 'local_sync'; s.dispatchEvent(new Event('change')); return true;")
+    ui.js(J + "const s = srow().querySelector('select'); s.value = 'local_sync'; s.dispatchEvent(new Event('change', {bubbles: true})); return true;")
     enable_btn = ui.until(J + "return all('button', srow()).map(b => b.textContent.trim()).includes('Enable settings sync');", 10)
     warn = ui.js(J + "return srow().innerText.includes('Extension settings may contain private data');")
+    ui.js(J + "btn(srow(), 'Enable settings sync').click(); return true;")
+    ui_enabled = ui.until(J + "const r = srow(); return r && r.querySelector('select').value === 'local_sync' && !btn(r, 'Enable settings sync') && (r.querySelector('.badge')?.textContent || '').trim() !== 'Off' ? (r.querySelector('.badge')?.textContent || '').trim() : null;", 90)
     ui.stop()
     check("C1.8 + C23 Off is the default on both (UI: badge Off, selector Off / Local only / Local + Sync; choosing a mode offers 'Enable settings sync' + the privacy warning)",
           off_a.get("mode") == off_b.get("mode") == "off" and off_a.get("state") == "off" and ok and row.get("badge") == "Off"
-          and row.get("mode") == "off" and row.get("options") == ["Off", "Local only", "Local + Sync"] and bool(enable_btn) and bool(warn),
-          json.dumps({k: row.get(k) for k in ("badge", "mode", "options")}))
+          and row.get("mode") == "off" and row.get("options") == ["Off", "Local only", "Local + Sync"] and enable_btn is True and warn is True,
+          json.dumps({**{k: row.get(k) for k in ("badge", "mode", "options")}, "views": [off_a.get("mode"), off_a.get("state"), off_b.get("mode")],
+                      "enable": enable_btn, "warning": warn}))
     put(a, "local", {"localTheme": "dark", "localCount": 1, "apiToken": "fixture-secret-value"})  # CASE 2.9-11
     put(a, "sync", {"syncMode": "compact", "syncEnabled": True})
     r0 = closed_cycle(a)
     check("C1.8b while Off the cycle reads nothing and publishes nothing", not r0.get("captured_ops") and not sops(a, pid), json.dumps(r0))
     ea = a.dev("--dev-settings-mode", a.mid, DUMMY, "local_sync")
-    eb_ = b.dev("--dev-settings-mode", b.mid, DUMMY, "local_sync")
     check("C1.6b distinct host logs per device", os.path.exists(os.path.join(a.data, "logs", "native-host.log")) and os.path.exists(os.path.join(b.data, "logs", "native-host.log")), "")
-    check("C1.7 Settings sync enabled explicitly: A Local + Sync, B Local + Sync", ea.get("ok") and eb_.get("ok") and sview(a)["mode"] == sview(b)["mode"] == "local_sync", "")
+    check("C1.7 + C23 Settings sync enabled explicitly: A Local + Sync (app command), B Local + Sync (UI button 'Enable settings sync')",
+          ea.get("ok") and sview(a)["mode"] == sview(b)["mode"] == "local_sync" and bool(ui_enabled), json.dumps({"b_badge_after_enable": ui_enabled}))
 
     # ---------------------------------------------------------------- CASES 2-3 capture + publication
     xe.stop(a)
@@ -287,16 +292,16 @@ def main(creds):
 
     # ---------------------------------------------------------------- CASE 9 same key, local pending (both choices)
     for choice in ("keep_local", "keep_remote"):
-        put(b, "local", {"localTheme": "b-pending"})
+        put(b, "local", {"localTheme": f"b-pending-{choice}"})
         closed_cycle(b, offline=True)  # captured, unpublished
-        put(a, "local", {"localTheme": "a-published"})
+        put(a, "local", {"localTheme": f"a-published-{choice}"})
         closed_cycle(a)
         closed_cycle(b)
         cv = setting_conflicts(b)
         c9 = cv[0] if cv else {}
         check(f"C9.58-62 [{choice}] same key, B pending: conflict extension_settings/local_pending/edit_edit (shared records); B's value not overwritten",
-              c9.get("kind") == "local_pending" and c9.get("subtype") == "edit_edit" and c9.get("local", {}).get("value") == "\"b-pending\""
-              and c9["remote"]["value"] == "\"a-published\"" and values(b).get("local/localTheme") == "b-pending", json.dumps({k: c9.get(k) for k in ("kind", "subtype")}))
+              c9.get("kind") == "local_pending" and c9.get("subtype") == "edit_edit" and c9.get("local", {}).get("value") == json.dumps(f"b-pending-{choice}")
+              and c9["remote"]["value"] == json.dumps(f"a-published-{choice}") and values(b).get("local/localTheme") == f"b-pending-{choice}", json.dumps({k: c9.get(k) for k in ("kind", "subtype")}))
         if choice == "keep_local":
             ui, J, ok, row = ui_state(b)
             ui.js(J + "btn(srow(), 'Review conflicts').click(); return true;")
@@ -308,7 +313,7 @@ def main(creds):
         rr = resolve(b, c9.get("conflict_id", ""), choice)
         closed_cycle(b)
         closed_cycle(a)
-        want = "b-pending" if choice == "keep_local" else "a-published"
+        want = f"b-pending-{choice}" if choice == "keep_local" else f"a-published-{choice}"
         check(f"C9.63-64 {choice}: both converge on {'B' if choice == 'keep_local' else 'A'}'s value; conflict resolved",
               rr.get("outcome") in ("resolved", "resolving") and values(a).get("local/localTheme") == values(b).get("local/localTheme") == want
               and not setting_conflicts(b), json.dumps(rr))
@@ -363,8 +368,9 @@ def main(creds):
                   values(a).get("local/editDel") == "b-edit" and values(b).get("local/editDel") == "b-edit" and res_op and res_op[-1]["hlc"] > a_del["hlc"],
                   json.dumps({"outcome": rr.get("outcome")}))
         else:
-            check("C12.81-82 Keep remote: the key is deleted on B; no echo (no new op, next snapshot 0 ops)",
-                  "local/editDel" not in values(b) and "local/editDel" not in values(a) and not res_op and r.get("captured_ops") == 0, json.dumps(rr))
+            check("C12.81-82 Keep remote: the key is deleted on B; the resolution op equals the remote (a tombstone); no echo (next snapshot 0 ops)",
+                  "local/editDel" not in values(b) and "local/editDel" not in values(a) and all(o["op"] == "delete" and o["id"].endswith("/local/editDel") for o in res_op)
+                  and r.get("captured_ops") == 0, json.dumps({"outcome": rr.get("outcome"), "resolution_ops": [o["op"] for o in res_op], "next": r.get("captured_ops")}))
         remove(a, "local", ["editDel"])
         closed_cycle(a)
         closed_cycle(b)
@@ -531,14 +537,15 @@ def main(creds):
           not any(k.startswith("local/bulk") for k in values(b)) and all(values(b).get(k) == v for k, v in before20.items()) and r.get("captured_ops") == 0, "")
 
     # ---------------------------------------------------------------- CASE 21 offline
+    lt_before = values(b).get("local/localTheme")
     put(a, "local", {"localTheme": "offline-change"})
     closed_cycle(a)
     cur0 = b.dev("--dev-remote-cursor", pid, a.device_id).get("applied_through")
     ro = closed_cycle(b, offline=True)
     off = b.dev("--dev-sync", b.mid, offline=True)
     check("C21.135-137 B without Cloud: cursor kept, nothing applied, state offline",
-          not ro.get("keys_written") and values(b).get("local/localTheme") == "for-v1" and b.dev("--dev-remote-cursor", pid, a.device_id).get("applied_through") == cur0
-          and "offline" in off.get("pull", ""), off.get("pull", ""))
+          not ro.get("keys_written") and values(b).get("local/localTheme") == lt_before and b.dev("--dev-remote-cursor", pid, a.device_id).get("applied_through") == cur0
+          and "offline" in off.get("pull", ""), json.dumps({"pull": off.get("pull"), "cursor_kept": b.dev("--dev-remote-cursor", pid, a.device_id).get("applied_through") == cur0}))
     closed_cycle(b)
     check("C21.138-140 Cloud back: B pulled and applied closed; converged", values(b).get("local/localTheme") == "offline-change", "")
 
@@ -569,18 +576,23 @@ def main(creds):
     re_ = cycle(b)
     ui, J, ok, row_e = ui_state(b)
     ui.stop()
-    os.chmod(sdir, stat.S_IRWXU)
     check("C23 UI Error (store unreadable) with Retry; nothing written", re_.get("errors", 0) >= 1 and row_e.get("badge") == "Error" and "Retry" in row_e.get("buttons", []),
           json.dumps({"badge": row_e.get("badge"), "errors": re_.get("errors")}))
-    cycle(b)
-    ui, J, ok, row_s = ui_state(b)  # browser closed: Synced
+    os.chmod(sdir, stat.S_IRWXU)
+    ui, J, ok, row_s = ui_state(b)  # browser closed
+    ui.js(J + "const r = srow(); const b = btn(r, 'Retry'); if (b) b.click(); return true;")
+    retried = ui.until(J + "const t = (srow().querySelector('.badge')?.textContent || '').trim(); return t === 'Synced' ? t : null;", 90)
+    row_s = ui.until(J + """const r = srow(); return r ? {text: r.innerText, badge: (r.querySelector('.badge')?.textContent || '').trim()} : null;""", 10) or {}
     panel = ui.js(J + "return all('.conflicts').map(x => x.innerText).join('\\n');") or ""
+    ui.js(J + "const s = srow().querySelector('select'); s.value = 'off'; s.dispatchEvent(new Event('change', {bubbles: true})); return true;")
+    disable = ui.until(J + "return btn(srow(), 'Disable') ? true : null;", 10)
     ui.stop()
+    check("C23 UI Retry after the error: applied, badge Synced, nothing pending", retried == "Synced" and sview(b).get("pending") == 0, json.dumps({"badge": retried}))
+    check("C23.151 selecting Off offers 'Disable' (not clicked; mode unchanged)", disable is True and sview(b).get("mode") == "local_sync", "")
     xe.start(b, fixtures=[DUMMY_DIR])
     check("C23.146-154 UI Synced with counters (keys local, keys sync, pending, conflicts, excluded sensitive) + warning; no sensitive values, no internal ids",
           row_s.get("badge") == "Synced" and all(w in row_s.get("text", "") for w in ("keys local", "keys sync", "pending", "conflicts", "excluded sensitive", "may contain private data"))
           and not any(sv_ in panel for sv_ in SECRET_VALUES) and not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-", panel), row_s.get("text", "")[:200])
-    check("C23.151 Disable offered when switching back to Off (not clicked)", True, "covered by the selector check in C1")
 
     # ---------------------------------------------------------------- CASE 25 security (before USER_B switches the Keychain)
     for dv in (a, b):
