@@ -821,12 +821,9 @@ pub(crate) fn create_orphan(
     Ok(())
 }
 
-/// Orphans whose situation changed (folder alive again, or the item deleted) are superseded.
-pub(crate) fn reevaluate_orphans(
-    tx: &Transaction<'_>,
-    pid: &str,
-    now: i64,
-) -> Result<(), StateError> {
+/// Records whose situation changed are superseded: orphans whose folder exists again (or that
+/// were deleted), folder deletes that no longer hold anything.
+pub(crate) fn reevaluate(tx: &Transaction<'_>, pid: &str, now: i64) -> Result<(), StateError> {
     let mut st = tx.prepare(&format!(
         "SELECT {ROW_COLS} FROM conflicts WHERE profile_id = ?1 AND kind = 'orphan' AND status = 'unresolved'"
     ))?;
@@ -844,7 +841,52 @@ pub(crate) fn reevaluate_orphans(
             supersede(tx, &c, "its folder exists again", now)?;
         }
     }
+    // A folder whose remote delete was refused because it held local items: once nothing is
+    // left in it (the items were moved elsewhere or deleted), the remote delete is no longer
+    // ambiguous and is applied.
+    let mut st = tx.prepare(&format!(
+        "SELECT {ROW_COLS} FROM conflicts WHERE profile_id = ?1 AND kind = 'apply_failed'
+         AND subtype = 'delete_not_empty' AND status = 'unresolved'"
+    ))?;
+    let rows: Vec<Row> = st.query_map([pid], row_from)?.collect::<Result<_, _>>()?;
+    drop(st);
+    for c in rows {
+        let kids: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM entities WHERE profile_id = ?1 AND parent = ?2 AND deleted = 0",
+            params![pid, c.sid],
+            |r| r.get(0),
+        )?;
+        if kids == 0 && !c.remote.exists {
+            supersede(
+                tx,
+                &c,
+                "the folder is empty now; the remote delete is applied",
+                now,
+            )?;
+        }
+    }
     Ok(())
+}
+
+impl StateDb {
+    /// Held remote ops of a conflict in merge order: (device, seq, HLC). Diagnostics.
+    pub fn conflict_held(
+        &self,
+        conflict_id: &str,
+    ) -> Result<Vec<(String, Option<u64>, String)>, StateError> {
+        let mut st = self.conn.prepare(
+            "SELECT remote_device, remote_seq, hlc FROM conflict_remote WHERE conflict_id = ?1
+             ORDER BY hlc",
+        )?;
+        let rows = st.query_map([conflict_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?.map(|s| s as u64),
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
 }
 
 /// A browser op of an apply plan failed for `sid`. A conflict being resolved goes back to

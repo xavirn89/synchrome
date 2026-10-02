@@ -122,11 +122,11 @@ impl StateDb {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         {
-            // orphans whose folder exists again (or that were deleted) need no decision
+            // records that need no decision any more (orphan folder back, emptied folder delete)
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            crate::conflict::reevaluate_orphans(&tx, &pid, now)?;
+            crate::conflict::reevaluate(&tx, &pid, now)?;
             tx.commit()?;
         }
         let mut st = self.conn.prepare(

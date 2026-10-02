@@ -575,6 +575,60 @@ async fn mapping_for_cloud_profile(
     mapping_views(&state, &session, mappings).await
 }
 
+/// Development-only UI driver (debug builds, `SYNCHROME_DEV_UI_DRIVER=<dir>`): the app
+/// evaluates `<dir>/in/*.js` in its own (embedded-frontend) window, and the page reports the
+/// result through this command into `<dir>/out/<id>.json`. Lets an E2E harness drive the
+/// REAL UI (WKWebView offers no automation protocol on macOS). Absent from release builds.
+#[tauri::command]
+fn dev_ui_report(id: String, value: serde_json::Value) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        let dir = std::env::var_os("SYNCHROME_DEV_UI_DRIVER").ok_or("ui driver off")?;
+        let safe: String = id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        let out = std::path::Path::new(&dir).join("out");
+        std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+        std::fs::write(out.join(format!("{safe}.json")), value.to_string())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (id, value);
+        Err("not available".into())
+    }
+}
+
+#[cfg(debug_assertions)]
+fn start_dev_ui_driver(app: &tauri::App) {
+    use tauri::Manager;
+    let Some(dir) = std::env::var_os("SYNCHROME_DEV_UI_DRIVER") else {
+        return;
+    };
+    let input = std::path::PathBuf::from(dir).join("in");
+    let _ = std::fs::create_dir_all(&input);
+    let handle = app.handle().clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let Ok(rd) = std::fs::read_dir(&input) else {
+            continue;
+        };
+        let mut files: Vec<_> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "js"))
+            .collect();
+        files.sort();
+        for f in files {
+            let js = std::fs::read_to_string(&f).unwrap_or_default();
+            let _ = std::fs::remove_file(&f);
+            if let Some(w) = handle.webview_windows().values().next() {
+                let _ = w.eval(&js);
+            }
+        }
+    });
+}
+
 /// Native messaging host mode (see [`host`]).
 pub fn run_native_host(origin: &str) -> i32 {
     host::run(origin)
@@ -591,6 +645,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::new())
         .setup(|_app| {
+            #[cfg(debug_assertions)]
+            start_dev_ui_driver(_app);
             // Background publisher: retries the bookmarks outbox (offline, app restarts,
             // a host killed mid-upload). The per-profile lease in state.sqlite keeps it from
             // racing a native host that is publishing at the same moment.
@@ -630,7 +686,8 @@ pub fn run() {
             mapping_for_cloud_profile,
             publish_bookmarks,
             list_conflicts,
-            resolve_conflicts
+            resolve_conflicts,
+            dev_ui_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running Synchrome");

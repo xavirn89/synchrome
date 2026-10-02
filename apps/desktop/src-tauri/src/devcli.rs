@@ -547,6 +547,15 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // Held remote ops of one conflict, in merge order: device, seq, HLC.
+        "--dev-conflict-held" => match bookmarks::open_db()
+            .and_then(|d| d.conflict_held(&arg(1)).map_err(|e| e.to_string()))
+        {
+            Ok(v) => out(
+                serde_json::json!({ "held": v.iter().map(|(d, s, h)| serde_json::json!({"device": d, "seq": s, "hlc": h})).collect::<Vec<_>>() }),
+            ),
+            Err(e) => fail(e),
+        },
         // Resolve one conflict exactly as the app's Resolve buttons do.
         "--dev-resolve" => {
             let Ok(mid) = Uuid::parse_str(&arg(1)) else {

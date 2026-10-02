@@ -843,3 +843,25 @@ async fn conflicts_of_another_account_or_profile_are_never_accepted() {
     assert!(matches!(r, Err(ResolveError::NotFound)), "{r:?}");
     assert_eq!(open(&w, &mut b)[0].status, ConflictStatus::Unresolved);
 }
+
+#[tokio::test]
+async fn an_emptied_folder_delete_is_superseded_and_applied() {
+    let (mut w, mut a, mut b) = folder_with_local_child().await;
+    let c = open(&w, &mut b).remove(0);
+    let x = b.br.find("Only on B");
+    let t = b.br.find("Synchrome Test");
+    b.br.move_to(&x, &t, None);
+    capture(&w, &mut b);
+    w.remote(&mut b, 1 << 20).await;
+    let h = all(&w, &mut b);
+    let h = h.iter().find(|x| x.conflict_id == c.conflict_id).unwrap();
+    assert_eq!(h.status, ConflictStatus::Superseded, "{:?}", h.detail);
+    assert!(!titles(&b).contains(&"Folder A".into()));
+    assert!(
+        titles(&b).contains(&"Only on B".into()),
+        "the moved item is kept"
+    );
+    converge(&mut w, &mut a, &mut b).await;
+    assert_eq!(a.br.tree(), b.br.tree());
+    assert!(open(&w, &mut a).is_empty() && open(&w, &mut b).is_empty());
+}

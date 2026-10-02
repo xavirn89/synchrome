@@ -200,6 +200,8 @@
       [devices, profiles, mappings] = await Promise.all([
         invoke("list_devices"), invoke("list_profiles"), invoke("list_mappings"),
       ]);
+      // open conflict panels show fresh data after every reload
+      for (const m of mappings) if (conflictsOpen[m.id]) await loadConflicts(m);
     } catch (e) {
       cloudDataError = String(e);
     } finally {
@@ -296,6 +298,9 @@
   const signedIn = $derived(!!account?.signed_in);
   const needsFda = $derived(browsers.some((b) => b.access === "requires_full_disk_access"));
   const totalProfiles = $derived(browsers.reduce((n, b) => n + b.profiles.length, 0));
+  // this device's mappings whose local profile is not among the detected ones
+  const unmatched = $derived(mappings.filter((m) => m.is_this_device
+    && !browsers.some((b) => b.kind === m.browser_kind && b.profiles.some((p) => p.dir_name === m.browser_profile_dir))));
   const cloudReady = $derived(!!cloud && cloud.configured && cloud.auth_ok);
 
   function cloudSummary(c) {
@@ -312,6 +317,120 @@
   }
   const fmtExpiry = (ts) => (ts ? new Date(ts * 1000).toLocaleString() : "");
 </script>
+
+{#snippet mappingBlock(m)}
+  <span class="arrow">→</span>
+  <strong>{m.profile_name ?? "(unknown profile)"}</strong>
+  <span class="badge small {MAP_STATUS[m.display_status]?.cls ?? 'muted'}">{MAP_STATUS[m.display_status]?.label ?? m.display_status}</span>
+  <span class="pdir">{m.device_name ?? "this device"}</span>
+  {#if m.display_status !== "extension_confirmed"}
+    <button class="tiny-btn" onclick={() => retryWrite(m)} disabled={busyKey === `write:${m.id}`}
+      title="Writes the link into this browser profile. The browser must be closed.">Retry local write</button>
+  {/if}
+  <button class="tiny-btn" onclick={() => checkExtension(m)} disabled={busyKey === `check:${m.id}`}
+    title="Re-reads the link status. The extension reconnects when the browser starts, or from its popup.">Check extension</button>
+  <button class="tiny-btn" onclick={() => unmap(m)} disabled={busyKey === `unmap:${m.id}`}>Unmap</button>
+  {#if m.local_error}<span class="small bad">{m.local_error}</span>{/if}
+  {#if m.display_status === "extension_confirmed"}
+    {@const bm = m.bookmarks ?? { state: "not_synced", bookmarks: 0, folders: 0, pending: 0 }}
+    <div class="bookmarks-row">
+      <span class="small">Bookmarks</span>
+      <span class="badge small {BM_STATUS[bm.state]?.cls ?? 'muted'}">{BM_STATUS[bm.state]?.label ?? bm.state}</span>
+      <span class="pdir">{bm.bookmarks} bookmarks · {bm.folders} folders</span>
+      <span class="pdir">last upload {when(bm.last_upload_at)}</span>
+      <span class="pdir">{bm.pending} pending</span>
+      {#if bm.pending > 0}
+        <button class="tiny-btn" onclick={() => uploadNow(m)} disabled={busyKey === `upload:${m.id}`}
+          title="Downloads remote changes and uploads the queued local ones now.">Sync now</button>
+      {/if}
+      {#if bm.error}<span class="small bad">{bm.error}</span>{/if}
+    </div>
+    {#if bm.download}
+      <div class="bookmarks-row">
+        <span class="small">Bookmarks download</span>
+        <span class="badge small {DL_STATUS[bm.download.state]?.cls ?? 'muted'}">{DL_STATUS[bm.download.state]?.label ?? bm.download.state}</span>
+        <span class="pdir">last download {when(bm.download.last_download_at)}</span>
+        <span class="pdir">{bm.download.remote_pending} remote changes pending</span>
+        {#if bm.download.conflicts > 0}
+          <span class="badge small bad">Conflict · {bm.download.conflicts}</span>
+        {:else}
+          <span class="pdir">0 conflicts</span>
+        {/if}
+        {#if bm.download.resolving > 0}<span class="badge small info">Applying {bm.download.resolving}</span>{/if}
+        <button class="tiny-btn" onclick={() => toggleConflicts(m)}>
+          {conflictsOpen[m.id] ? "Hide conflicts" : bm.download.conflicts > 0 ? `Review conflicts (${bm.download.conflicts})` : "Conflict history"}
+        </button>
+        {#if bm.download.error}<span class="small bad">{bm.download.error}</span>{/if}
+      </div>
+    {/if}
+    {#if conflictsOpen[m.id]}
+      {@const list = conflictList[m.id] ?? []}
+      {@const openList = list.filter((c) => c.status === "unresolved" || c.status === "resolving")}
+      {@const closed = list.filter((c) => c.status === "resolved" || c.status === "superseded")}
+      <div class="conflicts">
+        {#if openList.length === 0}
+          <p class="muted small">No open conflicts. Everything else keeps syncing while a conflict is open; only the conflicting item waits.</p>
+        {/if}
+        {#each openList as c (c.conflict_id)}
+          <div class="conflict">
+            <div class="conflict-head">
+              <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
+              <strong>{c.item_kind === "folder" ? "Folder" : "Bookmark"} “{c.name}”</strong>
+              <span class="pdir">{C_SUBTYPE[c.subtype] ?? c.subtype}</span>
+            </div>
+            <div class="pdir">Since {when(c.created_at)} · other device: {deviceName(c.remote_device)}{c.held > 1 ? ` · ${c.held} remote changes held` : ""}{c.attempts > 1 ? ` · ${c.attempts} failed attempts` : ""}{c.detail && c.kind === "apply_failed" ? ` · browser: ${c.detail}` : ""}</div>
+            <table class="cmp">
+              <thead><tr><th></th><th>This device</th><th>{deviceName(c.remote_device)}</th>{#if c.base}<th class="muted">Before</th>{/if}</tr></thead>
+              <tbody>
+                {#each compareRows(c) as row}
+                  <tr class={row.diff ? "diff" : ""}><td>{row.k}</td><td>{row.l}</td><td>{row.r}</td>{#if c.base}<td class="muted">{row.b ?? ""}</td>{/if}</tr>
+                {/each}
+              </tbody>
+            </table>
+            {#if c.subtype === "delete_not_empty" && c.local_items > 0}
+              <p class="warn small">{c.local_items} item{c.local_items === 1 ? "" : "s"} in this folder exist only on this device. Nothing is deleted unless you choose so.</p>
+            {/if}
+            {#if c.status === "resolving"}
+              <p class="info small">Decision saved ({RES_DONE[c.resolution] ?? c.resolution}). The browser is brought to it on the next sync.</p>
+            {:else}
+              <div class="conflict-actions">
+                {#each c.options as o}
+                  {@const key = `${c.conflict_id}:${o.resolution}`}
+                  <button class="tiny-btn {o.destructive ? 'danger' : ''}" onclick={() => choose(m, c, o)} disabled={busyKey === `resolve:${c.conflict_id}`}>
+                    {confirmKey === key ? `Confirm: ${optLabel(c, o.resolution)}` : optLabel(c, o.resolution)}
+                  </button>
+                {/each}
+                {#if confirmKey?.startsWith(c.conflict_id)}
+                  <span class="small warn">This deletes data that still exists on one side. Click again to confirm.</span>
+                  <button class="tiny-btn" onclick={() => (confirmKey = null)}>Cancel</button>
+                {/if}
+              </div>
+            {/if}
+            {#if resolvedMsg[c.conflict_id]}<p class="ok small">{resolvedMsg[c.conflict_id]}</p>{/if}
+          </div>
+        {/each}
+        {#if closed.length > 0}
+          <button class="tiny-btn" onclick={() => (showHistory = { ...showHistory, [m.id]: !showHistory[m.id] })}>
+            {showHistory[m.id] ? "Hide history" : `History (${closed.length})`}
+          </button>
+          {#if showHistory[m.id]}
+            <ul class="plain">
+              {#each closed as c (c.conflict_id)}
+                <li class="row-item">
+                  <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
+                  <span class="pname">{c.item_kind === "folder" ? "Folder" : "Bookmark"} “{c.name}”</span>
+                  <span class="pdir">{c.status === "superseded" ? (c.detail ?? "no longer needed") : RES_DONE[c.resolution] ?? c.resolution}{c.resolution_ops ? ` · ${c.resolution_ops} change${c.resolution_ops === 1 ? "" : "s"} published${c.upload_pending ? " (uploading)" : ""}` : ""}</span>
+                  <span class="pdir">{when(c.resolved_at)}</span>
+                  {#if resolvedMsg[c.conflict_id]}<span class="ok small">{resolvedMsg[c.conflict_id]}</span>{/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+  {/if}
+{/snippet}
 
 <main>
   <header>
@@ -487,117 +606,7 @@
                     {#if signedIn}
                       <div class="profile-map">
                         {#if m}
-                          <span class="arrow">→</span>
-                          <strong>{m.profile_name ?? "(unknown profile)"}</strong>
-                          <span class="badge small {MAP_STATUS[m.display_status]?.cls ?? 'muted'}">{MAP_STATUS[m.display_status]?.label ?? m.display_status}</span>
-                          <span class="pdir">{m.device_name ?? "this device"}</span>
-                          {#if m.display_status !== "extension_confirmed"}
-                            <button class="tiny-btn" onclick={() => retryWrite(m)} disabled={busyKey === `write:${m.id}`}
-                              title="Writes the link into this browser profile. The browser must be closed.">Retry local write</button>
-                          {/if}
-                          <button class="tiny-btn" onclick={() => checkExtension(m)} disabled={busyKey === `check:${m.id}`}
-                            title="Re-reads the link status. The extension reconnects when the browser starts, or from its popup.">Check extension</button>
-                          <button class="tiny-btn" onclick={() => unmap(m)} disabled={busyKey === `unmap:${m.id}`}>Unmap</button>
-                          {#if m.local_error}<span class="small bad">{m.local_error}</span>{/if}
-                          {#if m.display_status === "extension_confirmed"}
-                            {@const bm = m.bookmarks ?? { state: "not_synced", bookmarks: 0, folders: 0, pending: 0 }}
-                            <div class="bookmarks-row">
-                              <span class="small">Bookmarks</span>
-                              <span class="badge small {BM_STATUS[bm.state]?.cls ?? 'muted'}">{BM_STATUS[bm.state]?.label ?? bm.state}</span>
-                              <span class="pdir">{bm.bookmarks} bookmarks · {bm.folders} folders</span>
-                              <span class="pdir">last upload {when(bm.last_upload_at)}</span>
-                              <span class="pdir">{bm.pending} pending</span>
-                              {#if bm.pending > 0}
-                                <button class="tiny-btn" onclick={() => uploadNow(m)} disabled={busyKey === `upload:${m.id}`}
-                                  title="Downloads remote changes and uploads the queued local ones now.">Sync now</button>
-                              {/if}
-                              {#if bm.error}<span class="small bad">{bm.error}</span>{/if}
-                            </div>
-                            {#if bm.download}
-                              <div class="bookmarks-row">
-                                <span class="small">Bookmarks download</span>
-                                <span class="badge small {DL_STATUS[bm.download.state]?.cls ?? 'muted'}">{DL_STATUS[bm.download.state]?.label ?? bm.download.state}</span>
-                                <span class="pdir">last download {when(bm.download.last_download_at)}</span>
-                                <span class="pdir">{bm.download.remote_pending} remote changes pending</span>
-                                {#if bm.download.conflicts > 0}
-                                  <span class="badge small bad">Conflict · {bm.download.conflicts}</span>
-                                {:else}
-                                  <span class="pdir">0 conflicts</span>
-                                {/if}
-                                {#if bm.download.resolving > 0}<span class="badge small info">Applying {bm.download.resolving}</span>{/if}
-                                <button class="tiny-btn" onclick={() => toggleConflicts(m)}>
-                                  {conflictsOpen[m.id] ? "Hide conflicts" : bm.download.conflicts > 0 ? `Review conflicts (${bm.download.conflicts})` : "Conflict history"}
-                                </button>
-                                {#if bm.download.error}<span class="small bad">{bm.download.error}</span>{/if}
-                              </div>
-                            {/if}
-                            {#if conflictsOpen[m.id]}
-                              {@const list = conflictList[m.id] ?? []}
-                              {@const openList = list.filter((c) => c.status === "unresolved" || c.status === "resolving")}
-                              {@const closed = list.filter((c) => c.status === "resolved" || c.status === "superseded")}
-                              <div class="conflicts">
-                                {#if openList.length === 0}
-                                  <p class="muted small">No open conflicts. Everything else keeps syncing while a conflict is open; only the conflicting item waits.</p>
-                                {/if}
-                                {#each openList as c (c.conflict_id)}
-                                  <div class="conflict">
-                                    <div class="conflict-head">
-                                      <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
-                                      <strong>{c.item_kind === "folder" ? "Folder" : "Bookmark"} “{c.name}”</strong>
-                                      <span class="pdir">{C_SUBTYPE[c.subtype] ?? c.subtype}</span>
-                                    </div>
-                                    <div class="pdir">Since {when(c.created_at)} · other device: {deviceName(c.remote_device)}{c.held > 1 ? ` · ${c.held} remote changes held` : ""}{c.attempts > 1 ? ` · ${c.attempts} failed attempts` : ""}{c.detail && c.kind === "apply_failed" ? ` · browser: ${c.detail}` : ""}</div>
-                                    <table class="cmp">
-                                      <thead><tr><th></th><th>This device</th><th>{deviceName(c.remote_device)}</th>{#if c.base}<th class="muted">Before</th>{/if}</tr></thead>
-                                      <tbody>
-                                        {#each compareRows(c) as row}
-                                          <tr class={row.diff ? "diff" : ""}><td>{row.k}</td><td>{row.l}</td><td>{row.r}</td>{#if c.base}<td class="muted">{row.b ?? ""}</td>{/if}</tr>
-                                        {/each}
-                                      </tbody>
-                                    </table>
-                                    {#if c.subtype === "delete_not_empty" && c.local_items > 0}
-                                      <p class="warn small">{c.local_items} item{c.local_items === 1 ? "" : "s"} in this folder exist only on this device. Nothing is deleted unless you choose so.</p>
-                                    {/if}
-                                    {#if c.status === "resolving"}
-                                      <p class="info small">Decision saved ({RES_DONE[c.resolution] ?? c.resolution}). The browser is brought to it on the next sync.</p>
-                                    {:else}
-                                      <div class="conflict-actions">
-                                        {#each c.options as o}
-                                          {@const key = `${c.conflict_id}:${o.resolution}`}
-                                          <button class="tiny-btn {o.destructive ? 'danger' : ''}" onclick={() => choose(m, c, o)} disabled={busyKey === `resolve:${c.conflict_id}`}>
-                                            {confirmKey === key ? `Confirm: ${optLabel(c, o.resolution)}` : optLabel(c, o.resolution)}
-                                          </button>
-                                        {/each}
-                                        {#if confirmKey?.startsWith(c.conflict_id)}
-                                          <span class="small warn">This deletes data that still exists on one side. Click again to confirm.</span>
-                                          <button class="tiny-btn" onclick={() => (confirmKey = null)}>Cancel</button>
-                                        {/if}
-                                      </div>
-                                    {/if}
-                                    {#if resolvedMsg[c.conflict_id]}<p class="ok small">{resolvedMsg[c.conflict_id]}</p>{/if}
-                                  </div>
-                                {/each}
-                                {#if closed.length > 0}
-                                  <button class="tiny-btn" onclick={() => (showHistory = { ...showHistory, [m.id]: !showHistory[m.id] })}>
-                                    {showHistory[m.id] ? "Hide history" : `History (${closed.length})`}
-                                  </button>
-                                  {#if showHistory[m.id]}
-                                    <ul class="plain">
-                                      {#each closed as c (c.conflict_id)}
-                                        <li class="row-item">
-                                          <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
-                                          <span class="pname">{c.item_kind === "folder" ? "Folder" : "Bookmark"} “{c.name}”</span>
-                                          <span class="pdir">{c.status === "superseded" ? (c.detail ?? "no longer needed") : RES_DONE[c.resolution] ?? c.resolution}{c.resolution_ops ? ` · ${c.resolution_ops} change${c.resolution_ops === 1 ? "" : "s"} published${c.upload_pending ? " (uploading)" : ""}` : ""}</span>
-                                          <span class="pdir">{when(c.resolved_at)}</span>
-                                          {#if resolvedMsg[c.conflict_id]}<span class="ok small">{resolvedMsg[c.conflict_id]}</span>{/if}
-                                        </li>
-                                      {/each}
-                                    </ul>
-                                  {/if}
-                                {/if}
-                              </div>
-                            {/if}
-                          {/if}
+                          {@render mappingBlock(m)}
                         {:else}
                           <button class="tiny-btn" onclick={() => createAndMap(b, p)} disabled={busyKey === `map:${key}`}>
                             {busyKey === `map:${key}` ? "…" : "Create Synchrome profile"}
@@ -625,6 +634,24 @@
       </ul>
     {/if}
   </section>
+
+  {#if signedIn && unmatched.length > 0}
+    <section class="card">
+      <div class="card-head">
+        <h2>Mapped profiles not detected here</h2>
+        <span class="badge muted">{unmatched.length}</span>
+      </div>
+      <p class="lead">Mappings of this device whose browser profile is not in the list above (e.g. a separate user-data directory). Their sync state and conflicts are still shown.</p>
+      <ul class="plain">
+        {#each unmatched as m (m.id)}
+          <li class="profile">
+            <div class="profile-main"><span class="pname">{m.browser_kind} · {m.browser_profile_dir}</span></div>
+            <div class="profile-map">{@render mappingBlock(m)}</div>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
 </main>
 
 <style>
