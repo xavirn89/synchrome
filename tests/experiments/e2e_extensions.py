@@ -4,7 +4,9 @@ Devices A and B: two simulated installations on this machine (own SYNCHROME_DATA
 both signed in as test user A, each with its own disposable Helium --user-data-dir. USER_B
 is used only for isolation. Extensions: Synchrome (never synchronised), the inert fixtures
 tests/fixtures/dummy-extension (fixed key => same id everywhere) and dummy-theme (themes are
-excluded), and uBlock Origin, which Helium bundles in every fresh profile.
+excluded), dummy-extension-2 (on B, for local edits), and uBlock Origin, which Helium
+bundles in every fresh profile (it reports mayDisable=true but Helium refuses setEnabled on
+it: "cannot be modified by user" — the product classifies that as Protected).
 
 TEST MECHANISMS (never production behaviour):
 - install / uninstall of the dummy = relaunching Helium with / without --load-extension
@@ -32,11 +34,13 @@ from cdp import CDP  # noqa: E402
 check = h.check
 FIX = os.path.join(h.ROOT, "tests", "fixtures")
 DUMMY_DIR, THEME_DIR = os.path.join(FIX, "dummy-extension"), os.path.join(FIX, "dummy-theme")
+DUMMY2_DIR = os.path.join(FIX, "dummy-extension-2")  # on B only: for local edits that must succeed
 DUMMY = "dlijhhlcpppmppbekhaonjhlahfidkgf"
+DUMMY2 = "emklmcialpkedlojojnnkdeanalhiifk"
 UBO = "blockjmkbacgjkknlgpkjjiijinjdanf"  # bundled with Helium
 FAKE_ADMIN = "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"  # mocked policy item
 FAKE_STORE = "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"  # mocked Web Store item
-NAMES = ("Synchrome Test Dummy", "Synchrome Test Theme", "uBlock", "Policy Item", "Store Item")
+NAMES = ("Synchrome Test Dummy", "Synchrome Second Dummy", "Synchrome Test Theme", "uBlock", "Policy Item", "Store Item")
 ALLOWED_FIELDS = {"enabled", "name", "source", "type", "version"}
 M = {"latency_ms": [], "suppressed": {"A": 0, "B": 0}, "ui_sessions": 0, "user_action": 0}
 UI_LOG = []
@@ -334,7 +338,7 @@ def main(creds):
 
     # ---------------------------------------------------------------- CASE 4 controlled test install on B
     nb = len(ext_ops(a, pid, b.device_id))
-    restart(b, fixtures=[DUMMY_DIR])  # TEST MECHANISM: --load-extension
+    restart(b, fixtures=[DUMMY_DIR, DUMMY2_DIR])  # TEST MECHANISM: --load-extension
     pull(b)
     check("C4.22-24 dummy loaded on B (test mechanism): B converges; installed+enabled on A and B; B published nothing for it",
           views(b).get(DUMMY, {}).get("state") == "synced" and mgmt(a).get(DUMMY) is True and mgmt(b).get(DUMMY) is True
@@ -354,7 +358,7 @@ def main(creds):
     check("C20.110 UI#2 state Applying between download and browser apply", st2 == "Applying", str(st2))
     nb = len(ext_ops(a, pid, b.device_id))
     sup0 = int(b.hl.js("suppressedEvents") or 0)
-    sl = pull(b, js_after=f"await chrome.management.setEnabled('{UBO}', false);")  # CASE 17: legit edit right after
+    sl = pull(b, js_after=f"await chrome.management.setEnabled('{DUMMY2}', false);")  # CASE 17: legit edit right after
     ra.wait(lambda: idle(b), 60)
     plans = [p_ for p_ in ext_plans(sl) if p_[0]]
     new_b = ext_ops(a, pid, b.device_id)[nb:]
@@ -364,9 +368,10 @@ def main(creds):
           not any(o["id"] == DUMMY for o in new_b) and int(b.hl.js("suppressedEvents") or 0) > sup0, json.dumps(new_b))
     check("C5.32 reconcile snapshot after the apply = 0 ops", any("ops: 0" in x for x in ext_snaps(sl)), json.dumps(ext_snaps(sl)))
     check("C17.95-98 apply events suppressed; a legit local edit right after the reconcile (same task, no delay) IS published: no blind time window",
-          [(o["id"], o["enabled"]) for o in new_b] == [(UBO, False)], json.dumps(new_b))
+          [(o["id"], o["enabled"]) for o in new_b] == [(DUMMY2, False)], json.dumps(new_b))
     pull(a)
-    check("C17b A applied B's legit edit", mgmt(a).get(UBO) is False, "")
+    check("C17b A received B's legit edit (synchronised state disabled; A does not have that extension: Missing)",
+          views(a).get(DUMMY2, {}).get("enabled_synced") is False and views(a)[DUMMY2]["state"] == "missing", "")
 
     # ---------------------------------------------------------------- CASE 6 enable B -> A
     nb, na = len(ext_ops(a, pid, b.device_id)), len(ext_ops(a, pid, a.device_id))
@@ -381,7 +386,7 @@ def main(creds):
     _, cb0, eb0 = ra.journal(a, pid, b.device_id)
     cur0 = b.dev("--dev-remote-cursor", pid, a.device_id).get("applied_through")
     mark = log_mark(b)
-    restart(b, fixtures=[DUMMY_DIR])
+    restart(b, fixtures=[DUMMY_DIR, DUMMY2_DIR])
     app = b.dev("--dev-sync", b.mid)  # host/app restart: a fresh process
     pull(b)
     sl = log_since(b, mark)
@@ -392,7 +397,7 @@ def main(creds):
           f"snaps={ext_snaps(sl)} chunks {len(cb0)}->{len(cb1)} cursor={cur0}")
 
     # ---------------------------------------------------------------- CASE 8 offline
-    restart(b, offline=True, fixtures=[DUMMY_DIR])
+    restart(b, offline=True, fixtures=[DUMMY_DIR, DUMMY2_DIR])
     cur_off0 = b.dev("--dev-remote-cursor", pid, a.device_id).get("applied_through")
     local_change(a, DUMMY, False)
     b.hl.js("run(true)", timeout=90)
@@ -402,7 +407,7 @@ def main(creds):
           mgmt(b).get(DUMMY) is True and "offline" in off.get("pull", "") and (b.status().get("download") or {}).get("state") == "offline"
           and b.dev("--dev-remote-cursor", pid, a.device_id).get("applied_through") == cur_off0, off.get("pull", ""))
     t0 = time.time()
-    restart(b, fixtures=[DUMMY_DIR])
+    restart(b, fixtures=[DUMMY_DIR, DUMMY2_DIR])
     pull(b)
     M["latency_ms"].append(int((time.time() - t0) * 1000))
     a_seqs = sorted(o["seq"] for x in ra.journal(a, pid, a.device_id)[1] for o in x["ops"])
@@ -426,7 +431,7 @@ def main(creds):
     check("C20.110 UI#3 Protected shown without actions", st3 == "Protected" and ac3 == [], json.dumps([st3, ac3]))
 
     # ---------------------------------------------------------------- CASE 10 setEnabled refused (mocked)
-    restart(b, fixtures=[DUMMY_DIR])  # mock gone: protection lifted -> the synced state is applied
+    restart(b, fixtures=[DUMMY_DIR, DUMMY2_DIR])  # mock gone: protection lifted -> the synced state is applied
     pull(b)
     check("C9b protection lifted: B applies the synchronised state (enabled) without publishing",
           mgmt(b).get(DUMMY) is True and views(b)[DUMMY]["state"] == "synced" and len(ext_ops(a, pid, b.device_id)) == nb, "")
@@ -444,7 +449,7 @@ def main(creds):
     check("C10.57 no infinite retry: the next pulls plan nothing for it", not any(n for n, _, _ in ext_plans(sl2) + ext_plans(sl3)) and len(calls(b)) == 1, "")
     check("C10.58 no false echo: B published nothing", len(ext_ops(a, pid, b.device_id)) == nb, "")
     ui = AppUI(b)
-    st4, ac4, acu = ui.state("Synchrome Test Dummy"), ui.actions("Synchrome Test Dummy"), ui.actions("uBlock Origin")
+    st4, ac4, acu = ui.state("Synchrome Test Dummy"), ui.actions("Synchrome Test Dummy"), ui.actions("Synchrome Second Dummy")
     ui.close()
     check("C20.110-111 UI#4 User action required with Retry; a disabled synced item offers Enable",
           st4 == "User action required" and ac4 == ["Retry"] and acu == ["Enable"], json.dumps([st4, ac4, acu]))
@@ -454,7 +459,7 @@ def main(creds):
     check("C22.121 when setEnabled fails, the product falls back to User action required", vb.get(DUMMY, {}).get("state") == "user_action_required", "")
 
     # ---------------------------------------------------------------- CASE 11 uninstall on A
-    restart(b, fixtures=[DUMMY_DIR])  # plain B (no mock)
+    restart(b, fixtures=[DUMMY_DIR, DUMMY2_DIR])  # plain B (no mock)
     restart(a)  # TEST MECHANISM: relaunch without the dummy (and without the theme / mocks)
     del_a = [o for o in ext_ops(a, pid, a.device_id) if o["id"] == DUMMY and o["op"] == "delete"]
     check("C11.59-61 A detected the dummy's absence (snapshot) and published it as uninstalled", len(del_a) == 1, json.dumps(del_a))
@@ -484,14 +489,14 @@ def main(creds):
           vb.get(DUMMY, {}).get("state") == "user_action_required" and "Remove “Synchrome Test Dummy”" in ptxt and DUMMY in mgmt(b)
           and any(o == "rm" for _, o, _ in ext_plans(sl)), json.dumps(ext_plans(sl)))
     nb = len(ext_ops(a, pid, b.device_id))
-    restart(b)  # SIMULATED: the user confirmed in the popup / Chromium's native dialog
+    restart(b, fixtures=[DUMMY2_DIR])  # SIMULATED: the user confirmed in the popup / Chromium's native dialog
     pull(b)
     check("C12.68-70 (simulated final confirmation) dummy absent on B, converged, no spurious ops, nothing removed before the user's confirmation",
           DUMMY not in mgmt(b) and DUMMY not in views(b) and len(ext_ops(a, pid, b.device_id)) == nb, "")
 
     # ---------------------------------------------------------------- CASE 13 Keep here
     restart(a, fixtures=[DUMMY_DIR])  # installed again on A (published as installed)
-    restart(b, fixtures=[DUMMY_DIR])
+    restart(b, fixtures=[DUMMY_DIR, DUMMY2_DIR])
     pull(b)
     pull(a)
     restart(a)  # uninstall on A again
@@ -517,11 +522,11 @@ def main(creds):
         local_change(a, DUMMY, True)
         pull(b)
         base_ok = mgmt(a).get(DUMMY) is True and mgmt(b).get(DUMMY) is True
-        restart(b, offline=True, fixtures=[DUMMY_DIR])
+        restart(b, offline=True, fixtures=[DUMMY_DIR, DUMMY2_DIR])
         local_change(b, DUMMY, False)  # B: pending local change
         stop(b)
         restart(a)  # A: remote uninstall
-        start(b, fixtures=[DUMMY_DIR])
+        start(b, fixtures=[DUMMY_DIR, DUMMY2_DIR])
         ra.wait(lambda: views(b).get(DUMMY, {}).get("state") == "conflict", 60)
         cv = [c_ for c_ in open_conflicts(b) if c_["item_kind"] == "extension"]
         c14 = cv[0] if cv else {}
@@ -561,6 +566,7 @@ def main(creds):
 
     # ---------------------------------------------------------------- CASES 15 + 16 LWW / three-way
     b.dev("--dev-ext-action", b.mid, DUMMY, "keep")
+    pull(a)  # A receives B's decision first (otherwise A's reinstall and B's Keep are concurrent: a real conflict, case 14)
     restart(a, fixtures=[DUMMY_DIR])
     pull(b)
     pull(a)
@@ -571,7 +577,11 @@ def main(creds):
     newest = max((o for o in ext_ops(a, pid) if o["id"] == DUMMY and o["op"] == "set"), key=lambda o: o["hlc"])
     check("C15.88-90 published changes from A and B merge by HLC: both end with the newest op's value, no conflict",
           mgmt(a).get(DUMMY) is False and mgmt(b).get(DUMMY) is False and newest["enabled"] is False and not open_conflicts(a) and not open_conflicts(b),
-          json.dumps({"newest_enabled": newest["enabled"]}))
+          json.dumps({"newest_enabled": newest["enabled"], "a": mgmt(a).get(DUMMY), "b": mgmt(b).get(DUMMY),
+                      "va": {k: views(a).get(DUMMY, {}).get(k) for k in ("state", "enabled_here", "enabled_synced", "installed_here")},
+                      "vb": {k: views(b).get(DUMMY, {}).get(k) for k in ("state", "enabled_here", "enabled_synced", "installed_here")},
+                      "open": [(c_["item_kind"], c_["subtype"], c_["status"]) for d_ in (a, b) for c_ in open_conflicts(d_)],
+                      "ops": [(o["by"][:4], o["op"], o["fields"] and len(o["fields"]), o["enabled"]) for o in ext_ops(a, pid) if o["id"] == DUMMY][-6:]}))
     local_change(b, DUMMY, True)
     pull(a)  # base: enabled on both
     restart(a, offline=True, fixtures=[DUMMY_DIR])

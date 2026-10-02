@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Synchrome Second Dummy",
+  "version": "1.0.0",
+  "description": "Second inert MV3 extension for Synchrome's end-to-end tests (no permissions).",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuGBzB75voBJPmV3TQZ4yFk+KHC9/jPXvsgf6engwz1kmEo/buFgD5ytzeqheUcEEyls87Q5v/K1Q6dDWC9/QYadzdOuarDk4vMIsApFPCCxxpInH60qRK+Gef7JjkdwfvNq/ZB6218w7QZNkZKcCu/zc5VMml6YnFzFEIvvX1soB2pBSDELMyBNcU5qVP29SIefAwBO9kc8CDfofS08fzJETc/IexyLhHx+zMNFtJe25jaVl+aL/NYSbnnv/30ak3UYEyzkHAiAIok/WHoRZYJU9bcANHRZVZ8AaRTNwOmMT3QaShI/R5Mz6wYy+WKjj2cdumSFXYwybeq1HL3l+4QIDAQAB",
+  "background": { "service_worker": "worker.js" }
+}
