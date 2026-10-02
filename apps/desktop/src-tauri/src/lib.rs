@@ -484,6 +484,39 @@ async fn publish_bookmarks(
     Ok(bookmarks::status_for_mapping(mapping_id, profile_id))
 }
 
+/// Conflicts of a mapping of THIS device (open ones; `include_closed` adds the history).
+/// Titles/URLs are the user's own data and are shown; no token or internal id beyond the
+/// conflict's handle and the remote device id (mapped to a device name by the UI).
+#[tauri::command]
+fn list_conflicts(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+    include_closed: bool,
+) -> Result<Vec<synchrome_state::ConflictView>, String> {
+    bookmarks::conflicts_for_mapping(&state, mapping_id, include_closed)
+}
+
+#[derive(serde::Deserialize)]
+struct ResolveItem {
+    conflict_id: String,
+    resolution: synchrome_state::Resolution,
+}
+
+/// Resolve conflicts of a mapping of THIS device (only the current account's own profile;
+/// a conflict id of another profile or account is rejected as not found).
+#[tauri::command]
+async fn resolve_conflicts(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+    items: Vec<ResolveItem>,
+) -> Result<Vec<bookmarks::ResolveResult>, String> {
+    let items = items
+        .into_iter()
+        .map(|i| (i.conflict_id, i.resolution))
+        .collect();
+    bookmarks::resolve_for_mapping(&state, mapping_id, items).await
+}
+
 /// Retry writing the mapping token into the local extension store (browser must be closed).
 #[tauri::command]
 async fn write_mapping_token_local(
@@ -595,7 +628,9 @@ pub fn run() {
             install_native_host,
             mapping_for_local_profile,
             mapping_for_cloud_profile,
-            publish_bookmarks
+            publish_bookmarks,
+            list_conflicts,
+            resolve_conflicts
         ])
         .run(tauri::generate_context!())
         .expect("error while running Synchrome");

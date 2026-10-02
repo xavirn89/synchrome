@@ -14,6 +14,7 @@
 //! - Every entity whose browser-visible state changed gets `pending_apply` (+ which fields),
 //!   which the apply planner turns into explicit browser operations.
 
+use crate::conflict::{ConflictKind, ConflictStatus};
 use crate::publish::{JournalSink, MappingCheck, SinkError};
 use crate::{load_profile, StateDb, StateError};
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
@@ -117,26 +118,16 @@ struct Row {
     field_hlc: BTreeMap<String, String>,
     deleted_hlc: Option<String>,
     local_seq: i64,
-    conflict: bool,
     pending_fields: BTreeSet<String>,
 }
 
 fn load_row(tx: &Transaction<'_>, pid: &str, sid: &str) -> Result<Row, StateError> {
-    let r: Option<(i64, String, Option<String>, i64, i64, String)> = tx
+    let r: Option<(i64, String, Option<String>, i64, String)> = tx
         .query_row(
-            "SELECT deleted, field_hlc, deleted_hlc, local_seq, conflict, pending_fields
+            "SELECT deleted, field_hlc, deleted_hlc, local_seq, pending_fields
              FROM entities WHERE profile_id = ?1 AND sid = ?2",
             params![pid, sid],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            },
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
     Ok(match r {
@@ -146,16 +137,14 @@ fn load_row(tx: &Transaction<'_>, pid: &str, sid: &str) -> Result<Row, StateErro
             field_hlc: BTreeMap::new(),
             deleted_hlc: None,
             local_seq: 0,
-            conflict: false,
             pending_fields: BTreeSet::new(),
         },
-        Some((deleted, fh, dh, ls, c, pf)) => Row {
+        Some((deleted, fh, dh, ls, pf)) => Row {
             exists: true,
             deleted: deleted != 0,
             field_hlc: serde_json::from_str(&fh).unwrap_or_default(),
             deleted_hlc: dh,
             local_seq: ls,
-            conflict: c != 0,
             pending_fields: serde_json::from_str(&pf).unwrap_or_default(),
         },
     })
@@ -171,41 +160,37 @@ const COLUMN: &[(&str, &str)] = &[
     ("createdAt", "created_at"),
 ];
 
-/// Apply one remote op. Returns whether it was held as a conflict.
+/// Apply one remote op. Returns whether it was held in a conflict instead.
+///
+/// Held: the entity has unpublished LOCAL ops, or an open conflict that is not just an
+/// orphan (whose remote ops keep flowing so the remote side can fix it) and not already being
+/// resolved (the resolution's op is newer than everything held; later ops merge by LWW).
 fn apply_remote_op(
     tx: &Transaction<'_>,
     pid: &str,
     published_through: i64,
-    device: &str,
+    _device: &str,
     op: &Op,
     now: i64,
 ) -> Result<bool, StateError> {
     let row = load_row(tx, pid, &op.id)?;
     let local_pending = row.exists && row.local_seq > published_through;
-    if row.conflict || local_pending {
-        tx.execute(
-            "INSERT INTO conflicts (profile_id, sid, kind, remote_device, remote_seq, remote_line, detail, created_at)
-             VALUES (?1, ?2, 'local_pending', ?3, ?4, ?5, ?6, ?7)",
-            params![
-                pid,
-                op.id,
-                device,
-                op.seq as i64,
-                op.to_line(),
-                if row.conflict {
-                    "remote apply already stopped for this entity"
-                } else {
-                    "this device has unpublished local changes to the same entity"
-                },
-                now
-            ],
-        )?;
-        tx.execute(
-            "UPDATE entities SET conflict = 1 WHERE profile_id = ?1 AND sid = ?2",
-            params![pid, op.id],
-        )?;
+    let open = crate::conflict::open_for(tx, pid, &op.id)?;
+    let hold = match &open {
+        Some(c) => c.status == ConflictStatus::Unresolved && c.kind != ConflictKind::Orphan,
+        None => local_pending,
+    };
+    if hold {
+        crate::conflict::hold(tx, pid, open, op, published_through, now)?;
         return Ok(true);
     }
+    apply_lww(tx, pid, op)?;
+    Ok(false)
+}
+
+/// Merge one remote op into the materialised state by per-field LWW (no conflict check).
+pub(crate) fn apply_lww(tx: &Transaction<'_>, pid: &str, op: &Op) -> Result<(), StateError> {
+    let row = load_row(tx, pid, &op.id)?;
     let mut pending = row.pending_fields.clone();
     match op.op {
         OpKind::Set => {
@@ -276,11 +261,11 @@ fn apply_remote_op(
                      VALUES (?1, ?2, 'url', 'other', 'root:other', '', '', NULL, NULL, 1, ?3, ?3)",
                     params![pid, op.id, op.hlc],
                 )?;
-                return Ok(false);
+                return Ok(());
             }
             let newest = row.field_hlc.values().max().cloned().unwrap_or_default();
             if row.deleted || newest.as_str() >= op.hlc.as_str() {
-                return Ok(false); // already deleted (idempotent) or a newer set wins
+                return Ok(()); // already deleted (idempotent) or a newer set wins
             }
             pending.insert("deleted".into());
             tx.execute(
@@ -290,7 +275,7 @@ fn apply_remote_op(
             )?;
         }
     }
-    Ok(false)
+    Ok(())
 }
 
 pub(crate) fn remote_pending(conn: &rusqlite::Connection, pid: &str) -> Result<u64, StateError> {
@@ -509,11 +494,16 @@ impl StateDb {
             .unwrap_or(0) as u64)
     }
 
-    /// Open conflicts of a profile: (entity id, kind, remote device, remote seq).
+    /// Unresolved conflicts of a profile: (entity id, kind, last held remote device, its seq).
     pub fn open_conflicts(&self, profile_id: Uuid) -> Result<Vec<OpenConflict>, StateError> {
         let mut st = self.conn.prepare(
-            "SELECT sid, kind, remote_device, remote_seq FROM conflicts
-             WHERE profile_id = ?1 AND status = 'open' ORDER BY id",
+            "SELECT c.sid, c.kind,
+                    (SELECT r.remote_device FROM conflict_remote r WHERE r.conflict_id = c.conflict_id
+                     ORDER BY r.hlc DESC LIMIT 1),
+                    (SELECT r.remote_seq FROM conflict_remote r WHERE r.conflict_id = c.conflict_id
+                     ORDER BY r.hlc DESC LIMIT 1)
+             FROM conflicts c
+             WHERE c.profile_id = ?1 AND c.status = 'unresolved' ORDER BY c.created_at, c.rowid",
         )?;
         let rows = st.query_map([profile_id.to_string()], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))

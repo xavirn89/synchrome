@@ -277,3 +277,107 @@ pub async fn purge_profile(
     }
     Ok(n)
 }
+
+// ------------------------------------------------------------------ conflicts (slice 9)
+
+/// Outcome of one resolution request, for the webview (no ids beyond the conflict's own).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolveResult {
+    pub conflict_id: String,
+    /// `resolved` | `resolving` | `already_resolved` | `closed` | `error`
+    pub outcome: &'static str,
+    pub status: Option<synchrome_state::ConflictStatus>,
+    pub ops: usize,
+    pub error: Option<String>,
+}
+
+/// The signed-in account (from the stored session: resolving works offline; the ops are
+/// uploaded when the cloud is reachable again).
+fn current_account(state: &AppState) -> Result<String, String> {
+    state
+        .auth()?
+        .stored_session()
+        .map_err(|e| e.to_string())?
+        .map(|s| s.user_id)
+        .ok_or_else(|| "sign in to review conflicts".to_string())
+}
+
+/// The local profile behind a mapping of THIS device, checked against the current account.
+fn profile_of_mapping(state: &AppState, mapping_id: Uuid) -> Result<(String, Uuid), String> {
+    let account = current_account(state)?;
+    let db = open_db()?;
+    let pid = db
+        .profile_for_mapping(mapping_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no local bookmarks state for this mapping".to_string())?;
+    Ok((account, pid))
+}
+
+/// Conflicts of a mapping's profile (open ones; with `include_closed`, the history too).
+pub fn conflicts_for_mapping(
+    state: &AppState,
+    mapping_id: Uuid,
+    include_closed: bool,
+) -> Result<Vec<synchrome_state::ConflictView>, String> {
+    let (account, pid) = profile_of_mapping(state, mapping_id)?;
+    let mut db = open_db()?;
+    // a profile captured under another account is not shown to this one
+    if !db
+        .profile_account(pid)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|a| a == account)
+    {
+        return Err("this profile belongs to another account".into());
+    }
+    db.conflict_views(pid, include_closed)
+        .map_err(|e| e.to_string())
+}
+
+/// Resolve conflicts of a mapping's profile, then upload the resolution ops (bounded; the
+/// background loop retries if this attempt fails). The browser is brought to the decision by
+/// the extension's next apply plan.
+pub async fn resolve_for_mapping(
+    state: &AppState,
+    mapping_id: Uuid,
+    items: Vec<(String, synchrome_state::Resolution)>,
+) -> Result<Vec<ResolveResult>, String> {
+    use synchrome_state::{ResolveError, ResolveOutcome};
+    let (account, pid) = profile_of_mapping(state, mapping_id)?;
+    let mut db = open_db()?;
+    let now = synchrome_sync::hlc::now_ms();
+    let results = db.resolve_conflicts(&account, pid, &items, now);
+    drop(db);
+    let out: Vec<ResolveResult> = items
+        .iter()
+        .zip(results)
+        .map(|((id, _), r)| {
+            let (outcome, status, ops, error) = match r {
+                Ok(ResolveOutcome::Resolved { ops }) => ("resolved", None, ops, None),
+                Ok(ResolveOutcome::Resolving { ops }) => ("resolving", None, ops, None),
+                Ok(ResolveOutcome::AlreadyResolved) => ("already_resolved", None, 0, None),
+                Ok(ResolveOutcome::Closed { status }) => ("closed", Some(status), 0, None),
+                Err(ResolveError::NotFound) => {
+                    ("error", None, 0, Some("conflict not found".into()))
+                }
+                Err(e) => ("error", None, 0, Some(e.to_string())),
+            };
+            ResolveResult {
+                conflict_id: id.clone(),
+                outcome,
+                status,
+                ops,
+                error,
+            }
+        })
+        .collect();
+    if out.iter().any(|r| r.ops > 0) {
+        // publish only (no pull first): the decision was taken against the versions shown;
+        // anything newer merges by LWW after it. On failure the ops stay in the outbox.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            publish_profile(state, pid),
+        )
+        .await;
+    }
+    Ok(out)
+}

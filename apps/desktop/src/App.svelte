@@ -62,6 +62,115 @@
     error: { label: "Error", cls: "bad" },
   };
   const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "never");
+
+  // ---- conflicts (decided here, in Rust; the extension only receives the resulting apply plan) ----
+  const C_STATUS = {
+    unresolved: { label: "Conflict", cls: "bad" },
+    resolving: { label: "Applying", cls: "info" },
+    resolved: { label: "Resolved", cls: "ok" },
+    superseded: { label: "Superseded", cls: "muted" },
+  };
+  const C_SUBTYPE = {
+    edit_edit: "Changed here and on another device",
+    edit_delete: "Changed here, deleted on another device",
+    delete_edit: "Deleted here, changed on another device",
+    delete_delete: "Deleted on both devices",
+    delete_not_empty: "Deleted on another device, but it holds items that only exist here",
+    apply_error: "The browser refused a change",
+    orphan: "Added on another device into a folder deleted here",
+  };
+  const RES_DONE = {
+    keep_local: "kept this device's version",
+    keep_remote: "took the other device's version",
+    merge: "merged both changes",
+    retry: "retried",
+    relocate: "moved to a valid folder",
+  };
+  let conflictsOpen = $state({});   // mapping id -> panel open
+  let conflictList = $state({});    // mapping id -> ConflictView[]
+  let confirmKey = $state(null);    // "<conflict>:<resolution>" waiting for confirmation
+  let resolvedMsg = $state({});     // conflict id -> confirmation text
+  let showHistory = $state({});
+
+  function optLabel(c, r) {
+    const n = c.local_items;
+    switch (r) {
+      case "keep_local":
+        return { delete_edit: "Keep it deleted", orphan: "Accept the deletion", delete_not_empty: "Keep the folder" }[c.subtype] ?? "Keep this device's version";
+      case "keep_remote":
+        return {
+          edit_delete: "Delete it (as on the other device)",
+          delete_edit: "Restore the other device's version",
+          delete_not_empty: `Delete the folder and its ${n} item${n === 1 ? "" : "s"}`,
+          orphan: "Restore the deleted folder",
+        }[c.subtype] ?? "Take the other device's version";
+      case "merge": {
+        const mine = c.local.changed.join(" + "), theirs = c.remote.changed.join(" + ");
+        return `Merge: ${mine} from here, ${theirs} from the other device`;
+      }
+      case "retry": return "Retry in the browser";
+      case "relocate":
+        return c.subtype === "orphan" ? "Keep it, in the nearest existing folder" : `Move the ${n} item${n === 1 ? "" : "s"} out, then delete the folder`;
+    }
+    return r;
+  }
+  const deviceName = (id) => (id ? devices.find((d) => d.device_id === id)?.name ?? "another device" : "another device");
+  const folderText = (f) => (f ? f.join(" › ") : "—");
+  /// Rows of the Local vs Remote comparison. A remote value absent means "unchanged there".
+  function compareRows(c) {
+    const has = (side, g) => side.changed.includes(g);
+    const rv = (g, v) => (c.remote.exists === false && g !== "existence" ? "—" : has(c.remote, g) ? v : "unchanged");
+    const rows = [
+      { k: "Exists", l: c.local.exists ? "yes" : "deleted", r: c.remote.exists ? "yes" : "deleted" },
+      { k: "Title", l: c.local.title ?? "—", r: rv("title", c.remote.title ?? "—") },
+    ];
+    if (c.item_kind === "url") rows.push({ k: "URL", l: c.local.url ?? "—", r: rv("url", c.remote.url ?? "—") });
+    rows.push({ k: "Folder", l: folderText(c.local.folder), r: rv("location", folderText(c.remote.folder)) });
+    if (has(c.local, "location") || has(c.remote, "location")) {
+      const pos = (s) => (s.position ? `${s.position} of ${s.siblings}` : "—");
+      rows.push({ k: "Position", l: pos(c.local), r: rv("location", pos(c.remote)) });
+    }
+    if (c.base) {
+      const b = c.base;
+      for (const row of rows) {
+        row.b = { Title: b.title, URL: b.url, Folder: b.folder ? folderText(b.folder) : null, Exists: b.exists ? "yes" : "deleted" }[row.k] ?? null;
+      }
+    }
+    return rows.map((x) => ({ ...x, diff: x.r !== "unchanged" && x.l !== x.r }));
+  }
+  async function loadConflicts(m) {
+    try {
+      conflictList = { ...conflictList, [m.id]: await invoke("list_conflicts", { mappingId: m.id, includeClosed: true }) };
+    } catch (e) { actionError = String(e); }
+  }
+  async function toggleConflicts(m) {
+    const open = !conflictsOpen[m.id];
+    conflictsOpen = { ...conflictsOpen, [m.id]: open };
+    if (open) await loadConflicts(m);
+  }
+  function choose(m, c, o) {
+    const key = `${c.conflict_id}:${o.resolution}`;
+    if (o.destructive && confirmKey !== key) { confirmKey = key; return; }
+    return resolveOne(m, c, o.resolution);
+  }
+  async function resolveOne(m, c, resolution) {
+    confirmKey = null; actionError = null; busyKey = `resolve:${c.conflict_id}`;
+    try {
+      const [r] = await invoke("resolve_conflicts", { mappingId: m.id, items: [{ conflict_id: c.conflict_id, resolution }] });
+      const what = RES_DONE[resolution] ?? resolution;
+      resolvedMsg = {
+        ...resolvedMsg,
+        [c.conflict_id]: r.outcome === "resolved" ? `Resolved — ${what}.`
+          : r.outcome === "resolving" ? `Decision saved — ${what}; the browser is updated on the next sync.`
+          : r.outcome === "already_resolved" ? "Already resolved."
+          : r.outcome === "closed" ? `No longer open (${r.status}).`
+          : `Could not resolve: ${r.error}`,
+      };
+      await loadConflicts(m);
+      mappings = await invoke("list_mappings");
+    } catch (e) { actionError = String(e); }
+    finally { busyKey = null; }
+  }
   let connectorMsg = $state({});
 
   // ---- loaders ----
@@ -410,8 +519,82 @@
                                 <span class="badge small {DL_STATUS[bm.download.state]?.cls ?? 'muted'}">{DL_STATUS[bm.download.state]?.label ?? bm.download.state}</span>
                                 <span class="pdir">last download {when(bm.download.last_download_at)}</span>
                                 <span class="pdir">{bm.download.remote_pending} remote changes pending</span>
-                                <span class="pdir">{bm.download.conflicts} conflicts</span>
+                                {#if bm.download.conflicts > 0}
+                                  <span class="badge small bad">Conflict · {bm.download.conflicts}</span>
+                                {:else}
+                                  <span class="pdir">0 conflicts</span>
+                                {/if}
+                                {#if bm.download.resolving > 0}<span class="badge small info">Applying {bm.download.resolving}</span>{/if}
+                                <button class="tiny-btn" onclick={() => toggleConflicts(m)}>
+                                  {conflictsOpen[m.id] ? "Hide conflicts" : bm.download.conflicts > 0 ? `Review conflicts (${bm.download.conflicts})` : "Conflict history"}
+                                </button>
                                 {#if bm.download.error}<span class="small bad">{bm.download.error}</span>{/if}
+                              </div>
+                            {/if}
+                            {#if conflictsOpen[m.id]}
+                              {@const list = conflictList[m.id] ?? []}
+                              {@const openList = list.filter((c) => c.status === "unresolved" || c.status === "resolving")}
+                              {@const closed = list.filter((c) => c.status === "resolved" || c.status === "superseded")}
+                              <div class="conflicts">
+                                {#if openList.length === 0}
+                                  <p class="muted small">No open conflicts. Everything else keeps syncing while a conflict is open; only the conflicting item waits.</p>
+                                {/if}
+                                {#each openList as c (c.conflict_id)}
+                                  <div class="conflict">
+                                    <div class="conflict-head">
+                                      <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
+                                      <strong>{c.item_kind === "folder" ? "Folder" : "Bookmark"} “{c.name}”</strong>
+                                      <span class="pdir">{C_SUBTYPE[c.subtype] ?? c.subtype}</span>
+                                    </div>
+                                    <div class="pdir">Since {when(c.created_at)} · other device: {deviceName(c.remote_device)}{c.held > 1 ? ` · ${c.held} remote changes held` : ""}{c.attempts > 1 ? ` · ${c.attempts} failed attempts` : ""}{c.detail && c.kind === "apply_failed" ? ` · browser: ${c.detail}` : ""}</div>
+                                    <table class="cmp">
+                                      <thead><tr><th></th><th>This device</th><th>{deviceName(c.remote_device)}</th>{#if c.base}<th class="muted">Before</th>{/if}</tr></thead>
+                                      <tbody>
+                                        {#each compareRows(c) as row}
+                                          <tr class={row.diff ? "diff" : ""}><td>{row.k}</td><td>{row.l}</td><td>{row.r}</td>{#if c.base}<td class="muted">{row.b ?? ""}</td>{/if}</tr>
+                                        {/each}
+                                      </tbody>
+                                    </table>
+                                    {#if c.subtype === "delete_not_empty" && c.local_items > 0}
+                                      <p class="warn small">{c.local_items} item{c.local_items === 1 ? "" : "s"} in this folder exist only on this device. Nothing is deleted unless you choose so.</p>
+                                    {/if}
+                                    {#if c.status === "resolving"}
+                                      <p class="info small">Decision saved ({RES_DONE[c.resolution] ?? c.resolution}). The browser is brought to it on the next sync.</p>
+                                    {:else}
+                                      <div class="conflict-actions">
+                                        {#each c.options as o}
+                                          {@const key = `${c.conflict_id}:${o.resolution}`}
+                                          <button class="tiny-btn {o.destructive ? 'danger' : ''}" onclick={() => choose(m, c, o)} disabled={busyKey === `resolve:${c.conflict_id}`}>
+                                            {confirmKey === key ? `Confirm: ${optLabel(c, o.resolution)}` : optLabel(c, o.resolution)}
+                                          </button>
+                                        {/each}
+                                        {#if confirmKey?.startsWith(c.conflict_id)}
+                                          <span class="small warn">This deletes data that still exists on one side. Click again to confirm.</span>
+                                          <button class="tiny-btn" onclick={() => (confirmKey = null)}>Cancel</button>
+                                        {/if}
+                                      </div>
+                                    {/if}
+                                    {#if resolvedMsg[c.conflict_id]}<p class="ok small">{resolvedMsg[c.conflict_id]}</p>{/if}
+                                  </div>
+                                {/each}
+                                {#if closed.length > 0}
+                                  <button class="tiny-btn" onclick={() => (showHistory = { ...showHistory, [m.id]: !showHistory[m.id] })}>
+                                    {showHistory[m.id] ? "Hide history" : `History (${closed.length})`}
+                                  </button>
+                                  {#if showHistory[m.id]}
+                                    <ul class="plain">
+                                      {#each closed as c (c.conflict_id)}
+                                        <li class="row-item">
+                                          <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
+                                          <span class="pname">{c.item_kind === "folder" ? "Folder" : "Bookmark"} “{c.name}”</span>
+                                          <span class="pdir">{c.status === "superseded" ? (c.detail ?? "no longer needed") : RES_DONE[c.resolution] ?? c.resolution}{c.resolution_ops ? ` · ${c.resolution_ops} change${c.resolution_ops === 1 ? "" : "s"} published${c.upload_pending ? " (uploading)" : ""}` : ""}</span>
+                                          <span class="pdir">{when(c.resolved_at)}</span>
+                                          {#if resolvedMsg[c.conflict_id]}<span class="ok small">{resolvedMsg[c.conflict_id]}</span>{/if}
+                                        </li>
+                                      {/each}
+                                    </ul>
+                                  {/if}
+                                {/if}
                               </div>
                             {/if}
                           {/if}
@@ -506,4 +689,14 @@
   .badge.muted, .muted { color: #8a97a4; } .badge.muted { background: #1b2733; border-color: #2b3a49; }
   .error { background: #3a1414; color: #f0a0a0; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; display: flex; gap: 10px; align-items: center; }
   .bookmarks-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%; margin-top: 4px; }
+  .conflicts { width: 100%; margin-top: 6px; display: grid; gap: 8px; }
+  .conflict { background: #141f2a; border: 1px solid #3a2a2a; border-radius: 8px; padding: 10px 12px; }
+  .conflict-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .conflict-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+  .cmp { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; table-layout: fixed; }
+  .cmp th { text-align: left; color: #9aa7b4; font-weight: 600; padding: 3px 6px; border-bottom: 1px solid #22303d; }
+  .cmp td { padding: 3px 6px; border-bottom: 1px solid #1b2733; word-break: break-all; vertical-align: top; }
+  .cmp td:first-child { color: #6b7988; width: 70px; }
+  .cmp tr.diff td:not(:first-child) { color: #e0a94a; }
+  .info { color: #5aa6e0; }
 </style>

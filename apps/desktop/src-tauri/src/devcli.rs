@@ -533,6 +533,35 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // Conflict records of a mapping's profile (URLs reduced to their host).
+        "--dev-conflict-views" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-conflict-views <mapping> [all]");
+            };
+            match bookmarks::conflicts_for_mapping(&state, mid, arg(2) == "all") {
+                Ok(v) => {
+                    let mut j = serde_json::to_value(&v).unwrap_or_default();
+                    host_only(&mut j);
+                    out(serde_json::json!({ "conflicts": j }))
+                }
+                Err(e) => fail(e),
+            }
+        }
+        // Resolve one conflict exactly as the app's Resolve buttons do.
+        "--dev-resolve" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-resolve <mapping> <conflict_id> <resolution>");
+            };
+            let Some(res) = synchrome_state::Resolution::parse(&arg(3)) else {
+                return fail("resolution: keep_local | keep_remote | merge | retry | relocate");
+            };
+            match bookmarks::resolve_for_mapping(&state, mid, vec![(arg(2), res)]).await {
+                Ok(r) => out(
+                    serde_json::json!({ "results": r, "status": bookmarks::open_db().ok().and_then(|d| d.profile_for_mapping(mid).ok().flatten()).and_then(|p| bookmarks::status_for_mapping(mid, p)) }),
+                ),
+                Err(e) => fail(e),
+            }
+        }
         "--dev-remote-cursor" => {
             let (Ok(pid), dev) = (Uuid::parse_str(&arg(1)), arg(2)) else {
                 return fail("bad profile id");
@@ -595,7 +624,7 @@ async fn run_async(args: &[String]) -> i32 {
                             "seq_from": mine.first().map(|o| o.seq),
                             "seq_to": mine.last().map(|o| o.seq),
                             "ops": mine.iter().map(|o| serde_json::json!({
-                                "seq": o.seq, "id": o.id,
+                                "seq": o.seq, "id": o.id, "hlc": o.hlc,
                                 "op": if o.op == synchrome_sync::OpKind::Delete { "delete" } else { "set" },
                                 "fields": o.fields.as_ref().map(|f| f.keys().cloned().collect::<Vec<_>>()),
                             })).collect::<Vec<_>>(),
@@ -795,6 +824,25 @@ async fn run_async(args: &[String]) -> i32 {
             }))
         }
         other => fail(format!("unknown dev command {other:?}")),
+    }
+}
+
+/// Replace every `url` string in a JSON value by its host (validation output policy).
+fn host_only(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if k == "url" {
+                    if let Some(u) = x.as_str() {
+                        *x = url_host(u).into();
+                    }
+                } else {
+                    host_only(x);
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(host_only),
+        _ => {}
     }
 }
 

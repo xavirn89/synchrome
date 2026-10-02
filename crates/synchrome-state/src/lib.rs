@@ -8,17 +8,22 @@
 
 mod apply;
 mod capture;
+mod conflict;
 mod publish;
 mod pull;
 mod schema;
 
 pub use apply::{ApplyAction, ApplyOp, ApplyPlan, ApplyRecord, ApplyResult, NodeRef};
 pub use capture::{CaptureError, CaptureOutcome, Source};
+pub use conflict::{
+    ConflictKind, ConflictStatus, ConflictSubtype, ConflictView, Group, OptionView, Resolution,
+    ResolveError, ResolveOutcome, SideView, Version,
+};
 pub use publish::{
     publish, pull, sync, JournalSink, MappingCheck, PublishOutcome, PublishedEvent, SinkError,
     LEASE_SECONDS,
 };
-pub use pull::{PullOutcome, PullStats, RemoteEvent};
+pub use pull::{OpenConflict, PullOutcome, PullStats, RemoteEvent};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -93,7 +98,10 @@ pub struct DownloadStatus {
     pub last_download_at: Option<i64>,
     /// Entities with remote changes not yet applied to the browser.
     pub remote_pending: u64,
+    /// Unresolved conflicts (the user has to decide).
     pub conflicts: u64,
+    /// Decided conflicts whose browser apply is still pending.
+    pub resolving: u64,
     pub error: Option<String>,
 }
 
@@ -192,6 +200,11 @@ impl StateDb {
         Ok(out)
     }
 
+    /// Account that owns a profile's local state.
+    pub fn profile_account(&self, profile_id: Uuid) -> Result<Option<String>, StateError> {
+        Ok(load_profile(&self.conn, &profile_id.to_string())?.map(|p| p.account_id))
+    }
+
     /// The profile whose capture source is `mapping_id`, if any.
     pub fn profile_for_mapping(&self, mapping_id: Uuid) -> Result<Option<Uuid>, StateError> {
         let id: Option<String> = self
@@ -283,10 +296,11 @@ impl StateDb {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
         let remote_pending = pull::remote_pending(&self.conn, pid)?;
-        let conflicts: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT sid) FROM conflicts WHERE profile_id = ?1 AND status = 'open'",
+        let (conflicts, resolving): (i64, i64) = self.conn.query_row(
+            "SELECT COALESCE(SUM(status = 'unresolved'), 0), COALESCE(SUM(status = 'resolving'), 0)
+             FROM conflicts WHERE profile_id = ?1",
             [pid],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -305,6 +319,7 @@ impl StateDb {
             last_download_at: last,
             remote_pending,
             conflicts: conflicts as u64,
+            resolving: resolving as u64,
             error: err,
         })
     }
@@ -325,6 +340,11 @@ impl StateDb {
     pub fn forget_profile(&mut self, profile_id: Uuid) -> Result<(), StateError> {
         let pid = profile_id.to_string();
         let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM conflict_remote WHERE conflict_id IN
+                 (SELECT conflict_id FROM conflicts WHERE profile_id = ?1)",
+            [&pid],
+        )?;
         for t in [
             "entities",
             "chromium_index",

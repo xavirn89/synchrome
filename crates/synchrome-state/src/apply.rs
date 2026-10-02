@@ -117,6 +117,18 @@ impl StateDb {
         max_bytes: usize,
     ) -> Result<ApplyPlan, StateError> {
         let pid = profile_id.to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        {
+            // orphans whose folder exists again (or that were deleted) need no decision
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            crate::conflict::reevaluate_orphans(&tx, &pid, now)?;
+            tx.commit()?;
+        }
         let mut st = self.conn.prepare(
             "SELECT sid, kind, parent, pos, title, url, deleted, pending_apply, pending_fields, conflict
              FROM entities WHERE profile_id = ?1",
@@ -209,8 +221,8 @@ impl StateDb {
         let mut orphans: Vec<String> = Vec::new();
         for e in creates {
             let Some(parent) = parent_ref(&e.parent, &created) else {
-                // a parent deleted on this device: never "later" — make it explicit (the
-                // spec's orphan re-parenting belongs to the conflict resolver)
+                // a parent deleted on this device: never "later" — an explicit orphan
+                // conflict the user resolves (relocate / restore the folder / accept)
                 if by_sid.get(e.parent.as_str()).is_some_and(|p| p.deleted) {
                     orphans.push(e.sid.clone());
                 }
@@ -369,21 +381,14 @@ impl StateDb {
         }
         let tx = self.conn.transaction()?;
         for sid in &orphans {
-            tx.execute(
-                "UPDATE entities SET conflict = 1 WHERE profile_id = ?1 AND sid = ?2",
-                params![pid, sid],
-            )?;
-            tx.execute(
-                "INSERT INTO conflicts (profile_id, sid, kind, detail, created_at)
-                 VALUES (?1, ?2, 'orphan', 'its folder was deleted on this device', strftime('%s','now'))",
-                params![pid, sid],
-            )?;
+            crate::conflict::create_orphan(&tx, &pid, sid, now)?;
         }
         for sid in clear_now {
             tx.execute(
                 "UPDATE entities SET pending_apply = 0, pending_fields = '[]' WHERE profile_id = ?1 AND sid = ?2",
                 params![pid, sid],
             )?;
+            crate::conflict::finish_resolving(&tx, &pid, &sid, now)?;
         }
         if !plan.ops.is_empty() {
             tx.execute(
@@ -440,29 +445,33 @@ impl StateDb {
                     "UPDATE entities SET pending_apply = 0, pending_fields = '[]' WHERE profile_id = ?1 AND sid = ?2",
                     params![pid, sid],
                 )?;
+                crate::conflict::finish_resolving(&tx, &pid, sid, now)?;
                 rec.applied += 1;
             } else if let Some(r) = ops.iter().filter_map(|o| res.get(o)).find(|r| !ok(r.op_id)) {
                 failed_sids.insert(sid);
-                // A failed remote delete (e.g. folder not empty) leaves the node in the
-                // browser: restore the entity so the browser and the materialised state agree
-                // again (otherwise the next reconcile would re-create it under a new id); the
-                // remote delete is held in the conflict record.
-                tx.execute(
-                    "UPDATE entities SET conflict = 1, pending_apply = 0, pending_fields = '[]',
-                            deleted = CASE WHEN ?3 THEN 0 ELSE deleted END
-                     WHERE profile_id = ?1 AND sid = ?2",
-                    params![pid, sid, plan.deletes.values().any(|d| d == sid)],
-                )?;
-                tx.execute(
-                    "INSERT INTO conflicts (profile_id, sid, kind, detail, created_at)
-                     VALUES (?1, ?2, 'apply_failed', ?3, ?4)",
-                    params![
-                        pid,
-                        sid,
-                        r.error.clone().unwrap_or_else(|| "failed".into()),
-                        now
-                    ],
-                )?;
+                let was_delete = plan.deletes.values().any(|d| d == sid);
+                let error = r.error.clone().unwrap_or_else(|| "failed".into());
+                crate::conflict::on_apply_failed(&tx, &pid, sid, &error, was_delete, now)?;
+                if was_delete {
+                    // A failed remote delete (e.g. folder not empty) leaves the node in the
+                    // browser: restore the entity so the browser and the materialised state
+                    // agree again (otherwise the next reconcile would re-create it under a new
+                    // id); the remote delete is held in the conflict record.
+                    tx.execute(
+                        "UPDATE entities SET conflict = 1, pending_apply = 0, pending_fields = '[]',
+                                deleted = 0
+                         WHERE profile_id = ?1 AND sid = ?2",
+                        params![pid, sid],
+                    )?;
+                } else {
+                    // The browser still shows the old values: the entity stays frozen (its
+                    // pending fields are kept for a retry) so the next reconcile never turns
+                    // that stale view into local ops.
+                    tx.execute(
+                        "UPDATE entities SET conflict = 1 WHERE profile_id = ?1 AND sid = ?2",
+                        params![pid, sid],
+                    )?;
+                }
                 rec.failed += 1;
             } else {
                 rec.incomplete += 1;

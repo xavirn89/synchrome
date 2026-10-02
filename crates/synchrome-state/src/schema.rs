@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-const V1: &str = "
+pub(crate) const V1: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- one row per Synchrome profile this device captures for (journal owner = this device)
 CREATE TABLE IF NOT EXISTS profiles (
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS lease (
 
 /// v2 (M1 slice 8, remote apply): per-field HLCs and local/remote bookkeeping per entity,
 /// per-remote-device download cursors, conflict records, download status per profile.
-const V2: &str = "
+pub(crate) const V2: &str = "
 ALTER TABLE entities ADD COLUMN field_hlc TEXT NOT NULL DEFAULT '{}';   -- field -> HLC of its value
 ALTER TABLE entities ADD COLUMN deleted_hlc TEXT;
 ALTER TABLE entities ADD COLUMN local_seq INTEGER NOT NULL DEFAULT 0;  -- seq of the last LOCAL op
@@ -110,6 +110,48 @@ CREATE TABLE IF NOT EXISTS conflicts (
 CREATE INDEX IF NOT EXISTS conflicts_open_idx ON conflicts (profile_id, status);
 ";
 
+/// v3 (M1 slice 9, conflict resolution): one stable, persisted record per conflicting entity
+/// (UUID `conflict_id`, status lifecycle, LOCAL / REMOTE / BASE snapshots, the chosen
+/// resolution) plus the remote ops it holds, in order; and the pre-edit values of an entity's
+/// unpublished local changes (`entities.base`) so a conflict can show and restore the BASE.
+/// The v2 `conflicts` rows (one per held op, status `open`) are folded into the new table.
+const V3: &str = "
+ALTER TABLE entities ADD COLUMN base TEXT;  -- {seq, f:{field: value}} before the first unpublished local change
+CREATE TABLE conflicts_v3 (
+    conflict_id TEXT PRIMARY KEY,            -- UUID v4, stable for the conflict's life
+    account_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    sid TEXT NOT NULL,                       -- entity id
+    kind TEXT NOT NULL,                      -- local_pending | apply_failed | orphan
+    subtype TEXT NOT NULL,                   -- edit_edit | edit_delete | delete_edit | delete_delete
+                                             -- | delete_not_empty | apply_error | orphan
+    status TEXT NOT NULL,                    -- unresolved | resolving | resolved | superseded
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    local_json TEXT NOT NULL DEFAULT '{}',   -- LOCAL version (frozen once closed)
+    remote_json TEXT NOT NULL DEFAULT '{}',  -- REMOTE version (fold of the held ops)
+    base_json TEXT,                          -- BASE (partial) when known
+    detail TEXT,                             -- short reason / browser error code (no content)
+    attempts INTEGER NOT NULL DEFAULT 0,     -- browser apply attempts that failed
+    resolution TEXT,                         -- keep_local | keep_remote | merge | retry | relocate
+    resolution_json TEXT,                    -- the chosen version
+    resolution_hlc TEXT,                     -- HLC of the op that carries the decision
+    resolution_ops INTEGER NOT NULL DEFAULT 0,
+    resolved_at INTEGER
+);
+CREATE UNIQUE INDEX conflicts_one_open ON conflicts_v3 (profile_id, sid)
+    WHERE status IN ('unresolved', 'resolving');
+CREATE INDEX conflicts_status_idx ON conflicts_v3 (profile_id, status);
+CREATE TABLE conflict_remote (
+    conflict_id TEXT NOT NULL,
+    hlc TEXT NOT NULL,                       -- unique per op (device-suffixed, monotonic)
+    remote_device TEXT NOT NULL,
+    remote_seq INTEGER,                      -- NULL for a delete reconstructed from a tombstone
+    line TEXT NOT NULL,                      -- the held op, canonical journal line
+    PRIMARY KEY (conflict_id, hlc)
+);
+";
+
 pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if v < 1 {
@@ -119,6 +161,24 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     if v < 2 {
         conn.execute_batch(&format!("BEGIN; {V2} COMMIT;"))?;
         conn.pragma_update(None, "user_version", 2)?;
+    }
+    if v < 3 {
+        conn.execute_batch("BEGIN;")?;
+        let r = (|| {
+            conn.execute_batch(V3)?;
+            crate::conflict::migrate_v2_rows(conn)?;
+            conn.execute_batch(
+                "DROP TABLE conflicts; ALTER TABLE conflicts_v3 RENAME TO conflicts;",
+            )
+        })();
+        match r {
+            Ok(()) => conn.execute_batch("COMMIT;")?,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        }
+        conn.pragma_update(None, "user_version", 3)?;
     }
     Ok(())
 }

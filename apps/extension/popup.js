@@ -59,7 +59,10 @@ function render(s) {
     return;
   }
   const dwhen = d.last_download_at ? new Date(d.last_download_at * 1000).toLocaleString() : "never";
-  el3.textContent = `Download: ${DOWNLOAD[d.state] || d.state} · ${d.remote_pending} remote changes · ${d.conflicts} conflicts · last download ${dwhen}`;
+  // conflicts are decided in the Synchrome app; the popup only reports them
+  const conf = d.conflicts ? ` · ${d.conflicts} conflict${d.conflicts === 1 ? "" : "s"} (resolve in the Synchrome app)` : " · 0 conflicts";
+  const res = d.resolving ? ` · applying ${d.resolving} resolution${d.resolving === 1 ? "" : "s"}` : "";
+  el3.textContent = `Download: ${DOWNLOAD[d.state] || d.state} · ${d.remote_pending} remote changes${conf}${res} · last download ${dwhen}`;
 }
 
 chrome.runtime.sendMessage({ type: "get_status" }, render);

@@ -148,7 +148,7 @@ pub(crate) fn load_state(tx: &Transaction<'_>, pid: &str) -> Result<BookmarkStat
     Ok(s)
 }
 
-fn clock(tx: &Transaction<'_>, device: &str) -> Result<HlcClock, StateError> {
+pub(crate) fn clock(tx: &Transaction<'_>, device: &str) -> Result<HlcClock, StateError> {
     let last: Option<String> = tx
         .query_row("SELECT value FROM meta WHERE key = 'hlc_last'", [], |r| {
             r.get(0)
@@ -203,8 +203,38 @@ fn append_chunk(
     Ok(())
 }
 
+/// Value of an entity column as a journal field value (for BASE snapshots).
+fn prior_value(
+    field: &str,
+    prior: &(i64, String, Option<String>, String, String, String),
+) -> Option<serde_json::Value> {
+    let (deleted, title, url, parent, pos, root) = prior;
+    Some(match field {
+        "title" => title.clone().into(),
+        "url" => url
+            .clone()
+            .map(Into::into)
+            .unwrap_or(serde_json::Value::Null),
+        "parentId" => parent.clone().into(),
+        "pos" => pos.clone().into(),
+        "root" => root.clone().into(),
+        "deleted" => (*deleted != 0).into(),
+        _ => return None,
+    })
+}
+
+/// Pre-edit values of an entity's unpublished local changes: `seq` is the first local op of
+/// the current unpublished run; a record whose `seq` is already published is stale.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BaseRec {
+    pub seq: i64,
+    #[serde(default)]
+    pub f: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 /// Stamp changes with seq/HLC, write ops + chunk accounting + dirty state. Returns #ops.
-fn persist(
+/// Also used by the conflict resolver: a resolution is a set of ordinary local ops.
+pub(crate) fn persist(
     tx: &Transaction<'_>,
     pid: &str,
     did: &str,
@@ -224,6 +254,7 @@ fn persist(
         fields: Vec<(String, String)>,
         deleted: Option<String>,
         seq: i64,
+        first_seq: i64,
     }
     let mut touched: std::collections::HashMap<&str, Touch> = Default::default();
     let mut hlc_of: std::collections::HashMap<&str, String> = Default::default();
@@ -249,6 +280,9 @@ fn persist(
         )?;
         append_chunk(tx, pid, did, next_seq as u64, line.len(), hlc.wall_ms)?;
         let t = touched.entry(ch.sid()).or_default();
+        if t.first_seq == 0 {
+            t.first_seq = next_seq;
+        }
         match ch {
             Change::Set { fields, .. } => {
                 for k in fields.keys() {
@@ -272,9 +306,35 @@ fn persist(
         "UPDATE profiles SET next_seq = ?2 WHERE profile_id = ?1",
         params![pid, next_seq],
     )?;
+    let published: i64 = tx.query_row(
+        "SELECT published_through FROM profiles WHERE profile_id = ?1",
+        [pid],
+        |r| r.get(0),
+    )?;
     for sid in &state.dirty_entities {
         let e = &state.entities[sid];
         let hlc = hlc_of.get(sid.as_str()).cloned().unwrap_or_default();
+        type Prior = (i64, String, Option<String>, String, String, String);
+        let prior: Option<(Prior, Option<String>)> = tx
+            .query_row(
+                "SELECT deleted, title, url, parent, pos, root, base FROM entities
+                 WHERE profile_id = ?1 AND sid = ?2",
+                params![pid, sid],
+                |r| {
+                    Ok((
+                        (
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ),
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
         tx.execute(
             "INSERT INTO entities (profile_id, sid, kind, root, parent, pos, title, url, created_at, deleted, hlc)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -308,16 +368,41 @@ fn persist(
             for (k, h) in &t.fields {
                 fh.insert(k.clone(), h.clone());
             }
+            // BASE: the values before the first unpublished local change of each field
+            let base = prior.as_ref().map(|(p, b)| {
+                let mut rec = b
+                    .as_deref()
+                    .and_then(|b| serde_json::from_str::<BaseRec>(b).ok())
+                    .filter(|b| b.seq > published)
+                    .unwrap_or(BaseRec {
+                        seq: t.first_seq,
+                        f: Default::default(),
+                    });
+                let names = t
+                    .fields
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .chain(t.deleted.as_ref().map(|_| "deleted"));
+                for k in names {
+                    if !rec.f.contains_key(k) {
+                        if let Some(v) = prior_value(k, p) {
+                            rec.f.insert(k.to_string(), v);
+                        }
+                    }
+                }
+                serde_json::to_string(&rec).unwrap_or_default()
+            });
             tx.execute(
                 "UPDATE entities SET field_hlc = ?3, local_seq = ?4,
-                        deleted_hlc = COALESCE(?5, deleted_hlc)
+                        deleted_hlc = COALESCE(?5, deleted_hlc), base = ?6
                  WHERE profile_id = ?1 AND sid = ?2",
                 params![
                     pid,
                     sid,
                     serde_json::to_string(&fh).unwrap_or_else(|_| "{}".into()),
                     t.seq,
-                    t.deleted
+                    t.deleted,
+                    base
                 ],
             )?;
         }
@@ -412,6 +497,7 @@ impl StateDb {
         let mut state = load_state(&tx, &pid)?;
         let changes = bookmarks::reconcile(&mut state, nodes);
         let n = persist(&tx, &pid, &did, &state, &changes, now_ms)?;
+        crate::conflict::after_local_changes(&tx, &pid, &changes, (now_ms / 1000) as i64)?;
         tx.execute(
             "UPDATE profiles SET initial_through = COALESCE(initial_through, next_seq - 1)
              WHERE profile_id = ?1",
@@ -464,6 +550,7 @@ impl StateDb {
             }
         }
         let n = persist(&tx, &pid, &did, &state, &changes, now_ms)?;
+        crate::conflict::after_local_changes(&tx, &pid, &changes, (now_ms / 1000) as i64)?;
         let max_n = fresh.iter().map(|(n, _)| *n).max().unwrap_or(0);
         set_cursor(&tx, &pid, epoch, max_n, now_ms)?;
         let pending = pending_of(&tx, &pid)?;
