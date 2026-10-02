@@ -500,6 +500,8 @@ def main(creds):
     check("76 a later remote op flows normally after the resolution (no new conflict, cursor moves on, in order)",
           "H1 a4" in titles(b) and not open_views(b) and b.dev("--dev-remote-cursor", pid, a.device_id).get("applied_through") > cur
           and converged(a, b, pid), "")
+    check("76b no spurious conflict on A: B's resolution only re-asserted A's own previous value (three-way BASE rule)",
+          not open_views(a), json.dumps([(c_["kind"], c_["subtype"], c_["status"]) for c_ in open_views(a)]))
     M["conv_ms"]["case10_retained"] = int((time.time() - t10) * 1000)
 
     # ---------------------------------------------------------------- CASE 11 persistence
@@ -587,7 +589,7 @@ def main(creds):
     merge_btns = ui.js(UI_JS + "return ['U1 by B','U2 by B','U3 by B','U4 by B'].map(n => !!btn(card(n), 'Merge'));")
     check("106 Merge offered only where valid (U3: title vs URL), absent for same-field and delete conflicts", merge_btns == [False, False, True, False], json.dumps(merge_btns))
     ui.js(UI_JS + "btn(card('U1 by B'), \"Keep this device's version\").click(); return true;")
-    ok104 = ui.until(UI_JS + "return document.body.innerText.includes('Resolved — kept this device') && badge() === 'Conflict · 3';")
+    ok104 = ui.until(UI_JS + "const s = document.querySelector('.conflicts [role=status]'); return !!s && s.textContent.includes('U1 by B') && s.textContent.includes('Resolved \u2014 kept this device') && badge() === 'Conflict \u00b7 3';")
     check("104/109 Keep local from the UI: confirmation shown, badge 4 -> 3", bool(ok104), str(badge()))
     ui.js(UI_JS + "btn(card('U2 by B'), \"Take the other device's version\").click(); return true;")
     ok105 = ui.until(UI_JS + "return document.body.innerText.includes('Decision saved') && badge() === 'Conflict · 2';")
@@ -645,8 +647,9 @@ def main(creds):
     res_b = b.dev("--dev-resolve", b.mid, a_cid, "keep_remote")
     res_c = cdev.dev("--dev-resolve", b.mid, a_cid, "keep_remote")
     leak = json.dumps([lst, res_b, res_c])
+    refused = lambda r_: "error" in r_ or all(x_.get("outcome") == "error" for x_ in r_.get("results", [{}]))
     check("96c-97 USER_B can neither list nor resolve A's conflict_id (A's installation or its own); answers are 'not found/no access' without data",
-          "error" in lst and "error" in res_b and "error" in res_c and not any(w_ in leak for w_ in ("K1", "by B", "by A", "example.")),
+          refused(lst) and refused(res_b) and refused(res_c) and "results" not in res_b and not any(w_ in leak for w_ in ("K1", "by B", "by A", "example.")),
           json.dumps({"list": lst.get("error"), "resolve_on_A_install": res_b.get("error"), "resolve_own_install": res_c.get("error")}))
     a.dev("--dev-sign-in", creds, "A")
     check("97b A's conflict untouched by those attempts", by_name(b, "K1 by B").get("status") == "resolved", "")
@@ -683,6 +686,9 @@ def main(creds):
         "conflict_to_convergence_ms": M["conv_ms"], "mean_ms": int(sum(conv) / len(conv)) if conv else None, "max_ms": max(conv) if conv else None,
         "ops_published": {"A": len(jops(a, pid, a.device_id)), "B": len(jops(a, pid, b.device_id))},
     }
+    out["open_at_end"] = [{"device": dv.name, "kind": c_["kind"], "subtype": c_["subtype"], "status": c_["status"], "name": c_["name"],
+                           "detail": c_.get("detail"), "attempts": c_.get("attempts")} for dv in (a, b) for c_ in views(dv, True)
+                          if c_["status"] in ("unresolved", "resolving")]
     print("METRICS " + json.dumps(out))
     check("metrics collected; no unresolved conflicts at the end", out["unresolved_end"] == 0, "")
 

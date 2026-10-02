@@ -865,3 +865,36 @@ async fn an_emptied_folder_delete_is_superseded_and_applied() {
     assert_eq!(a.br.tree(), b.br.tree());
     assert!(open(&w, &mut a).is_empty() && open(&w, &mut b).is_empty());
 }
+
+#[tokio::test]
+async fn a_remote_change_that_only_restores_the_base_does_not_conflict() {
+    let (mut w, mut a, mut b) = setup().await;
+    // B renames X (unpublished) ...
+    retitle(&mut b, "Bookmark 2", "B's edit");
+    capture(&w, &mut b);
+    // ... while A renames it away and back: its newest value is B's BASE again (as when a
+    // Keep-remote resolution re-asserts this device's previous value)
+    retitle(&mut a, "Bookmark 2", "A tmp");
+    w.local(&mut a).await;
+    retitle(&mut a, "A tmp", "Bookmark 2");
+    w.local(&mut a).await;
+    let out = pull_only(&w, &mut b).await;
+    assert!(
+        matches!(out, PullOutcome::Pulled(PullStats { conflicts: 2, .. })),
+        "{out:?}"
+    );
+    assert!(
+        open(&w, &mut b).is_empty(),
+        "nothing new arrived: no decision asked"
+    );
+    let h = all(&w, &mut b).remove(0);
+    assert_eq!(h.status, ConflictStatus::Superseded);
+    // B's edit wins everywhere although A's ops are newer (B re-asserted it with a fresh HLC)
+    converge(&mut w, &mut a, &mut b).await;
+    assert!(
+        titles(&a).contains(&"B's edit".to_string()),
+        "{:?}",
+        titles(&a)
+    );
+    assert_eq!(a.br.tree(), b.br.tree());
+}

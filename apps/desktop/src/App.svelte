@@ -91,6 +91,7 @@
   let confirmKey = $state(null);    // "<conflict>:<resolution>" waiting for confirmation
   let resolvedMsg = $state({});     // conflict id -> confirmation text
   let showHistory = $state({});
+  let lastResolved = $state({});    // mapping id -> latest confirmation (stays visible after the card closes)
 
   function optLabel(c, r) {
     const n = c.local_items;
@@ -158,14 +159,13 @@
     try {
       const [r] = await invoke("resolve_conflicts", { mappingId: m.id, items: [{ conflict_id: c.conflict_id, resolution }] });
       const what = RES_DONE[resolution] ?? resolution;
-      resolvedMsg = {
-        ...resolvedMsg,
-        [c.conflict_id]: r.outcome === "resolved" ? `Resolved — ${what}.`
-          : r.outcome === "resolving" ? `Decision saved — ${what}; the browser is updated on the next sync.`
-          : r.outcome === "already_resolved" ? "Already resolved."
-          : r.outcome === "closed" ? `No longer open (${r.status}).`
-          : `Could not resolve: ${r.error}`,
-      };
+      const msg = r.outcome === "resolved" ? `Resolved — ${what}.`
+        : r.outcome === "resolving" ? `Decision saved — ${what}; the browser is updated on the next sync.`
+        : r.outcome === "already_resolved" ? "Already resolved."
+        : r.outcome === "closed" ? `No longer open (${r.status}).`
+        : `Could not resolve: ${r.error}`;
+      resolvedMsg = { ...resolvedMsg, [c.conflict_id]: msg };
+      lastResolved = { ...lastResolved, [m.id]: { ok: r.outcome !== "error", text: `“${c.name}”: ${msg}` } };
       await loadConflicts(m);
       mappings = await invoke("list_mappings");
     } catch (e) { actionError = String(e); }
@@ -368,6 +368,9 @@
       {@const openList = list.filter((c) => c.status === "unresolved" || c.status === "resolving")}
       {@const closed = list.filter((c) => c.status === "resolved" || c.status === "superseded")}
       <div class="conflicts">
+        {#if lastResolved[m.id]}
+          <p class="small {lastResolved[m.id].ok ? 'ok' : 'bad'}" role="status">{lastResolved[m.id].text}</p>
+        {/if}
         {#if openList.length === 0}
           <p class="muted small">No open conflicts. Everything else keeps syncing while a conflict is open; only the conflicting item waits.</p>
         {/if}

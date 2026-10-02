@@ -494,11 +494,83 @@ fn moot(c: &Row, local: &Version, remote: &Version) -> Option<&'static str> {
         {
             Some("both sides made the same change")
         }
+        // three-way: every remote change only brings back what this device had before its
+        // own unpublished edit (its BASE) — e.g. another device's Keep-remote resolution
+        // re-asserting this device's previous value: nothing new arrived, the local edit wins
+        (ConflictKind::LocalPending, ConflictSubtype::EditEdit)
+            if c.base.as_ref().is_some_and(|b| {
+                remote.changed.iter().all(|g| {
+                    local.same(remote, *g) || (b.changed.contains(g) && b.same(remote, *g))
+                })
+            }) =>
+        {
+            Some(BASE_ONLY)
+        }
         (ConflictKind::ApplyFailed, ConflictSubtype::DeleteNotEmpty) if remote.exists => {
             Some("the remote side restored the folder")
         }
         _ => None,
     }
+}
+
+const BASE_ONLY: &str = "the other device only re-asserted this device's previous value";
+
+fn group_hlc(v: &Version, g: Group) -> Option<&str> {
+    let f: &[&str] = match g {
+        Group::Title => &["title"],
+        Group::Url => &["url"],
+        Group::Location => &["parentId", "pos"],
+        Group::Existence => &["deleted"],
+    };
+    f.iter()
+        .filter_map(|k| v.hlc.get(*k))
+        .map(String::as_str)
+        .max()
+}
+
+/// The local edit wins a [`BASE_ONLY`] record: when LWW alone would pick the (older-valued)
+/// remote op — its HLC is newer — the local values are re-emitted with a fresh HLC so every
+/// device converges on them.
+fn reassert_local(
+    tx: &Transaction<'_>,
+    c: &Row,
+    local: &Version,
+    remote: &Version,
+) -> Result<(), StateError> {
+    let groups: BTreeSet<Group> = remote
+        .changed
+        .iter()
+        .copied()
+        .filter(|g| *g != Group::Existence)
+        .filter(|g| group_hlc(local, *g) < group_hlc(remote, *g))
+        .collect();
+    if groups.is_empty() {
+        return Ok(());
+    }
+    let mut state = load_state(tx, &c.pid)?;
+    let Some(e) = state.entities.get(&c.sid).cloned() else {
+        return Ok(());
+    };
+    let did: String = tx.query_row(
+        "SELECT device_id FROM profiles WHERE profile_id = ?1",
+        [&c.pid],
+        |r| r.get(0),
+    )?;
+    let ed = set(&e, &groups, false);
+    state.dirty_entities.insert(c.sid.clone());
+    persist(
+        tx,
+        &c.pid,
+        &did,
+        &state,
+        &[ed.change],
+        synchrome_sync::hlc::now_ms(),
+    )
+    .map_err(|e| match e {
+        crate::CaptureError::State(s) => s,
+        other => StateError::Corrupt(other.to_string()),
+    })?;
+    Ok(())
 }
 
 fn mergeable(c: &Row) -> bool {
@@ -640,6 +712,9 @@ fn recompute(tx: &Transaction<'_>, c: &Row, published: i64, now: i64) -> Result<
         ..c.clone()
     };
     if let Some(why) = moot(&fresh, &local, &remote) {
+        if why == BASE_ONLY {
+            reassert_local(tx, &fresh, &local, &remote)?;
+        }
         supersede(tx, &fresh, why, now)?;
         return Ok(false);
     }

@@ -565,9 +565,7 @@ async fn run_async(args: &[String]) -> i32 {
                 return fail("resolution: keep_local | keep_remote | merge | retry | relocate");
             };
             match bookmarks::resolve_for_mapping(&state, mid, vec![(arg(2), res)]).await {
-                Ok(r) => out(
-                    serde_json::json!({ "results": r, "status": bookmarks::open_db().ok().and_then(|d| d.profile_for_mapping(mid).ok().flatten()).and_then(|p| bookmarks::status_for_mapping(mid, p)) }),
-                ),
+                Ok(r) => out(serde_json::json!({ "results": r })),
                 Err(e) => fail(e),
             }
         }

@@ -344,6 +344,15 @@ pub async fn resolve_for_mapping(
     use synchrome_state::{ResolveError, ResolveOutcome};
     let (account, pid) = profile_of_mapping(state, mapping_id)?;
     let mut db = open_db()?;
+    // the profile must belong to the signed-in account (each record is checked again below);
+    // this refuses the whole request without looking at any conflict id
+    if !db
+        .profile_account(pid)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|a| a == account)
+    {
+        return Err("this profile belongs to another account".into());
+    }
     let now = synchrome_sync::hlc::now_ms();
     let results = db.resolve_conflicts(&account, pid, &items, now);
     drop(db);
