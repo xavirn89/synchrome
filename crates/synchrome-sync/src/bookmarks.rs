@@ -735,6 +735,17 @@ pub fn apply_event(
 /// Synchrome-model tree (for tests, diagnostics and validation): `(depth, kind, title, url)`
 /// in display order, per root.
 pub fn render_tree(state: &BookmarkState) -> Vec<(Root, usize, Kind, String, Option<String>)> {
+    render_tree_with_ids(state)
+        .into_iter()
+        .map(|(r, d, k, t, u, _)| (r, d, k, t, u))
+        .collect()
+}
+
+/// Like [`render_tree`], plus each node's entity id.
+#[allow(clippy::type_complexity)]
+pub fn render_tree_with_ids(
+    state: &BookmarkState,
+) -> Vec<(Root, usize, Kind, String, Option<String>, String)> {
     let mut out = Vec::new();
     for root in [Root::Bar, Root::Other, Root::Mobile] {
         let mut stack: Vec<(String, usize)> = vec![(root.sentinel(), 0)];
@@ -745,7 +756,14 @@ pub fn render_tree(state: &BookmarkState) -> Vec<(Root, usize, Kind, String, Opt
             }
             if depth > 0 {
                 let e = &state.entities[&p];
-                out.push((root, depth - 1, e.kind, e.title.clone(), e.url.clone()));
+                out.push((
+                    root,
+                    depth - 1,
+                    e.kind,
+                    e.title.clone(),
+                    e.url.clone(),
+                    e.sid.clone(),
+                ));
             }
         }
     }

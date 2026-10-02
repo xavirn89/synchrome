@@ -143,7 +143,7 @@ function openPort() {
   port.onMessage.addListener((msg) => {
     if (!msg) return;
     if (msg.type === "sync_status" && msg.bookmarks) {
-      saveStatus({ bookmarks: msg.bookmarks });
+      saveStatus({ bookmarks: msg.bookmarks, bookmarks_at: Date.now() });
       if (msg.bookmarks.state === "not_synced") {
         // the app has no capture for this profile (new mapping, local state reset)
         needSnapshot = true;

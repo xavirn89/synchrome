@@ -67,6 +67,13 @@ impl<T: AuthTransport> SessionManager<T> {
         }
     }
 
+    /// The stored session as-is, without any network (it may be expired). Used only to know
+    /// *who* is signed in while Synchrome Cloud is unreachable (offline capture); never to
+    /// authorise a request.
+    pub fn stored_session(&self) -> Result<Option<Session>, AuthError> {
+        self.load()
+    }
+
     /// Token-free status for the UI. Never performs a refresh (pure read).
     pub fn account_status(&self) -> AccountStatus {
         match self.load() {
@@ -189,6 +196,22 @@ mod tests {
         );
         let (m, _) = mgr(vec![]);
         assert!(m.force_refresh().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_session_offline_is_still_known_locally() {
+        let (m, store) = mgr(vec![Err("offline")]);
+        store.save_session(&seeded(now_unix() - 10)).unwrap();
+        assert!(matches!(
+            m.ensure_valid_session().await,
+            Err(AuthError::Network(_))
+        ));
+        let s = m.stored_session().unwrap().unwrap();
+        assert_eq!(s.user_id, "user-1");
+        assert!(
+            store.load_session().unwrap().is_some(),
+            "network failure keeps the session"
+        );
     }
 
     #[tokio::test]

@@ -300,6 +300,69 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // Publication with a fault injected AFTER the chunk upload and BEFORE the checkpoint
+        // (the store_events insert fails): proves the checkpoint does not advance and that
+        // the retry re-sends the very same sealed chunk.
+        "--dev-publish-fault" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad mapping id");
+            };
+            let pid = match bookmarks::open_db()
+                .and_then(|d| d.profile_for_mapping(mid).map_err(|e| e.to_string()))
+            {
+                Ok(Some(p)) => p,
+                Ok(None) => return fail("no local bookmarks state for this mapping"),
+                Err(e) => return fail(e),
+            };
+            let sink = FaultAfterUpload {
+                inner: bookmarks::CloudSink::new(&state),
+                uploads: Default::default(),
+            };
+            match bookmarks::publish_with(&sink, pid).await {
+                Ok(o) => out(serde_json::json!({
+                    "outcome": format!("{o:?}"),
+                    "uploads_before_fault": sink.uploads.load(std::sync::atomic::Ordering::Relaxed),
+                    "status": bookmarks::status_for_mapping(mid, pid),
+                })),
+                Err(e) => fail(e),
+            }
+        }
+        // Publication whose cached access token is deliberately invalid: the first cloud call
+        // gets 401, the sink force-refreshes the real session and retries.
+        "--dev-publish-401" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad mapping id");
+            };
+            let pid = match bookmarks::open_db()
+                .and_then(|d| d.profile_for_mapping(mid).map_err(|e| e.to_string()))
+            {
+                Ok(Some(p)) => p,
+                Ok(None) => return fail("no local bookmarks state for this mapping"),
+                Err(e) => return fail(e),
+            };
+            let mut bad = match state.session().await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let before = token_sha256(bad.refresh_token.expose())[..12].to_string();
+            bad.access_token = synchrome_auth::Secret::new("eyJinvalid.invalid.invalid");
+            let sink = bookmarks::CloudSink::with_session(&state, bad);
+            let r = bookmarks::publish_with(&sink, pid).await;
+            let after = state
+                .session()
+                .await
+                .map(|s| token_sha256(s.refresh_token.expose())[..12].to_string())
+                .unwrap_or_default();
+            match r {
+                Ok(o) => out(serde_json::json!({
+                    "outcome": format!("{o:?}"),
+                    "forced_refreshes": sink.refreshes(),
+                    "refresh_token_rotated": before != after,
+                    "status": bookmarks::status_for_mapping(mid, pid),
+                })),
+                Err(e) => fail(e),
+            }
+        }
         // Local materialised tree: depth/kind/title + URL host only (never full URLs).
         "--dev-local-tree" => {
             let Ok(pid) = Uuid::parse_str(&arg(1)) else {
@@ -332,15 +395,31 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => return fail(e),
             };
             let mut ops = Vec::new();
+            let mut chunks = Vec::new();
             for p in &paths {
                 match cloud.get_object(&session, p).await {
                     Ok(Some(b)) => {
+                        let mut mine = Vec::new();
                         for line in String::from_utf8_lossy(&b).lines() {
                             match synchrome_sync::Op::from_line(line) {
-                                Ok(o) => ops.push(o),
+                                Ok(o) => mine.push(o),
                                 Err(e) => return fail(format!("bad journal line: {e}")),
                             }
                         }
+                        // per chunk: seq range, byte hash, and per op only id/kind/field NAMES
+                        chunks.push(serde_json::json!({
+                            "path": p,
+                            "bytes": b.len(),
+                            "sha256_12": token_sha256(&String::from_utf8_lossy(&b))[..12].to_string(),
+                            "seq_from": mine.first().map(|o| o.seq),
+                            "seq_to": mine.last().map(|o| o.seq),
+                            "ops": mine.iter().map(|o| serde_json::json!({
+                                "seq": o.seq, "id": o.id,
+                                "op": if o.op == synchrome_sync::OpKind::Delete { "delete" } else { "set" },
+                                "fields": o.fields.as_ref().map(|f| f.keys().cloned().collect::<Vec<_>>()),
+                            })).collect::<Vec<_>>(),
+                        }));
+                        ops.extend(mine);
                     }
                     Ok(None) => return fail("listed object vanished"),
                     Err(e) => return fail(e),
@@ -349,11 +428,7 @@ async fn run_async(args: &[String]) -> i32 {
             let mut seqs: Vec<u64> = ops.iter().map(|o| o.seq).collect();
             seqs.sort_unstable();
             let contiguous = seqs.iter().enumerate().all(|(i, s)| *s == i as u64 + 1);
-            let events = cloud
-                .list_store_events(&session, pid)
-                .await
-                .map(|v| v.len())
-                .ok();
+            let events = cloud.list_store_events(&session, pid).await.ok();
             let t = synchrome_sync::bookmarks::materialize(&ops);
             let mut v = tree_json(&t);
             v["objects"] = serde_json::json!(paths.len());
@@ -361,7 +436,13 @@ async fn run_async(args: &[String]) -> i32 {
             v["ops"] = serde_json::json!(ops.len());
             v["max_seq"] = serde_json::json!(seqs.last());
             v["seq_contiguous"] = serde_json::json!(contiguous);
-            v["store_events"] = serde_json::json!(events);
+            v["store_events"] = serde_json::json!(events.as_ref().map(|e| e.len()));
+            v["store_event_ranges"] = serde_json::json!(events
+                .unwrap_or_default()
+                .iter()
+                .map(|e| (e.seq_from, e.seq_to, e.path.clone()))
+                .collect::<Vec<_>>());
+            v["chunks"] = serde_json::json!(chunks);
             v["deletes"] = serde_json::json!(ops
                 .iter()
                 .filter(|o| o.op == synchrome_sync::OpKind::Delete)
@@ -397,6 +478,36 @@ async fn run_async(args: &[String]) -> i32 {
                     synchrome_cloud::JOURNAL_CONTENT_TYPE,
                 )
                 .await;
+            let put_foreign_prefix = cloud
+                .put_object_by_full_name(
+                    &session,
+                    &format!("{a_account}/{rel}/2026/10/99999999.jsonl"),
+                    b"{}\n".to_vec(),
+                )
+                .await;
+            let overwrite_foreign = cloud
+                .put_object_by_full_name(&session, &first, b"{}\n".to_vec())
+                .await;
+            let list_foreign = {
+                let mut n = 0usize;
+                let mut err = None;
+                for pre in [
+                    a_account.clone(),
+                    format!("{a_account}/profiles"),
+                    format!("{a_account}/profiles/{a_pid}/journal/{a_did}"),
+                ] {
+                    match cloud.list_full_prefix(&session, &pre).await {
+                        Ok(k) => n += k,
+                        Err(e) => err = Some(e.to_string()),
+                    }
+                }
+                (n, err)
+            };
+            let profile_visible = cloud.get_profile(&session, a_pid).await;
+            let mappings_visible = cloud
+                .list_mappings(&session)
+                .await
+                .map(|m| m.iter().filter(|x| x.profile_id == a_pid).count());
             let events = cloud.list_store_events(&session, a_pid).await;
             let ev_insert = cloud
                 .record_store_event(
@@ -417,6 +528,12 @@ async fn run_async(args: &[String]) -> i32 {
                 "list_sees": list.as_ref().map(|v| v.len()).map_err(|e| e.to_string()),
                 "get_first_chunk": get.as_ref().map(|o| o.is_some()).map_err(|e| e.to_string()),
                 "put_into_foreign_profile": put.map(|_| "accepted").map_err(|e| format!("{e:?}")),
+                "put_under_foreign_prefix": put_foreign_prefix.map(|_| "accepted").map_err(|e| format!("{e:?}")),
+                "overwrite_foreign_chunk": overwrite_foreign.map(|_| "accepted").map_err(|e| format!("{e:?}")),
+                "list_foreign_prefix_sees": list_foreign.0,
+                "list_foreign_prefix_error": list_foreign.1,
+                "foreign_profile_visible": profile_visible.map(|p| p.is_some()).map_err(|e| e.to_string()),
+                "foreign_mappings_visible": mappings_visible.map_err(|e| e.to_string()),
                 "store_events_sees": events.map(|v| v.len()).map_err(|e| e.to_string()),
                 "store_event_insert": ev_insert.map(|_| "accepted").map_err(|e| format!("{e:?}")),
             }))
@@ -507,18 +624,58 @@ fn url_host(u: &str) -> String {
 
 /// Tree rendering for validation: `[depth, kind, title, url_host]` per root, in order.
 fn tree_json(t: &synchrome_sync::bookmarks::BookmarkState) -> serde_json::Value {
-    let rows: Vec<serde_json::Value> = synchrome_sync::bookmarks::render_tree(t)
+    // [root, depth, kind, title, url host, 8-hex url hash, entity id]
+    let rows: Vec<serde_json::Value> = synchrome_sync::bookmarks::render_tree_with_ids(t)
         .into_iter()
-        .map(|(root, depth, kind, title, url)| {
+        .map(|(root, depth, kind, title, url, sid)| {
             serde_json::json!([
                 root.as_str(),
                 depth,
                 kind.as_str(),
                 title,
-                url.as_deref().map(url_host)
+                url.as_deref().map(url_host),
+                url.as_deref().map(|u| token_sha256(u)[..8].to_string()),
+                sid
             ])
         })
         .collect();
     let (b, f) = t.counts();
     serde_json::json!({ "bookmarks": b, "folders": f, "tree": rows })
+}
+
+/// Dev harness: a sink whose store_events insert always fails after a successful upload.
+struct FaultAfterUpload<'a> {
+    inner: bookmarks::CloudSink<'a>,
+    uploads: std::sync::atomic::AtomicUsize,
+}
+
+impl synchrome_state::JournalSink for FaultAfterUpload<'_> {
+    async fn account_id(&self) -> Result<String, synchrome_state::SinkError> {
+        self.inner.account_id().await
+    }
+    async fn mapping(
+        &self,
+        m: Uuid,
+    ) -> Result<synchrome_state::MappingCheck, synchrome_state::SinkError> {
+        self.inner.mapping(m).await
+    }
+    async fn journal_devices(&self, p: Uuid) -> Result<Vec<String>, synchrome_state::SinkError> {
+        self.inner.journal_devices(p).await
+    }
+    async fn put_chunk(&self, path: &str, body: &[u8]) -> Result<(), synchrome_state::SinkError> {
+        let r = self.inner.put_chunk(path, body).await;
+        if r.is_ok() {
+            self.uploads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        r
+    }
+    async fn record_event(
+        &self,
+        _ev: &synchrome_state::PublishedEvent,
+    ) -> Result<(), synchrome_state::SinkError> {
+        Err(synchrome_state::SinkError::Offline(
+            "injected fault between upload and checkpoint".into(),
+        ))
+    }
 }

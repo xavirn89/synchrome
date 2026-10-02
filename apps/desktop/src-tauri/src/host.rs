@@ -85,7 +85,19 @@ async fn handle_hello(
     let t0 = std::time::Instant::now();
     let registry = local_token::registry();
     let this_device = state.device().map(|d| d.device_id).unwrap_or(Uuid::nil());
-    let session = state.session().await.ok();
+    // Offline (refresh impossible because the cloud is unreachable): the stored session still
+    // says WHO is signed in, which is all the offline handshake needs; the cloud lookup then
+    // fails with a network error and only an already-confirmed token gets `connected_offline`.
+    let session = match state.auth() {
+        Ok(a) => match a.ensure_valid_session().await {
+            Ok(s) => s,
+            Err(synchrome_auth::AuthError::Network(_) | synchrome_auth::AuthError::Server(_)) => {
+                a.stored_session().ok().flatten()
+            }
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
     log(&format!(
         "stage session_loaded signed_in={} after {} ms",
         session.is_some(),

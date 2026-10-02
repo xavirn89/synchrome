@@ -54,6 +54,7 @@ fn map_auth(e: AuthError) -> SinkError {
 pub struct CloudSink<'a> {
     state: &'a AppState,
     session: Mutex<Option<Session>>,
+    refreshes: std::sync::atomic::AtomicUsize,
 }
 
 /// Run a cloud call; on 401 force-refresh the session once and retry.
@@ -79,7 +80,24 @@ impl<'a> CloudSink<'a> {
         Self {
             state,
             session: Mutex::new(None),
+            refreshes: Default::default(),
         }
+    }
+
+    /// Start from a given session (dev harness: a deliberately rejected access token proves
+    /// the 401 → force-refresh → retry path).
+    #[cfg(debug_assertions)]
+    pub fn with_session(state: &'a AppState, session: Session) -> Self {
+        Self {
+            state,
+            session: Mutex::new(Some(session)),
+            refreshes: Default::default(),
+        }
+    }
+
+    /// How many forced refreshes this sink performed.
+    pub fn refreshes(&self) -> usize {
+        self.refreshes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn cloud(&self) -> Result<&'a CloudClient<ReqwestRest>, SinkError> {
@@ -102,6 +120,8 @@ impl<'a> CloudSink<'a> {
     }
 
     async fn refreshed(&self) -> Result<Session, SinkError> {
+        self.refreshes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let auth = self.state.auth().map_err(SinkError::Other)?;
         match auth.force_refresh().await.map_err(map_auth)? {
             Some(s) => {
@@ -158,10 +178,18 @@ impl JournalSink for CloudSink<'_> {
 
 /// Publish one profile's outbox now.
 pub async fn publish_profile(state: &AppState, profile_id: Uuid) -> Result<PublishOutcome, String> {
+    publish_with(&CloudSink::new(state), profile_id).await
+}
+
+/// Publish through any sink (production: [`CloudSink`]; dev harness: fault-injecting
+/// wrappers around it).
+pub async fn publish_with<S: JournalSink>(
+    sink: &S,
+    profile_id: Uuid,
+) -> Result<PublishOutcome, String> {
     let mut db = open_db()?;
-    let sink = CloudSink::new(state);
     let holder = format!("{}-{}", std::process::id(), Uuid::new_v4());
-    synchrome_state::publish(&mut db, &sink, profile_id, &holder, now_unix())
+    synchrome_state::publish(&mut db, sink, profile_id, &holder, now_unix())
         .await
         .map_err(|e| e.to_string())
 }

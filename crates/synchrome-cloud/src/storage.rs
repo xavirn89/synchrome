@@ -202,6 +202,54 @@ impl<T: RestTransport> CloudClient<T> {
         }
     }
 
+    /// Upload by FULL object name (any account prefix). Exists so validation can prove that
+    /// writing under another account's prefix is refused by RLS.
+    pub async fn put_object_by_full_name(
+        &self,
+        session: &Session,
+        full_name: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), CloudError> {
+        let ok = full_name
+            .split_once('/')
+            .is_some_and(|(a, rel)| Uuid::parse_str(a).is_ok() && valid_rel_path(rel));
+        if !ok {
+            return Err(CloudError::InvalidValue("invalid object name".into()));
+        }
+        self.storage(
+            session,
+            "POST",
+            &format!("/object/{STORE_BUCKET}/{full_name}"),
+            &[("x-upsert", "true"), ("Content-Type", JOURNAL_CONTENT_TYPE)],
+            Body::Raw(bytes),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Names listed under a FULL prefix (any account). Validation only: RLS returns nothing
+    /// for another account's prefix.
+    pub async fn list_full_prefix(
+        &self,
+        session: &Session,
+        full_prefix: &str,
+    ) -> Result<usize, CloudError> {
+        let bytes = self
+            .storage(
+                session,
+                "POST",
+                &format!("/object/list/{STORE_BUCKET}"),
+                &[],
+                Body::Json(
+                    serde_json::json!({ "prefix": full_prefix, "limit": 1000, "offset": 0 }),
+                ),
+            )
+            .await?;
+        serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)
+            .map(|v| v.len())
+            .map_err(|e| CloudError::InvalidResponse(format!("storage list: {e}")))
+    }
+
     /// One level of a store "folder".
     pub async fn list_dir(
         &self,
