@@ -215,8 +215,8 @@ pub fn read_store_copy(store: &Path) -> Result<BTreeMap<String, String>, ExtStor
         std::process::id(),
         unique_suffix()
     ));
-    copy_dir(store, &tmp)?;
-    let res = read_all(&tmp);
+    // the copy is removed whatever happens (a failed copy used to leave an empty directory)
+    let res = copy_dir(store, &tmp).and_then(|_| read_all(&tmp));
     let _ = std::fs::remove_dir_all(&tmp);
     res
 }
@@ -810,5 +810,36 @@ mod tests {
             0,
             "nothing even backed up"
         );
+    }
+
+    #[test]
+    fn an_unreadable_store_leaves_no_temporary_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let store = d.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("CURRENT"), "x").unwrap();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let leftovers = || {
+            std::fs::read_dir(std::env::temp_dir())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("synchrome-read-{}-", std::process::id()))
+                })
+                .count()
+        };
+        let before = leftovers();
+        assert!(read_store_copy(&store).is_err());
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // other tests of this process read stores concurrently: their copies are transient,
+        // a leaked one would stay
+        let settled = (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            leftovers() <= before
+        });
+        assert!(settled, "a temporary copy was left behind");
     }
 }

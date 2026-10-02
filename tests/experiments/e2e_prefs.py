@@ -55,8 +55,12 @@ def eff(d, keys=None):
 
 
 def user_sets(d, values):
-    """The user changes settings in the browser's settings page."""
+    """The user changes settings in the browser's settings page. Helium's control for the
+    bookmark bar is bookmark_bar.visibility_state (0 = shown on all tabs, 2 = hidden), which
+    updates show_on_all_tabs too (E13 follow-up)."""
     for k, v in values.items():
+        if k == "bookmark_bar.show_on_all_tabs":
+            k, v = "bookmark_bar.visibility_state", 0 if v else 2
         settings(d, "new Promise(r => chrome.settingsPrivate.setPref(%s, %s, '', ok => r(ok)))" % (json.dumps(k), json.dumps(v)))
 
 
@@ -507,6 +511,7 @@ def main(creds):
 
     # ---------------------------------------------------------------- CASE 18 schema-invalid remote ops
     for path, bad_v in (("download.prompt_for_download", "yes"), ("intl.selected_languages", ["es", "en"])):
+        dels0 = sum(o["op"] == "delete" and o["id"] == path and o["by"] == b.device_id for o in pops(a, pid))
         xe.stop(a)
         pr = a.dev("--dev-prefs-publish-raw", a.mid, path, json.dumps(bad_v))
         xe.start(a)
@@ -518,7 +523,7 @@ def main(creds):
         xe.start(b)
         check(f"C18.97-100 remote op {path} = {json.dumps(bad_v)} (defective writer, schema bypassed): not applied, file byte-identical, counted invalid (state stays non-destructive), not a tombstone",
               pr.get("ops") == 1 and not r18.get("paths_written") and r18.get("invalid") == 1 and same and v18.get("invalid", 0) >= 1
-              and v18.get("state") in ("synced", "error", "unsupported") and not any(o["op"] == "delete" and o["id"] == path and o["by"] == b.device_id for o in pops(a, pid)),
+              and v18.get("state") in ("synced", "error", "unsupported") and sum(o["op"] == "delete" and o["id"] == path and o["by"] == b.device_id for o in pops(a, pid)) == dels0,
               json.dumps({"report": r18, "state": v18.get("state"), "invalid": v18.get("invalid")}))
         r18b = closed_cycle(a)  # A's real value is re-published by its next snapshot
         closed_cycle(b)
@@ -618,7 +623,7 @@ def main(creds):
           and not any(o["id"] in EXCLUDED for o in pops(a, pid)), json.dumps({"present_on_A": present, "ops": r22.get("captured_ops")}))
 
     # ---------------------------------------------------------------- CASE 23 restart (with a pending and a conflict alive)
-    c = conflict_pair(a, b, "browser.enable_spellchecking", {"browser.enable_spellchecking": False}, {"browser.enable_spellchecking": True}, pid)
+    c = conflict_pair(a, b, "intl.selected_languages", {"intl.selected_languages": "hu"}, {"intl.selected_languages": "ro"}, pid)
     user_sets(a, {"download.prompt_for_download": True})
     closed_cycle(a)
     b.dev("--dev-sync", b.mid)  # downloaded while open: pending
@@ -655,7 +660,8 @@ def main(creds):
     check("C24.126-128 Cloud back: pull/apply, converged", eff(b)["intl.selected_languages"] == "da,en", "")
 
     # ---------------------------------------------------------------- CASE 25 remaining UI states: Syncing, Error, Synced, Disable
-    user_sets(a, {"browser.enable_spellchecking": False})
+    flip = not eff(a)["browser.enable_spellchecking"]
+    user_sets(a, {"browser.enable_spellchecking": flip})
     closed_cycle(a)
     xe.stop(b)
     b.dev("--dev-sync", b.mid)
@@ -682,7 +688,7 @@ def main(creds):
     check("C25 UI: Retry (clicked) after the error → Synced; counts 'preferences synced · unsupported · pending · conflicts'; Off offers 'Disable' (not clicked); no UUIDs or local paths shown",
           retried == "Synced" and all(w in row_s.get("text", "") for w in ("preferences synced", "unsupported", "pending", "conflicts")) and disable is True
           and pview(b).get("mode") == "recommended" and not cf.UUID.search(page) and "/tmp/" not in page and "/Users/" not in page, row_s.get("text", "")[:160])
-    check("C25 applied after Retry", eff(b)["browser.enable_spellchecking"] is False, "")
+    check("C25 applied after Retry", eff(b)["browser.enable_spellchecking"] is flip, "")
 
     # ---------------------------------------------------------------- CASE 27 security (before USER_B takes the shared Keychain)
     for dv in (a, b):
