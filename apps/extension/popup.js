@@ -5,8 +5,17 @@ const LABELS = {
   token_mismatch: "Token mismatch",
   app_unavailable: "App unavailable",
 };
+const BOOKMARKS = {
+  not_synced: "Not synced",
+  initial_upload: "Initial upload",
+  up_to_date: "Up to date",
+  pending_changes: "Pending changes",
+  offline: "Offline",
+  error: "Error",
+};
 const DETAILS = {
   token_missing: "This profile is not linked yet. Map it in the Synchrome app.",
+  connected_offline: "Synchrome Cloud is unreachable; bookmark changes are queued in the app.",
   token_unknown: "The link token is not known to your Synchrome account.",
   token_other_account: "This profile was linked while signed in to another account.",
   mapping_deleted: "This profile's mapping was removed in Synchrome.",
@@ -27,6 +36,14 @@ function render(s) {
     s && s.profile_name ? `Profile: <strong></strong>` : "";
   if (s && s.profile_name) document.querySelector("#profile strong").textContent = s.profile_name;
   document.getElementById("detail").textContent = s ? DETAILS[s.status] || "" : "";
+  const b = s && s.bookmarks;
+  const el2 = document.getElementById("bookmarks");
+  if (!b) {
+    el2.textContent = "";
+    return;
+  }
+  const when = b.last_upload_at ? new Date(b.last_upload_at * 1000).toLocaleString() : "never";
+  el2.textContent = `Bookmarks: ${BOOKMARKS[b.state] || b.state} · ${b.bookmarks} bookmarks · ${b.pending} pending · last upload ${when}`;
 }
 
 chrome.runtime.sendMessage({ type: "get_status" }, render);

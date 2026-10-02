@@ -12,11 +12,15 @@ pub mod framing;
 pub mod handshake;
 pub mod protocol;
 pub mod registry;
+pub mod snapshot;
 
 pub use framing::{decode, encode, read_frame, write_frame, FrameError, MAX_INBOUND, MAX_OUTBOUND};
 pub use handshake::{resolve, CloudLookup, HandshakeContext};
-pub use protocol::{AppToExt, ExtToApp, HandshakeReply, HandshakeStatus, WireToken};
+pub use protocol::{
+    AckResult, AppToExt, ExtToApp, HandshakeReply, HandshakeStatus, NumberedEvent, WireToken,
+};
 pub use registry::{token_sha256, LocalTokenRecord, LocalTokenState, TokenRegistry};
+pub use snapshot::{AssemblyError, CompleteSnapshot, SnapshotAssembly};
 
 use synchrome_auth::Session;
 use synchrome_cloud::{CloudClient, CloudError, Mapping, RestTransport};

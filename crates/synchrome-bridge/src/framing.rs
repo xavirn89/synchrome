@@ -9,7 +9,8 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const MAX_INBOUND: usize = 64 * 1024;
+/// Extension → app frame limit. Snapshot parts are cut at 192 KiB by the extension.
+pub const MAX_INBOUND: usize = 256 * 1024;
 pub const MAX_OUTBOUND: usize = 1024 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]

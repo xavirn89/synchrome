@@ -45,6 +45,15 @@
     extension_confirmed: { label: "Extension confirmed", cls: "ok" },
     error: { label: "Error", cls: "bad" },
   };
+  const BM_STATUS = {
+    not_synced: { label: "Not synced", cls: "muted" },
+    initial_upload: { label: "Initial upload", cls: "info" },
+    up_to_date: { label: "Up to date", cls: "ok" },
+    pending_changes: { label: "Pending changes", cls: "info" },
+    offline: { label: "Offline", cls: "warn" },
+    error: { label: "Error", cls: "bad" },
+  };
+  const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "never");
   let connectorMsg = $state({});
 
   // ---- loaders ----
@@ -155,6 +164,7 @@
   const unmap = (m) => act(`unmap:${m.id}`, () => invoke("unmap_local_profile", { mappingId: m.id }));
   const retryWrite = (m) => act(`write:${m.id}`, () => invoke("write_mapping_token_local", { mappingId: m.id }));
   const checkExtension = (m) => act(`check:${m.id}`, async () => {});
+  const uploadNow = (m) => act(`upload:${m.id}`, () => invoke("publish_bookmarks", { mappingId: m.id }));
   async function installConnector(b) {
     connectorMsg = { ...connectorMsg, [b.kind]: "Installing…" };
     try {
@@ -372,6 +382,21 @@
                             title="Re-reads the link status. The extension reconnects when the browser starts, or from its popup.">Check extension</button>
                           <button class="tiny-btn" onclick={() => unmap(m)} disabled={busyKey === `unmap:${m.id}`}>Unmap</button>
                           {#if m.local_error}<span class="small bad">{m.local_error}</span>{/if}
+                          {#if m.display_status === "extension_confirmed"}
+                            {@const bm = m.bookmarks ?? { state: "not_synced", bookmarks: 0, folders: 0, pending: 0 }}
+                            <div class="bookmarks-row">
+                              <span class="small">Bookmarks</span>
+                              <span class="badge small {BM_STATUS[bm.state]?.cls ?? 'muted'}">{BM_STATUS[bm.state]?.label ?? bm.state}</span>
+                              <span class="pdir">{bm.bookmarks} bookmarks · {bm.folders} folders</span>
+                              <span class="pdir">last upload {when(bm.last_upload_at)}</span>
+                              <span class="pdir">{bm.pending} pending</span>
+                              {#if bm.pending > 0}
+                                <button class="tiny-btn" onclick={() => uploadNow(m)} disabled={busyKey === `upload:${m.id}`}
+                                  title="Uploads the queued bookmark changes to Synchrome Cloud now.">Upload now</button>
+                              {/if}
+                              {#if bm.error}<span class="small bad">{bm.error}</span>{/if}
+                            </div>
+                          {/if}
                         {:else}
                           <button class="tiny-btn" onclick={() => createAndMap(b, p)} disabled={busyKey === `map:${key}`}>
                             {busyKey === `map:${key}` ? "…" : "Create Synchrome profile"}
@@ -462,4 +487,5 @@
   .badge.bad, .bad { color: #f08a8a; } .badge.bad { background: #3a1414; border-color: #8a2a2a; }
   .badge.muted, .muted { color: #8a97a4; } .badge.muted { background: #1b2733; border-color: #2b3a49; }
   .error { background: #3a1414; color: #f0a0a0; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; display: flex; gap: 10px; align-items: center; }
+  .bookmarks-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%; margin-top: 4px; }
 </style>

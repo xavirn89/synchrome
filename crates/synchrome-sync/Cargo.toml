@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Sync engine skeleton: HLC, entities, merge (interfaces only in M1)."
+description = "Sync engine core: HLC, fractional order, journal ops, bookmarks normaliser."
 
 [dependencies]
 serde = { workspace = true }
-synchrome-types = { workspace = true }
-synchrome-storage = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

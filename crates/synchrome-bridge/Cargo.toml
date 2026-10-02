@@ -16,6 +16,8 @@ tokio = { version = "1", features = ["io-util", "io-std", "time", "rt", "macros"
 synchrome-types = { workspace = true }
 synchrome-auth = { workspace = true }
 synchrome-cloud = { workspace = true }
+synchrome-state = { workspace = true }
+synchrome-sync = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

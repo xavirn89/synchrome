@@ -39,12 +39,25 @@ impl<T: AuthTransport> SessionManager<T> {
         if !session.needs_refresh_at(now_unix()) {
             return Ok(Some(session));
         }
+        self.refresh_stored(session).await.map(Some)
+    }
+
+    /// Refresh now even if the access token looks valid (the server rejected it with 401,
+    /// e.g. revoked or clock skew). Same persistence/clearing rules as above.
+    pub async fn force_refresh(&self) -> Result<Option<Session>, AuthError> {
+        let Some(session) = self.load()? else {
+            return Ok(None);
+        };
+        self.refresh_stored(session).await.map(Some)
+    }
+
+    async fn refresh_stored(&self, session: Session) -> Result<Session, AuthError> {
         match self.client.refresh(&session.refresh_token).await {
             Ok(fresh) => {
                 self.store.save_session(&fresh).map_err(|e| {
                     AuthError::InvalidResponse(format!("could not persist refreshed session: {e}"))
                 })?;
-                Ok(Some(fresh))
+                Ok(fresh)
             }
             Err(AuthError::SessionInvalid) => {
                 let _ = self.store.delete_session();
@@ -157,6 +170,25 @@ mod tests {
             expires_at,
             token_type: "bearer".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn force_refresh_rotates_a_rejected_but_unexpired_token() {
+        let (m, store) = mgr(vec![Ok((200, OK2))]);
+        store.save_session(&seeded(now_unix() + 3600)).unwrap();
+        let s = m.force_refresh().await.unwrap().unwrap();
+        assert_eq!(s.access_token.expose(), "AT2");
+        assert_eq!(
+            store
+                .load_session()
+                .unwrap()
+                .unwrap()
+                .refresh_token
+                .expose(),
+            "RT2"
+        );
+        let (m, _) = mgr(vec![]);
+        assert!(m.force_refresh().await.unwrap().is_none());
     }
 
     #[tokio::test]

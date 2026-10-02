@@ -115,6 +115,21 @@ JSON frames with `type`, `id`, `profileRef`; host→extension payloads chunked a
 | ext → app | `command { syncNow, openApp }` | user actions |
 | both | `ping/pong` | keep-alive, skew |
 
+### 4.0 Bookmarks capture messages (implemented in M1 slice 7)
+
+Concrete form of `observe`/`event`/`command` above for the `bookmarks` collection. Every connection starts with `hello`; bookmark messages are accepted only after a `hello_result` of `connected` (cloud-verified) or `connected_offline` (cloud unreachable, token already confirmed earlier for this account and device according to the local registry). Frames: ≤ 256 KiB in, ≤ 1 MB out.
+
+| Direction | Message | Notes |
+|---|---|---|
+| ext → app | `bookmarks_snapshot { snapshot_id, epoch, covers_through, part, parts, nodes[] }` | full `getTree()` flattened in parts of ≤ 192 KiB; app assembles in memory (≤ 128 parts, ≤ 100 000 nodes) and reconciles atomically on the last part |
+| ext → app | `bookmarks_events { epoch, batch_id, events[] }` | ≤ 1 000 events; each `{ n, kind: created/changed/moved/removed/reordered, … }`, `n` strictly increasing within an epoch (a service-worker lifetime) |
+| ext → app | `sync_now` | publish pending ops now (alarm every 5 min and on popup action) |
+| app → ext | `bookmarks_ack { batch_id, result, ops, pending }` | sent **after** the ops are durable in `state.sqlite`; `result` = `applied` / `duplicate` / `partial` / `resync_required` / `rejected` |
+| app → ext | `sync_status { bookmarks: { state, count, pending, last_upload_at } }` | after the publication attempt that follows an ack or `sync_now` |
+| app → ext | `error { code }` | `not_confirmed`, `source_conflict`, `too_large`, `invalid_message`, `snapshot_incomplete` |
+
+The extension keeps unacknowledged events only in memory; a lost service worker is covered by the snapshot reconcile it performs at every start. The durable queue is the app's journal outbox.
+
 ### 4.1 Which profile is this extension instance?
 
 The app knows the profile because **it installed the extension there**: when it writes the descriptor it also writes a per-profile `mappingToken` into that profile's `Local Extension Settings/<synchrome-ext-id>` store before the browser starts (the store is created by the app as a fresh LevelDB; the extension reads it via `chrome.storage.local` on first run and echoes it in `hello`). For profiles where the extension was installed by other means, fall back to the user confirming in the app. Experiment E8.

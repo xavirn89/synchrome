@@ -139,11 +139,19 @@ def phase_unauth():
     types = [m.get("type") for m in msgs]
     check("host: ping, invalid JSON and ping again -> pong / error invalid_message / pong (stream stays usable)",
           rc == 0 and types == ["pong", "error", "pong"] and msgs[1].get("code") == "invalid_message", f"{types}")
-    rc, msgs = host_session(struct.pack("=I", 64 * 1024 + 1))
+    rc, msgs = host_session(struct.pack("=I", 256 * 1024 + 1))
     check("host: oversized frame -> error too_large, exit 3, body never read",
           rc == 3 and msgs and msgs[0].get("code") == "too_large", f"rc={rc}")
     rc, msgs = host_session(frame({"type": "hello", "ext_version": "e2e"}), origin="chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/")
     check("host: foreign extension origin rejected (exit 2, no reply)", rc == 2 and not msgs, f"rc={rc}")
+
+    rc, msgs = host_session(frame({"type": "hello", "ext_version": "e2e"}) + frame(
+        {"type": "bookmarks_events", "epoch": "e", "batch_id": "b",
+         "events": [{"n": 1, "kind": "removed", "id": "1"}]}) + frame({"type": "sync_now"}))
+    types = [m.get("type") for m in msgs]
+    check("host: bookmarks / sync_now without a confirmed mapping -> error not_confirmed, ack rejected",
+          rc == 0 and types == ["hello_result", "error", "bookmarks_ack", "error", "bookmarks_ack"]
+          and msgs[1].get("code") == "not_confirmed" and msgs[2].get("result") == "rejected", f"{types}")
 
     # Real extension in Helium, native messaging end to end
     udd = fresh_udd("unauth")

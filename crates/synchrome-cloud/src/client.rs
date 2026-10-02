@@ -45,6 +45,9 @@ pub enum CloudError {
     /// The target row does not exist in this account (0 rows affected under RLS).
     #[error("not found")]
     NotFound,
+    /// Storage API error that is none of the above (status, short message).
+    #[error("storage error {0}: {1}")]
+    Storage(u16, String),
 }
 
 pub type RestFuture<'a> =
@@ -59,6 +62,18 @@ pub trait RestTransport: Send + Sync {
         headers: &'a [(&'a str, &'a str)],
         body: Option<&'a serde_json::Value>,
     ) -> RestFuture<'a>;
+
+    /// Raw-body request (Storage object uploads). Transports that only speak JSON keep the
+    /// default, which refuses.
+    fn request_raw<'a>(
+        &'a self,
+        _method: &'a str,
+        _url: &'a str,
+        _headers: &'a [(&'a str, &'a str)],
+        _body: Vec<u8>,
+    ) -> RestFuture<'a> {
+        Box::pin(async { Err(HttpError::Client("raw bodies not supported".into())) })
+    }
 }
 
 pub struct ReqwestRest(pub HttpClient);
@@ -72,6 +87,16 @@ impl RestTransport for ReqwestRest {
         body: Option<&'a serde_json::Value>,
     ) -> RestFuture<'a> {
         Box::pin(self.0.request_json(method, url, headers, body))
+    }
+
+    fn request_raw<'a>(
+        &'a self,
+        method: &'a str,
+        url: &'a str,
+        headers: &'a [(&'a str, &'a str)],
+        body: Vec<u8>,
+    ) -> RestFuture<'a> {
+        Box::pin(self.0.request_bytes(method, url, headers, Some(body)))
     }
 }
 
@@ -148,7 +173,7 @@ pub(crate) fn now_rfc3339() -> String {
 }
 
 pub struct CloudClient<T: RestTransport> {
-    cfg: SupabaseConfig,
+    pub(crate) cfg: SupabaseConfig,
     pub(crate) transport: T,
 }
 

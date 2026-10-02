@@ -1,18 +1,19 @@
-//! Sync engine — interfaces only in Milestone 1.
+//! Sync engine core (pure, no I/O), specified in `docs/03`.
 //!
-//! The real engine (hybrid logical clocks, per-field LWW, tombstones, bookmark tree
-//! invariants, conflict records, compaction) is specified in `docs/03`. Here we pin the
-//! vocabulary so other crates can reference it; no merge logic is implemented yet.
+//! Implemented so far: hybrid logical clocks ([`hlc`]), fractional sibling keys
+//! ([`fractional`]), the journal op encoding ([`op`]) and the bookmarks normaliser
+//! ([`bookmarks`]) used by the upload-only capture slice. Merge, conflicts and compaction
+//! come with the download slice.
+
+pub mod bookmarks;
+pub mod fractional;
+pub mod hlc;
+pub mod op;
+
+pub use hlc::{Hlc, HlcClock, HlcError};
+pub use op::{Fields, Op, OpKind};
 
 use serde::{Deserialize, Serialize};
-
-/// Hybrid logical clock timestamp (see `docs/03` §2). Ordering/merge impl comes later.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Hlc {
-    pub wall_ms: u64,
-    pub counter: u32,
-    pub device_id: String,
-}
 
 /// Data categories Synchrome can sync, each independently switchable per profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

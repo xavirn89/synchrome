@@ -175,3 +175,81 @@ select privilege_type, column_name from information_schema.column_privileges
 ```
 
 If `/rest/v1/profile_mappings` still 404s afterwards: `NOTIFY pgrst, 'reload schema';`.
+
+## 0004 — store objects (Storage bucket `stores`) + `store_events`
+
+- Migration: [`0004_store_objects.sql`](0004_store_objects.sql)
+- Rollback:  [`0004_store_objects.rollback.sql`](0004_store_objects.rollback.sql) — **destructive** for `store_events`; keeps a non-empty bucket (see below)
+
+First production data path (M1 slice 7, bookmarks upload-only). Synced data lives as
+objects in Storage, Postgres keeps metadata (`docs/03` §4, `docs/04` §3). Object names:
+
+```text
+stores/<accountId>/profiles/<profileId>/journal/<deviceId>/<yyyy>/<mm>/<seq:08>.jsonl
+```
+
+### What it creates / modifies
+
+| Object | Kind | Notes |
+|---|---|---|
+| `storage.buckets` row `stores` | data (upsert) | **private**, `file_size_limit` 4 MiB, `allowed_mime_types` `application/x-ndjson`, `application/json` |
+| `public.synchrome_journal_object_ok(text)` | function, `SECURITY INVOKER`, `search_path = ''` | true iff the name is a well-formed journal chunk whose 1st segment is `auth.uid()` and whose profile / device rows are the caller's (lookups obey RLS) · `execute` to `authenticated` only |
+| `synchrome_stores_select` / `_delete` | RLS on `storage.objects` | `bucket_id = 'stores'` and first folder = `auth.uid()` |
+| `synchrome_stores_insert` / `_update` | RLS on `storage.objects` | `bucket_id = 'stores'` and `synchrome_journal_object_ok(name)` (update also requires the own prefix in `using`) — upsert needs select+insert+update |
+| `public.store_events` | table | `id` identity, `account_id default auth.uid()`, `profile_id`, `device_id`, `path`, `seq_from`, `seq_to`, `hlc`, `created_at`; RLS **enabled + forced** |
+| `store_events_profile_fk` / `_device_fk` | composite FKs `(account_id, …)` | to `profiles (account_id, id)` / `devices (account_id, device_id)`, both **ON DELETE CASCADE** (derived metadata) |
+| `store_events_publication_unique` | unique `(profile_id, device_id, seq_to)` | a retried publication (`resolution=ignore-duplicates`) is a no-op |
+| checks | `seq_from ≥ 1`, `seq_to ≥ seq_from`, `path` = journal shape whose profile/device segments equal the row's ids, `hlc` = `^\d{13}-\d{4}-<uuid>$` | |
+| `store_events_select/insert/delete` | RLS policies | `account_id = auth.uid()`; **no update** (append-only) |
+| grants | column-level | `revoke all` from anon+authenticated; `select, delete`; `insert (profile_id, device_id, path, seq_from, seq_to, hlc)` |
+
+Not touched: `e9_*`, 0002/0003 tables (only read by the name check), Realtime publication
+(added when the download slice subscribes). Nothing is granted to `anon`; the app never
+uses the service role.
+
+**Deleting a profile**: the `profiles` row's FKs do not reach Storage, so the app deletes
+the profile's objects through the Storage API first, then the row (`store_events` cascade).
+
+### How Codex should apply it (on the Synchrome server)
+
+```bash
+psql "$SYNCHROME_DATABASE_URL" -v ON_ERROR_STOP=1 -f 0004_store_objects.sql
+# or: docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 < 0004_store_objects.sql
+```
+
+Verification query:
+
+```sql
+select exists (select 1 from storage.buckets where id = 'stores' and not public)            as bucket_private,
+       (select file_size_limit from storage.buckets where id = 'stores')                     as size_limit,      -- 4194304
+       (select allowed_mime_types from storage.buckets where id = 'stores')                  as mime_types,
+       (select count(*) from pg_policies where schemaname = 'storage' and tablename = 'objects'
+          and policyname like 'synchrome_stores_%')                                         as storage_policies, -- expect 4
+       to_regprocedure('public.synchrome_journal_object_ok(text)') is not null               as name_fn,
+       (select prosecdef from pg_proc where proname = 'synchrome_journal_object_ok')         as security_definer,-- expect false
+       to_regclass('public.store_events') is not null                                         as events_ok,
+       (select relforcerowsecurity from pg_class where relname = 'store_events')            as events_forced,
+       (select count(*) from pg_policies where tablename = 'store_events')                  as events_policies,  -- expect 3
+       (select count(*) from pg_constraint where conrelid = 'public.store_events'::regclass
+          and contype = 'f')                                                                 as events_fks;       -- expect 2
+select privilege_type, column_name from information_schema.column_privileges
+ where table_name = 'store_events' and grantee = 'authenticated' order by 1, 2;   -- insert on 6 cols, select/delete
+```
+
+If `/rest/v1/store_events` 404s afterwards: `NOTIFY pgrst, 'reload schema';`.
+
+**Rollback**: empty the bucket through the Storage API first (deleting `storage.objects`
+rows directly orphans the stored files), then run the rollback; with objects present it
+keeps the bucket and raises a NOTICE. On Storage versions that forbid direct `DELETE` on
+`storage.buckets`, remove the empty bucket with the Storage API (`DELETE /storage/v1/bucket/stores`)
+from the server instead.
+
+### Validation Claude Code runs afterwards (URL + anon + two test users; no DB access)
+
+`tests/experiments/e2e_bookmarks.py <creds>` with a disposable Helium profile and the real
+extension: initial snapshot of a known tree reaches the cloud with correct structure and
+order; repeated snapshot adds nothing; create / rename / move / delete each publish only their
+delta; Helium restart continues with 0 new ops; cloud unreachable → changes queued (Offline)
+and published after recovery with contiguous `seq`; user B cannot list, read or write A's
+objects (GET → not found, PUT into A's profile → 403 by `synchrome_journal_object_ok`) nor
+see or insert A's `store_events`; cleanup purges the objects and rows (accounts back to 0).

@@ -27,6 +27,8 @@ pub struct MappingView {
     pub summary: MappingSummary,
     pub display_status: DisplayStatus,
     pub local_error: Option<String>,
+    /// Bookmarks capture/upload state (this device's mappings only). No titles, no URLs.
+    pub bookmarks: Option<synchrome_state::BookmarkSyncStatus>,
 }
 
 pub fn app_data_dir() -> Result<PathBuf, String> {
@@ -55,10 +57,16 @@ pub fn view(summary: MappingSummary, registry: &TokenRegistry) -> MappingView {
             None => (DisplayStatus::PendingLocalWrite, None),
         }
     };
+    let bookmarks = if summary.is_this_device {
+        crate::bookmarks::status_for_mapping(summary.id, summary.profile_id)
+    } else {
+        None
+    };
     MappingView {
         summary,
         display_status,
         local_error,
+        bookmarks,
     }
 }
 

@@ -28,3 +28,5 @@ synchrome-bridge = { workspace = true }
 libc = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "time", "macros"] }
 synchrome-device = { workspace = true }
+synchrome-state = { workspace = true }
+synchrome-sync = { workspace = true }

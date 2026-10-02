@@ -8,13 +8,15 @@
 //! 4. not found: use the local registry to tell `TokenOtherAccount` / `CloudProfileDeleted` /
 //!    `MappingDeleted` / `TokenUnknown`
 //! 5. found but for another device -> `WrongDevice` (no confirmation)
+//!    (offline exception: a token this device already confirmed for the same account ->
+//!    `ConnectedOffline`, so capture keeps feeding the durable outbox)
 //! 6. found for this device -> confirm in the cloud (only now that the extension proved it read
 //!    the right token), mark the local record confirmed, reply `Connected`.
 //!
 //! The reply never contains the token.
 
 use crate::protocol::{HandshakeReply, HandshakeStatus, WireToken};
-use crate::registry::{ct_eq, TokenRegistry};
+use crate::registry::{ct_eq, LocalTokenState, TokenRegistry};
 use std::future::Future;
 use synchrome_cloud::{CloudError, Mapping, TokenState};
 use uuid::Uuid;
@@ -69,7 +71,28 @@ pub async fn resolve<C: CloudLookup>(
 
     let mappings = match cloud.list_mappings().await {
         Ok(m) => m,
-        Err(e) => return cloud_err(e),
+        Err(CloudError::Unauthorized) => return cloud_err(CloudError::Unauthorized),
+        Err(e) => {
+            // Offline: accept capture only for a token this device already confirmed for
+            // this very account; everything else waits for the cloud.
+            return match registry.find_by_token(token.expose()) {
+                Some(rec)
+                    if rec.account_id == account && rec.state == LocalTokenState::Confirmed =>
+                {
+                    HandshakeReply {
+                        status: HandshakeStatus::ConnectedOffline,
+                        ui_state: HandshakeStatus::ConnectedOffline.ui_state(),
+                        mapped: true,
+                        profile_id: Some(rec.profile_id),
+                        profile_name: None,
+                        device_id: Some(ctx.this_device),
+                        token_state: Some("confirmed"),
+                        detail: Some("Synchrome Cloud unreachable; changes are queued".into()),
+                    }
+                }
+                _ => cloud_err(e),
+            };
+        }
     };
     let found = mappings
         .into_iter()
@@ -421,5 +444,44 @@ mod tests {
             .status,
             HandshakeStatus::NotSignedIn
         );
+    }
+
+    #[tokio::test]
+    async fn offline_accepts_only_a_token_already_confirmed_for_this_account() {
+        let (_d, registry) = reg();
+        let down = Mock {
+            list_err: Some(CloudError::Network("unreachable".into())),
+            ..Default::default()
+        };
+        let ask = |registry: &TokenRegistry| {
+            let registry = registry.clone();
+            let t = WireToken::new(tok());
+            let c = ctx(true);
+            let down = &down;
+            async move { resolve(Some(&t), &c, Some(down), &registry).await }
+        };
+        // written but never confirmed: no offline capture
+        registry.upsert(record(&tok(), "acct-a")).unwrap();
+        assert_eq!(
+            ask(&registry).await.status,
+            HandshakeStatus::CloudUnavailable
+        );
+        // confirmed earlier for another account: no
+        let mut other = record(&tok(), "acct-b");
+        other.state = LocalTokenState::Confirmed;
+        registry.upsert(other).unwrap();
+        assert_eq!(
+            ask(&registry).await.status,
+            HandshakeStatus::CloudUnavailable
+        );
+        // confirmed earlier for this account: offline capture, no profile name leaked
+        let mut mine = record(&tok(), "acct-a");
+        mine.state = LocalTokenState::Confirmed;
+        registry.upsert(mine).unwrap();
+        let r = ask(&registry).await;
+        assert_eq!(r.status, HandshakeStatus::ConnectedOffline);
+        assert_eq!(r.ui_state, "connected");
+        assert_eq!(r.profile_id, Some(uid(PID)));
+        assert_eq!(r.profile_name, None);
     }
 }

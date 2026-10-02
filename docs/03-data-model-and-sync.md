@@ -62,6 +62,19 @@ Rules:
 - Bookmark `pos` uses fractional indexing (base-62 strings between siblings) so concurrent inserts into the same folder interleave deterministically without renumbering; ties broken by entity id.
 - Field-level LWW is the universal default; collection-specific structural rules are in §6.
 
+### 3.1 Bookmarks — normative details (fixed by M1 slice 7, 2026-10-02)
+
+Clarifications of the table above, decided when the first real capture was implemented. They refine, not replace, the model.
+
+- **Identity.** `id` is a Synchrome UUID v4 minted by the device that first captures the node. Chromium node ids (`"12"`) are *local* and only live in the device's `state.sqlite` index `(profileId, chromiumId) → id`; they are never published and never used as identity elsewhere.
+- **Roots are not entities.** A top-level node has `parentId = "root:bar" | "root:other" | "root:mobile"` (from Chromium `folderType` `bookmarks-bar` / `other` / `mobile`, falling back to the well-known ids `1`/`2`/`3`). `root` is the root sentinel's suffix and is recomputed for a whole subtree when it moves between roots. Managed bookmarks (`unmodifiable: "managed"`) and account-storage nodes (`syncing: true`, Chromium's "bookmarks in your Google Account") are excluded from capture.
+- **Fields on the wire** (op `fields`): `parentId`, `pos`, `title`, `kind` (`url`/`folder`), `root`, `url` (url kind only), `createdAt` (Chromium `dateAdded`, ms, sent on creation only). A creation op carries all fields; later ops carry only the fields that changed.
+- **`pos`** is a fractional key over the alphabet `0-9A-Za-z` (ASCII order = numeric order), never ending in `0`. Keys for `k` new siblings between two neighbours are produced by balanced bisection (lengths grow with log k, not k). A move changes only the moved node's `pos` (unless it already lies between its new neighbours, which makes replays no-ops); `onChildrenReordered` keeps the longest run of siblings whose keys are already in the new order and re-keys only the others.
+- **HLC string**: `"<wallMs:13>-<counter:4>-<deviceId>"` with the **full** device UUID (the 8-char form in the examples above is illustrative). One HLC per op applies to every field the op sets.
+- **Snapshot reconcile** (initial capture, every extension start, after import, after a `resync_required`): the full tree is diffed against the materialised state through the Chromium index — unknown Chromium ids become creations (first trying to pair with an un-indexed live entity by `(parentId, title, url)`, e.g. after the index was lost), known ids emit only changed fields, indexed ids missing from the tree emit deletes (a folder's descendants are deleted explicitly, one tombstone each, so §6 rule 1 never sees an orphan). Entities that were never indexed on this device are never deleted by a reconcile. Repeating an unchanged snapshot emits nothing.
+- **Chunk sealing.** The device's open journal chunk is sealed when a publication starts (and still rotates at 256 KB or at a month boundary). A sealed chunk is immutable, so each publication uploads only the new ops and a retried upload is byte-identical; ops captured during a publication go to the next chunk. This replaces "the current chunk is rewritten in place" in §4 — it trades more, smaller objects (which compaction folds into snapshots) for delta-only uploads and no rewrite races.
+- **Interim constraints until the download/merge slice** (they keep the upload-only slice safe; lifted when bootstrap pairing against the remote state exists): one capture source per `(profile, device)` — a second local profile mapped to the same Synchrome profile on the same device is refused with an error; and the first upload of a profile is refused if the store already holds journals of another device for it.
+
 ## 4. Store layout
 
 ```text

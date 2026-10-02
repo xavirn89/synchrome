@@ -1,0 +1,421 @@
+//! Capture: extension observations → normalised changes → ops in the outbox, atomically.
+
+use crate::{load_profile, StateDb, StateError, CHUNK_MAX_BYTES};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
+use synchrome_sync::bookmarks::{
+    self, BookmarkEvent, BookmarkState, Change, ChromiumNode, Entity, Kind, NormalizeError, Root,
+};
+use synchrome_sync::{HlcClock, HlcError, Op, OpKind};
+use thiserror::Error;
+use uuid::Uuid;
+
+/// The confirmed mapping a capture comes from (established by the handshake).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub mapping_id: Uuid,
+    pub account_id: String,
+    pub device_id: Uuid,
+    pub profile_id: Uuid,
+    /// `browser|user_data_dir|profile_dir` of the local profile.
+    pub identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureOutcome {
+    /// Ops created and durable.
+    Applied { ops: usize, pending: u64 },
+    /// Every event of the batch was already applied (redelivery).
+    Duplicate { pending: u64 },
+    /// An event referenced an unknown node; nothing was written; send a snapshot.
+    ResyncRequired(String),
+}
+
+#[derive(Debug, Error)]
+pub enum CaptureError {
+    #[error("another local profile on this device already publishes bookmarks for this Synchrome profile")]
+    SourceConflict,
+    #[error("local state of this profile belongs to another account or device")]
+    OtherAccount,
+    #[error(transparent)]
+    Clock(#[from] HlcError),
+    #[error(transparent)]
+    State(#[from] StateError),
+}
+
+impl From<rusqlite::Error> for CaptureError {
+    fn from(e: rusqlite::Error) -> Self {
+        CaptureError::State(StateError::Db(e))
+    }
+}
+
+/// UTC `yyyy/mm` for an epoch-ms timestamp (civil-from-days).
+pub(crate) fn year_month(ms: u64) -> String {
+    let days = (ms / 86_400_000) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if mo <= 2 { 1 } else { 0 };
+    format!("{y:04}/{mo:02}")
+}
+
+fn claim(tx: &Transaction<'_>, src: &Source) -> Result<(), CaptureError> {
+    let pid = src.profile_id.to_string();
+    let mid = src.mapping_id.to_string();
+    match load_profile(tx, &pid)? {
+        None => {
+            tx.execute(
+                "INSERT INTO profiles (profile_id, account_id, device_id, source_mapping_id, source_identity)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![pid, src.account_id, src.device_id.to_string(), mid, src.identity],
+            )?;
+        }
+        Some(p) => {
+            if p.account_id != src.account_id || p.device_id != src.device_id.to_string() {
+                return Err(CaptureError::OtherAccount);
+            }
+            match p.source_mapping_id.as_deref() {
+                Some(m) if m == mid => {}
+                Some(_) => return Err(CaptureError::SourceConflict),
+                None => {
+                    if p.source_identity.as_deref() != Some(src.identity.as_str()) {
+                        // Different local profile: its Chromium ids mean nothing here. The
+                        // snapshot reconcile pairs its nodes with the existing entities.
+                        tx.execute("DELETE FROM chromium_index WHERE profile_id = ?1", [&pid])?;
+                    }
+                    tx.execute(
+                        "UPDATE profiles SET source_mapping_id = ?2, source_identity = ?3,
+                                last_error = NULL, last_error_kind = NULL
+                         WHERE profile_id = ?1",
+                        params![pid, mid, src.identity],
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_state(tx: &Transaction<'_>, pid: &str) -> Result<BookmarkState, StateError> {
+    let mut s = BookmarkState::default();
+    let mut st = tx.prepare(
+        "SELECT sid, kind, root, parent, pos, title, url, created_at, deleted
+         FROM entities WHERE profile_id = ?1",
+    )?;
+    let rows = st.query_map([pid], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, Option<String>>(6)?,
+            r.get::<_, Option<i64>>(7)?,
+            r.get::<_, i64>(8)?,
+        ))
+    })?;
+    for r in rows {
+        let (sid, kind, root, parent, pos, title, url, created_at, deleted) = r?;
+        let e = Entity {
+            sid: sid.clone(),
+            kind: Kind::parse(&kind).ok_or_else(|| StateError::Corrupt("kind".into()))?,
+            root: Root::parse(&root).ok_or_else(|| StateError::Corrupt("root".into()))?,
+            parent,
+            pos,
+            title,
+            url,
+            created_at,
+            deleted: deleted != 0,
+        };
+        s.entities.insert(sid, e);
+    }
+    let mut st = tx.prepare("SELECT chromium_id, sid FROM chromium_index WHERE profile_id = ?1")?;
+    let rows = st.query_map([pid], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for r in rows {
+        let (c, sid) = r?;
+        s.index.insert(c, sid);
+    }
+    Ok(s)
+}
+
+fn clock(tx: &Transaction<'_>, device: &str) -> Result<HlcClock, StateError> {
+    let last: Option<String> = tx
+        .query_row("SELECT value FROM meta WHERE key = 'hlc_last'", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(HlcClock::new(device, last.and_then(|s| s.parse().ok())))
+}
+
+fn append_chunk(
+    tx: &Transaction<'_>,
+    pid: &str,
+    did: &str,
+    seq: u64,
+    line_len: usize,
+    wall_ms: u64,
+) -> Result<(), StateError> {
+    let month = year_month(wall_ms);
+    let cur: Option<(i64, i64, String)> = tx
+        .query_row(
+            "SELECT start_seq, bytes, month FROM chunks WHERE profile_id = ?1 AND closed = 0",
+            [pid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let need_new = match &cur {
+        None => true,
+        Some((_, bytes, m)) => {
+            m != &month || (*bytes > 0 && *bytes as usize + line_len + 1 > CHUNK_MAX_BYTES)
+        }
+    };
+    let start = if need_new {
+        if let Some((s, _, _)) = cur {
+            tx.execute(
+                "UPDATE chunks SET closed = 1 WHERE profile_id = ?1 AND start_seq = ?2",
+                params![pid, s],
+            )?;
+        }
+        let path = format!("profiles/{pid}/journal/{did}/{month}/{seq:08}.jsonl");
+        tx.execute(
+            "INSERT INTO chunks (profile_id, start_seq, path, month, bytes, closed, end_seq)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, ?2)",
+            params![pid, seq as i64, path, month],
+        )?;
+        seq as i64
+    } else {
+        cur.unwrap().0
+    };
+    tx.execute(
+        "UPDATE chunks SET bytes = bytes + ?3, end_seq = ?4 WHERE profile_id = ?1 AND start_seq = ?2",
+        params![pid, start, (line_len + 1) as i64, seq as i64],
+    )?;
+    Ok(())
+}
+
+/// Stamp changes with seq/HLC, write ops + chunk accounting + dirty state. Returns #ops.
+fn persist(
+    tx: &Transaction<'_>,
+    pid: &str,
+    did: &str,
+    state: &BookmarkState,
+    changes: &[Change],
+    now_ms: u64,
+) -> Result<usize, CaptureError> {
+    let mut next_seq: i64 = tx.query_row(
+        "SELECT next_seq FROM profiles WHERE profile_id = ?1",
+        [pid],
+        |r| r.get(0),
+    )?;
+    let mut clk = clock(tx, did)?;
+    let mut hlc_of: std::collections::HashMap<&str, String> = Default::default();
+    for ch in changes {
+        let hlc = clk.tick(now_ms)?;
+        let (kind, fields) = match ch {
+            Change::Set { fields, .. } => (OpKind::Set, Some(fields.clone())),
+            Change::Delete { .. } => (OpKind::Delete, None),
+        };
+        let op = Op {
+            seq: next_seq as u64,
+            hlc: hlc.to_string(),
+            col: bookmarks::COLLECTION.into(),
+            id: ch.sid().to_string(),
+            op: kind,
+            fields,
+            by: did.to_string(),
+        };
+        let line = op.to_line();
+        tx.execute(
+            "INSERT INTO ops (profile_id, seq, line) VALUES (?1, ?2, ?3)",
+            params![pid, next_seq, line],
+        )?;
+        append_chunk(tx, pid, did, next_seq as u64, line.len(), hlc.wall_ms)?;
+        hlc_of.insert(ch.sid(), op.hlc);
+        next_seq += 1;
+    }
+    if let Some(last) = &clk.last {
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('hlc_last', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [last.to_string()],
+        )?;
+    }
+    tx.execute(
+        "UPDATE profiles SET next_seq = ?2 WHERE profile_id = ?1",
+        params![pid, next_seq],
+    )?;
+    for sid in &state.dirty_entities {
+        let e = &state.entities[sid];
+        let hlc = hlc_of.get(sid.as_str()).cloned().unwrap_or_default();
+        tx.execute(
+            "INSERT INTO entities (profile_id, sid, kind, root, parent, pos, title, url, created_at, deleted, hlc)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(profile_id, sid) DO UPDATE SET kind = excluded.kind, root = excluded.root,
+               parent = excluded.parent, pos = excluded.pos, title = excluded.title, url = excluded.url,
+               created_at = COALESCE(entities.created_at, excluded.created_at),
+               deleted = excluded.deleted,
+               hlc = CASE WHEN excluded.hlc = '' THEN entities.hlc ELSE excluded.hlc END",
+            params![
+                pid,
+                sid,
+                e.kind.as_str(),
+                e.root.as_str(),
+                e.parent,
+                e.pos,
+                e.title,
+                e.url,
+                e.created_at,
+                e.deleted as i64,
+                hlc
+            ],
+        )?;
+    }
+    for cid in &state.dirty_index {
+        match state.index.get(cid) {
+            Some(sid) => tx.execute(
+                "INSERT INTO chromium_index (profile_id, chromium_id, sid) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(profile_id, chromium_id) DO UPDATE SET sid = excluded.sid",
+                params![pid, cid, sid],
+            )?,
+            None => tx.execute(
+                "DELETE FROM chromium_index WHERE profile_id = ?1 AND chromium_id = ?2",
+                params![pid, cid],
+            )?,
+        };
+    }
+    Ok(changes.len())
+}
+
+fn set_cursor(
+    tx: &Transaction<'_>,
+    pid: &str,
+    epoch: &str,
+    n: u64,
+    now_ms: u64,
+) -> Result<(), StateError> {
+    tx.execute(
+        "INSERT INTO ext_cursor (profile_id, epoch, last_n, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(profile_id, epoch) DO UPDATE SET last_n = MAX(last_n, excluded.last_n),
+                                                      updated_at = excluded.updated_at",
+        params![pid, epoch, n as i64, now_ms as i64],
+    )?;
+    // forget epochs idle for a week
+    tx.execute(
+        "DELETE FROM ext_cursor WHERE profile_id = ?1 AND updated_at < ?2",
+        params![pid, now_ms as i64 - 7 * 86_400_000],
+    )?;
+    Ok(())
+}
+
+fn pending_of(tx: &Transaction<'_>, pid: &str) -> Result<u64, StateError> {
+    Ok(tx.query_row(
+        "SELECT next_seq - 1 - published_through FROM profiles WHERE profile_id = ?1",
+        [pid],
+        |r| r.get::<_, i64>(0),
+    )? as u64)
+}
+
+impl StateDb {
+    /// Reconcile a full tree (initial capture, extension start, resync). Idempotent.
+    pub fn capture_snapshot(
+        &mut self,
+        src: &Source,
+        epoch: &str,
+        covers_through: u64,
+        nodes: &[ChromiumNode],
+        now_ms: u64,
+    ) -> Result<CaptureOutcome, CaptureError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        claim(&tx, src)?;
+        let pid = src.profile_id.to_string();
+        let did = src.device_id.to_string();
+        let mut state = load_state(&tx, &pid)?;
+        let changes = bookmarks::reconcile(&mut state, nodes);
+        let n = persist(&tx, &pid, &did, &state, &changes, now_ms)?;
+        tx.execute(
+            "UPDATE profiles SET initial_through = COALESCE(initial_through, next_seq - 1)
+             WHERE profile_id = ?1",
+            [&pid],
+        )?;
+        set_cursor(&tx, &pid, epoch, covers_through, now_ms)?;
+        let pending = pending_of(&tx, &pid)?;
+        tx.commit()?;
+        Ok(CaptureOutcome::Applied { ops: n, pending })
+    }
+
+    /// Apply a batch of numbered events from one extension epoch. Events at or below the
+    /// epoch's cursor are skipped (redelivery); an unknown reference rolls the whole batch
+    /// back and asks for a snapshot.
+    pub fn capture_events(
+        &mut self,
+        src: &Source,
+        epoch: &str,
+        events: &[(u64, BookmarkEvent)],
+        now_ms: u64,
+    ) -> Result<CaptureOutcome, CaptureError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        claim(&tx, src)?;
+        let pid = src.profile_id.to_string();
+        let did = src.device_id.to_string();
+        let last: i64 = tx
+            .query_row(
+                "SELECT last_n FROM ext_cursor WHERE profile_id = ?1 AND epoch = ?2",
+                params![pid, epoch],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let fresh: Vec<&(u64, BookmarkEvent)> =
+            events.iter().filter(|(n, _)| *n as i64 > last).collect();
+        if fresh.is_empty() {
+            let pending = pending_of(&tx, &pid)?;
+            return Ok(CaptureOutcome::Duplicate { pending });
+        }
+        let mut state = load_state(&tx, &pid)?;
+        let mut changes = Vec::new();
+        for (_, ev) in &fresh {
+            match bookmarks::apply_event(&mut state, ev) {
+                Ok(c) => changes.extend(c),
+                Err(NormalizeError::ResyncRequired(why)) => {
+                    return Ok(CaptureOutcome::ResyncRequired(why)); // tx dropped = rollback
+                }
+            }
+        }
+        let n = persist(&tx, &pid, &did, &state, &changes, now_ms)?;
+        let max_n = fresh.iter().map(|(n, _)| *n).max().unwrap_or(0);
+        set_cursor(&tx, &pid, epoch, max_n, now_ms)?;
+        let pending = pending_of(&tx, &pid)?;
+        tx.commit()?;
+        Ok(CaptureOutcome::Applied { ops: n, pending })
+    }
+
+    /// The materialised tree of a profile (diagnostics, validation, tests).
+    pub fn tree(&mut self, profile_id: Uuid) -> Result<BookmarkState, StateError> {
+        let tx = self.conn.transaction()?;
+        let s = load_state(&tx, &profile_id.to_string())?;
+        tx.commit()?;
+        Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn year_month_is_utc_civil() {
+        assert_eq!(year_month(0), "1970/01");
+        assert_eq!(year_month(1_790_893_270_000), "2026/10");
+        assert_eq!(year_month(951_782_400_000), "2000/02"); // 2000-02-29
+    }
+}

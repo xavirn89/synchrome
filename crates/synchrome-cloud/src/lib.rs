@@ -6,12 +6,14 @@
 //! receives [`DeviceSummary`], [`ProfileSummary`] and [`MappingSummary`].
 //!
 //! Scope so far: devices (upsert/touch/list), profiles (create/rename/delete/list) and local ↔
-//! cloud profile mappings (map/unmap/list/lookup/confirm). No Storage, Realtime, CAS or sync.
+//! cloud profile mappings (map/unmap/list/lookup/confirm), store objects in Storage (journal
+//! chunks) and `store_events`. No Realtime or CAS yet.
 
 mod client;
 mod mapping;
 mod models;
 mod ops;
+mod storage;
 
 pub use client::{
     auth_headers, classify_postgrest, CloudClient, CloudError, ReqwestRest, RestFuture,
@@ -20,3 +22,6 @@ pub use client::{
 pub use mapping::{Mapping, MappingStatus, MappingSummary, MappingToken, TokenState};
 pub use models::{DeviceSummary, ProfileSummary};
 pub use ops::encode_filter_value;
+pub use storage::{
+    classify_storage, valid_rel_path, StorageEntry, StoreEvent, JOURNAL_CONTENT_TYPE, STORE_BUCKET,
+};

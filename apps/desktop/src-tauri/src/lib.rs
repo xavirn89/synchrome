@@ -8,6 +8,7 @@
 //! Synchrome extension's own `chrome.storage.local` store while the browser is closed
 //! (see [`local_token`]); the same binary serves as native messaging host (see [`host`]).
 
+mod bookmarks;
 #[cfg(debug_assertions)]
 mod devcli;
 mod host;
@@ -298,6 +299,8 @@ async fn rename_profile(
 #[tauri::command]
 async fn delete_profile(state: State<'_, AppState>, profile_id: Uuid) -> Result<(), String> {
     let session = state.session().await?;
+    // Store objects first (the row's FKs do not reach Storage), then the row.
+    bookmarks::purge_profile(&state, &session, profile_id).await?;
     state
         .cloud()?
         .delete_profile(&session, profile_id)
@@ -453,7 +456,30 @@ async fn unmap_local_profile(state: State<'_, AppState>, mapping_id: Uuid) -> Re
         .cloud()?
         .unmap_local_profile(&session, mapping_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // The local profile stops being the bookmarks source; captured ops are kept.
+    if let Ok(mut db) = bookmarks::open_db() {
+        let _ = db.release_source(mapping_id);
+    }
+    Ok(())
+}
+
+/// Upload this mapping's pending bookmark changes now. Returns the new bookmarks status.
+#[tauri::command]
+async fn publish_bookmarks(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+) -> Result<Option<synchrome_state::BookmarkSyncStatus>, String> {
+    let db = bookmarks::open_db()?;
+    let Some(profile_id) = db
+        .profile_for_mapping(mapping_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    drop(db);
+    bookmarks::publish_profile(&state, profile_id).await?;
+    Ok(bookmarks::status_for_mapping(mapping_id, profile_id))
 }
 
 /// Retry writing the mapping token into the local extension store (browser must be closed).
@@ -529,6 +555,19 @@ pub fn run_dev_cli(args: &[String]) -> i32 {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::new())
+        .setup(|_app| {
+            // Background publisher: retries the bookmarks outbox (offline, app restarts,
+            // a host killed mid-upload). The per-profile lease in state.sqlite keeps it from
+            // racing a native host that is publishing at the same moment.
+            tauri::async_runtime::spawn(async {
+                let state = AppState::new();
+                loop {
+                    let _ = bookmarks::publish_all_pending(&state).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_browsers,
             app_version,
@@ -551,7 +590,8 @@ pub fn run() {
             write_mapping_token_local,
             install_native_host,
             mapping_for_local_profile,
-            mapping_for_cloud_profile
+            mapping_for_cloud_profile,
+            publish_bookmarks
         ])
         .run(tauri::generate_context!())
         .expect("error while running Synchrome");

@@ -2,7 +2,7 @@
 //! Runs the SAME code paths as the app (Keychain session, cloud client, local token write,
 //! mapping views) without a window. Never prints passwords, JWTs or full mapping tokens.
 
-use crate::{local_token, mapping_views, write_token_for_mapping, AppState};
+use crate::{bookmarks, local_token, mapping_views, write_token_for_mapping, AppState};
 use std::path::PathBuf;
 use synchrome_bridge::token_sha256;
 use synchrome_types::{BrowserKind, MAPPING_TOKEN_STORAGE_KEY, SYNCHROME_EXTENSION_ID};
@@ -263,6 +263,164 @@ async fn run_async(args: &[String]) -> i32 {
                 _ => fail("inventory query failed"),
             }
         }
+        // ---- bookmarks (slice 7) ----
+        "--dev-bookmarks-status" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad mapping id");
+            };
+            let db = match bookmarks::open_db() {
+                Ok(d) => d,
+                Err(e) => return fail(e),
+            };
+            match db.profile_for_mapping(mid) {
+                Ok(Some(pid)) => match db.status(pid, mid) {
+                    Ok(st) => out(serde_json::json!({ "profile_id": pid, "status": st })),
+                    Err(e) => fail(e),
+                },
+                Ok(None) => out(serde_json::json!({ "profile_id": null, "status": null })),
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-publish" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad mapping id");
+            };
+            let pid = match bookmarks::open_db()
+                .and_then(|d| d.profile_for_mapping(mid).map_err(|e| e.to_string()))
+            {
+                Ok(Some(p)) => p,
+                Ok(None) => return fail("no local bookmarks state for this mapping"),
+                Err(e) => return fail(e),
+            };
+            match bookmarks::publish_profile(&state, pid).await {
+                Ok(o) => out(serde_json::json!({
+                    "outcome": format!("{o:?}"),
+                    "status": bookmarks::status_for_mapping(mid, pid),
+                })),
+                Err(e) => fail(e),
+            }
+        }
+        // Local materialised tree: depth/kind/title + URL host only (never full URLs).
+        "--dev-local-tree" => {
+            let Ok(pid) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad profile id");
+            };
+            match bookmarks::open_db().and_then(|mut d| d.tree(pid).map_err(|e| e.to_string())) {
+                Ok(t) => out(tree_json(&t)),
+                Err(e) => fail(e),
+            }
+        }
+        // What the CLOUD holds: download every journal chunk of the profile, check seq
+        // continuity, materialise, render like --dev-local-tree.
+        "--dev-cloud-tree" => {
+            let Ok(pid) = Uuid::parse_str(&arg(1)) else {
+                return fail("bad profile id");
+            };
+            let session = match state.session().await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let cloud = match state.cloud() {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            let paths = match cloud
+                .list_tree(&session, &format!("profiles/{pid}/journal"))
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => return fail(e),
+            };
+            let mut ops = Vec::new();
+            for p in &paths {
+                match cloud.get_object(&session, p).await {
+                    Ok(Some(b)) => {
+                        for line in String::from_utf8_lossy(&b).lines() {
+                            match synchrome_sync::Op::from_line(line) {
+                                Ok(o) => ops.push(o),
+                                Err(e) => return fail(format!("bad journal line: {e}")),
+                            }
+                        }
+                    }
+                    Ok(None) => return fail("listed object vanished"),
+                    Err(e) => return fail(e),
+                }
+            }
+            let mut seqs: Vec<u64> = ops.iter().map(|o| o.seq).collect();
+            seqs.sort_unstable();
+            let contiguous = seqs.iter().enumerate().all(|(i, s)| *s == i as u64 + 1);
+            let events = cloud
+                .list_store_events(&session, pid)
+                .await
+                .map(|v| v.len())
+                .ok();
+            let t = synchrome_sync::bookmarks::materialize(&ops);
+            let mut v = tree_json(&t);
+            v["objects"] = serde_json::json!(paths.len());
+            v["paths"] = serde_json::json!(paths);
+            v["ops"] = serde_json::json!(ops.len());
+            v["max_seq"] = serde_json::json!(seqs.last());
+            v["seq_contiguous"] = serde_json::json!(contiguous);
+            v["store_events"] = serde_json::json!(events);
+            v["deletes"] = serde_json::json!(ops
+                .iter()
+                .filter(|o| o.op == synchrome_sync::OpKind::Delete)
+                .count());
+            out(v)
+        }
+        // Isolation probes run as ANOTHER account (B) against A's ids: everything must fail
+        // closed. Prints only booleans / error kinds.
+        "--dev-cloud-probe-foreign" => {
+            let (a_account, a_profile, a_device) = (arg(1), arg(2), arg(3));
+            let (Ok(a_pid), Ok(a_did)) = (Uuid::parse_str(&a_profile), Uuid::parse_str(&a_device))
+            else {
+                return fail("bad ids");
+            };
+            let session = match state.session().await {
+                Ok(s) => s,
+                Err(e) => return fail(e),
+            };
+            let cloud = match state.cloud() {
+                Ok(c) => c,
+                Err(e) => return fail(e),
+            };
+            let rel = format!("profiles/{a_pid}/journal/{a_did}");
+            let list = cloud.list_tree(&session, &rel).await;
+            // full name of one of A's real objects (from A's --dev-cloud-tree "paths")
+            let first = format!("{a_account}/{}", arg(4));
+            let get = cloud.get_object_by_full_name(&session, &first).await;
+            let put = cloud
+                .put_object(
+                    &session,
+                    &format!("{rel}/2026/10/00000001.jsonl"),
+                    b"{}\n".to_vec(),
+                    synchrome_cloud::JOURNAL_CONTENT_TYPE,
+                )
+                .await;
+            let events = cloud.list_store_events(&session, a_pid).await;
+            let ev_insert = cloud
+                .record_store_event(
+                    &session,
+                    &synchrome_cloud::StoreEvent {
+                        profile_id: a_pid,
+                        device_id: a_did,
+                        path: format!("{rel}/2026/10/00000001.jsonl"),
+                        seq_from: 1,
+                        seq_to: 1,
+                        hlc: format!("0000000000000-0000-{a_did}"),
+                        created_at: None,
+                    },
+                )
+                .await;
+            out(serde_json::json!({
+                "as_user": session.user_id,
+                "list_sees": list.as_ref().map(|v| v.len()).map_err(|e| e.to_string()),
+                "get_first_chunk": get.as_ref().map(|o| o.is_some()).map_err(|e| e.to_string()),
+                "put_into_foreign_profile": put.map(|_| "accepted").map_err(|e| format!("{e:?}")),
+                "store_events_sees": events.map(|v| v.len()).map_err(|e| e.to_string()),
+                "store_event_insert": ev_insert.map(|_| "accepted").map_err(|e| format!("{e:?}")),
+            }))
+        }
         // Unmap in the cloud but KEEP the local registry entry (same as the app's Unmap).
         "--dev-unmap" => {
             let Ok(id) = Uuid::parse_str(&arg(1)) else {
@@ -288,9 +446,12 @@ async fn run_async(args: &[String]) -> i32 {
                 Ok(s) => s,
                 Err(e) => return fail(e),
             };
+            let purged = bookmarks::purge_profile(&state, &session, id).await;
             match state.cloud() {
                 Ok(c) => match c.delete_profile(&session, id).await {
-                    Ok(()) => out(serde_json::json!({ "deleted_profile": true })),
+                    Ok(()) => out(
+                        serde_json::json!({ "deleted_profile": true, "purged_objects": purged.ok() }),
+                    ),
                     Err(e) => fail(e),
                 },
                 Err(e) => fail(e),
@@ -311,6 +472,10 @@ async fn run_async(args: &[String]) -> i32 {
             let all = cloud.list_mappings(&session).await.unwrap_or_default();
             let profile = all.iter().find(|m| m.id == id).map(|m| m.profile_id);
             let unmapped = cloud.unmap_local_profile(&session, id).await.is_ok();
+            let purged = match profile {
+                Some(p) => bookmarks::purge_profile(&state, &session, p).await.ok(),
+                None => None,
+            };
             let deleted_profile = match profile {
                 Some(p) => cloud.delete_profile(&session, p).await.is_ok(),
                 None => false,
@@ -327,10 +492,33 @@ async fn run_async(args: &[String]) -> i32 {
                 false
             };
             out(serde_json::json!({
-                "unmapped": unmapped, "deleted_profile": deleted_profile,
+                "unmapped": unmapped, "deleted_profile": deleted_profile, "purged_objects": purged,
                 "remaining_mappings": remaining, "device_deleted": device_deleted,
             }))
         }
         other => fail(format!("unknown dev command {other:?}")),
     }
+}
+
+fn url_host(u: &str) -> String {
+    let rest = u.split_once("://").map(|(_, r)| r).unwrap_or(u);
+    rest.split(['/', '?', '#']).next().unwrap_or("").to_string()
+}
+
+/// Tree rendering for validation: `[depth, kind, title, url_host]` per root, in order.
+fn tree_json(t: &synchrome_sync::bookmarks::BookmarkState) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = synchrome_sync::bookmarks::render_tree(t)
+        .into_iter()
+        .map(|(root, depth, kind, title, url)| {
+            serde_json::json!([
+                root.as_str(),
+                depth,
+                kind.as_str(),
+                title,
+                url.as_deref().map(url_host)
+            ])
+        })
+        .collect();
+    let (b, f) = t.counts();
+    serde_json::json!({ "bookmarks": b, "folders": f, "tree": rows })
 }
