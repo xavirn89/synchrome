@@ -82,6 +82,8 @@ pub enum Group {
     /// `parentId` + `pos` (+ derived `root`): a move is never split.
     Location,
     Existence,
+    /// Extensions: the enabled flag.
+    Enabled,
 }
 
 macro_rules! str_enum {
@@ -128,6 +130,9 @@ pub(crate) fn group_of(field: &str) -> Option<Group> {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Version {
     pub exists: bool,
+    /// Extensions only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,13 +156,14 @@ pub struct Version {
 impl Version {
     /// Whether `self` already holds `other`'s value for `g` (a field `other` does not carry —
     /// e.g. a move that kept its `pos` key — is not compared).
-    fn same(&self, other: &Version, g: Group) -> bool {
+    pub(crate) fn same(&self, other: &Version, g: Group) -> bool {
         let eq = |a: &Option<String>, b: &Option<String>| b.is_none() || a == b;
         match g {
             Group::Title => self.title == other.title,
             Group::Url => self.url == other.url,
             Group::Location => eq(&self.parent, &other.parent) && eq(&self.pos, &other.pos),
             Group::Existence => self.exists == other.exists,
+            Group::Enabled => other.enabled.is_none() || self.enabled == other.enabled,
         }
     }
 }
@@ -182,14 +188,16 @@ pub(crate) struct Row {
     pub resolution: Option<Resolution>,
     pub resolution_ops: i64,
     pub resolved_at: Option<i64>,
+    /// Collection of the entity (`bookmarks`, `extensions`).
+    pub col: String,
 }
 
-const ROW_COLS: &str =
+pub(crate) const ROW_COLS: &str =
     "conflict_id, account_id, profile_id, sid, kind, subtype, status, created_at,
      updated_at, local_json, remote_json, base_json, detail, attempts, resolution,
-     resolution_ops, resolved_at";
+     resolution_ops, resolved_at, col";
 
-fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
+pub(crate) fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     let js = |i: usize| -> rusqlite::Result<Version> {
         let s: String = r.get(i)?;
         Ok(serde_json::from_str(&s).unwrap_or_default())
@@ -217,6 +225,7 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         resolution: resolution.as_deref().and_then(Resolution::parse),
         resolution_ops: r.get(15)?,
         resolved_at: r.get(16)?,
+        col: r.get(17)?,
     })
 }
 
@@ -226,7 +235,7 @@ pub(crate) fn open_for(conn: &Connection, pid: &str, sid: &str) -> Result<Option
         .query_row(
             &format!(
                 "SELECT {ROW_COLS} FROM conflicts WHERE profile_id = ?1 AND sid = ?2
-                 AND status IN ('unresolved', 'resolving')"
+                 AND col = 'bookmarks' AND status IN ('unresolved', 'resolving')"
             ),
             params![pid, sid],
             row_from,
@@ -234,7 +243,7 @@ pub(crate) fn open_for(conn: &Connection, pid: &str, sid: &str) -> Result<Option
         .optional()?)
 }
 
-fn by_id(conn: &Connection, id: &str) -> Result<Option<Row>, StateError> {
+pub(crate) fn by_id(conn: &Connection, id: &str) -> Result<Option<Row>, StateError> {
     Ok(conn
         .query_row(
             &format!("SELECT {ROW_COLS} FROM conflicts WHERE conflict_id = ?1"),
@@ -245,7 +254,7 @@ fn by_id(conn: &Connection, id: &str) -> Result<Option<Row>, StateError> {
 }
 
 /// Held remote ops of a conflict, in merge order (HLC, then seq).
-fn held_ops(conn: &Connection, id: &str) -> Result<Vec<Op>, StateError> {
+pub(crate) fn held_ops(conn: &Connection, id: &str) -> Result<Vec<Op>, StateError> {
     let mut st = conn.prepare("SELECT line FROM conflict_remote WHERE conflict_id = ?1")?;
     let mut ops: Vec<Op> = st
         .query_map([id], |r| r.get::<_, String>(0))?
@@ -255,7 +264,7 @@ fn held_ops(conn: &Connection, id: &str) -> Result<Vec<Op>, StateError> {
     Ok(ops)
 }
 
-fn add_held(conn: &Connection, id: &str, op: &Op) -> Result<(), StateError> {
+pub(crate) fn add_held(conn: &Connection, id: &str, op: &Op) -> Result<(), StateError> {
     conn.execute(
         "INSERT OR IGNORE INTO conflict_remote (conflict_id, hlc, remote_device, remote_seq, line)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -270,7 +279,7 @@ fn add_held(conn: &Connection, id: &str, op: &Op) -> Result<(), StateError> {
     Ok(())
 }
 
-fn device_of(hlc: &str) -> Option<String> {
+pub(crate) fn device_of(hlc: &str) -> Option<String> {
     hlc.parse::<Hlc>().ok().map(|h| h.device_id)
 }
 
@@ -450,6 +459,7 @@ fn base_version(e: &Ent, local: &Version, published: i64) -> Option<Version> {
             Group::Url => rec.f.contains_key("url"),
             Group::Location => rec.f.contains_key("parentId") || rec.f.contains_key("pos"),
             Group::Existence => rec.f.contains_key("deleted"),
+            Group::Enabled => rec.f.contains_key("enabled"),
         };
         if !known {
             b.changed.remove(g);
@@ -521,6 +531,7 @@ fn group_hlc(v: &Version, g: Group) -> Option<&str> {
         Group::Url => &["url"],
         Group::Location => &["parentId", "pos"],
         Group::Existence => &["deleted"],
+        Group::Enabled => &["enabled"],
     };
     f.iter()
         .filter_map(|k| v.hlc.get(*k))
@@ -584,6 +595,9 @@ fn mergeable(c: &Row) -> bool {
 /// The resolutions a conflict offers, best first.
 pub(crate) fn options(c: &Row) -> Vec<Resolution> {
     use Resolution::*;
+    if c.col == synchrome_sync::extensions::COLLECTION {
+        return crate::ext::options(c);
+    }
     match (c.kind, c.subtype) {
         (ConflictKind::LocalPending, ConflictSubtype::EditEdit) => {
             let mut v = vec![KeepLocal, KeepRemote];
@@ -721,7 +735,7 @@ fn recompute(tx: &Transaction<'_>, c: &Row, published: i64, now: i64) -> Result<
     Ok(true)
 }
 
-fn account_of(conn: &Connection, pid: &str) -> Result<String, StateError> {
+pub(crate) fn account_of(conn: &Connection, pid: &str) -> Result<String, StateError> {
     Ok(conn
         .query_row(
             "SELECT account_id FROM profiles WHERE profile_id = ?1",
@@ -745,11 +759,41 @@ fn insert_row(
     detail: Option<&str>,
     now: i64,
 ) -> Result<String, StateError> {
+    insert_row_col(
+        conn,
+        "bookmarks",
+        pid,
+        sid,
+        kind,
+        subtype,
+        local,
+        remote,
+        base,
+        detail,
+        now,
+    )
+}
+
+/// [`insert_row`] for any collection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_row_col(
+    conn: &Connection,
+    col: &str,
+    pid: &str,
+    sid: &str,
+    kind: ConflictKind,
+    subtype: ConflictSubtype,
+    local: &Version,
+    remote: &Version,
+    base: Option<&Version>,
+    detail: Option<&str>,
+    now: i64,
+) -> Result<String, StateError> {
     let id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO conflicts (conflict_id, account_id, profile_id, sid, kind, subtype, status,
-                                created_at, updated_at, local_json, remote_json, base_json, detail)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'unresolved', ?7, ?7, ?8, ?9, ?10, ?11)",
+                                created_at, updated_at, local_json, remote_json, base_json, detail, col)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'unresolved', ?7, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             id,
             account_of(conn, pid)?,
@@ -761,7 +805,8 @@ fn insert_row(
             serde_json::to_string(local).unwrap_or_default(),
             serde_json::to_string(remote).unwrap_or_default(),
             base.map(|b| serde_json::to_string(b).unwrap_or_default()),
-            detail
+            detail,
+            col
         ],
     )?;
     Ok(id)
@@ -810,7 +855,7 @@ pub(crate) fn hold(
     Ok(())
 }
 
-fn published_of(conn: &Connection, pid: &str) -> Result<i64, StateError> {
+pub(crate) fn published_of(conn: &Connection, pid: &str) -> Result<i64, StateError> {
     Ok(conn
         .query_row(
             "SELECT published_through FROM profiles WHERE profile_id = ?1",
@@ -1072,7 +1117,7 @@ pub(crate) fn finish_resolving(
 ) -> Result<(), StateError> {
     tx.execute(
         "UPDATE conflicts SET status = 'resolved', resolved_at = ?3, updated_at = ?3
-         WHERE profile_id = ?1 AND sid = ?2 AND status = 'resolving'",
+         WHERE profile_id = ?1 AND sid = ?2 AND col = 'bookmarks' AND status = 'resolving'",
         params![pid, sid, now],
     )?;
     Ok(())
@@ -1377,6 +1422,9 @@ impl StateDb {
         }
         // the decision is made against the current versions
         let published = prof.published_through as i64;
+        if c.col == synchrome_sync::extensions::COLLECTION {
+            return crate::ext::resolve(tx, &c, res, &prof.device_id, published, now_ms);
+        }
         let c = if c.kind != ConflictKind::Orphan {
             if !recompute(&tx, &c, published, now)? {
                 tx.commit()?;
@@ -1469,7 +1517,7 @@ impl StateDb {
                                 e.pos = pos.clone();
                             }
                         }
-                        Group::Existence => {}
+                        Group::Existence | Group::Enabled => {}
                     };
                     for g in &r.changed {
                         take(*g, &mut e, r);
@@ -1773,6 +1821,8 @@ fn retry(tx: Transaction<'_>, c: &Row, now: i64) -> Result<ResolveOutcome, Resol
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SideView {
     pub exists: bool,
+    /// Extensions only.
+    pub enabled: Option<bool>,
     pub title: Option<String>,
     pub url: Option<String>,
     pub folder: Option<Vec<String>>,
@@ -1870,6 +1920,9 @@ fn side(state: &BookmarkState, sid: &str, v: &Version, full: bool) -> SideView {
     if show(Group::Title) {
         s.title = v.title.clone();
     }
+    if show(Group::Enabled) || full {
+        s.enabled = v.enabled;
+    }
     if show(Group::Url) {
         s.url = v.url.clone();
     }
@@ -1911,6 +1964,7 @@ impl StateDb {
             c.status == ConflictStatus::Unresolved
                 && c.local == Version::default()
                 && c.kind != ConflictKind::Orphan
+                && c.col == "bookmarks"
         }) {
             recompute(&tx, c, published, c.updated_at)?;
         }
@@ -1931,7 +1985,12 @@ impl StateDb {
         for c in rows {
             let held = held_ops(&tx, &c.id)?.len();
             let e = state.entities.get(&c.sid);
-            let item_kind = e.map(|e| e.kind.as_str()).unwrap_or("url").to_string();
+            let item_kind = if c.col == synchrome_sync::extensions::COLLECTION {
+                "extension"
+            } else {
+                e.map(|e| e.kind.as_str()).unwrap_or("url")
+            }
+            .to_string();
             let name = c
                 .local
                 .title
@@ -2089,7 +2148,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 3);
+        assert_eq!(n, 4);
     }
 
     #[test]

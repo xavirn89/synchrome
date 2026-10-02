@@ -35,7 +35,43 @@ const DETAILS = {
   timeout: "The Synchrome app did not answer.",
 };
 
+// Extension changes Chromium refused without a user gesture: this click is the gesture.
+async function renderExtActions(s) {
+  const box = document.getElementById("ext-actions");
+  box.textContent = "";
+  const list = (s && s.ext_user_actions) || [];
+  for (const [id, action] of list) {
+    let name = id;
+    try {
+      name = (await chrome.management.get(id)).name;
+    } catch (_) {
+      continue; // gone already
+    }
+    const b = document.createElement("button");
+    b.className = "small";
+    b.textContent = `${action === "remove" ? "Remove" : action === "enable" ? "Enable" : "Disable"} “${name}”`;
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        // Chromium shows its own confirmation when an extension removes another one
+        if (action === "remove") await chrome.management.uninstall(id, { showConfirmDialog: true });
+        else await chrome.management.setEnabled(id, action === "enable");
+        b.textContent = "Done";
+      } catch (e) {
+        b.textContent = "Not applied";
+      }
+      chrome.runtime.sendMessage({ type: "reconnect" }, render);
+    });
+    box.appendChild(b);
+  }
+}
+
 function render(s) {
+  renderExtActions(s);
+  const x = s && s.extensions;
+  document.getElementById("extensions").textContent = x
+    ? `Extensions: ${x.synced} synced · ${x.missing} missing · ${x.differences} differences · ${x.conflicts} conflicts${x.user_action ? ` · ${x.user_action} need you` : ""}`
+    : "";
   const el = document.getElementById("state");
   const ui = (s && s.ui) || "unmapped";
   el.className = `state ${ui}`;

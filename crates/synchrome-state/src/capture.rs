@@ -62,7 +62,7 @@ pub(crate) fn year_month(ms: u64) -> String {
     format!("{y:04}/{mo:02}")
 }
 
-fn claim(tx: &Transaction<'_>, src: &Source) -> Result<(), CaptureError> {
+pub(crate) fn claim(tx: &Transaction<'_>, src: &Source) -> Result<(), CaptureError> {
     let pid = src.profile_id.to_string();
     let mid = src.mapping_id.to_string();
     match load_profile(tx, &pid)? {
@@ -203,6 +203,64 @@ fn append_chunk(
     Ok(())
 }
 
+/// One op to append to this device's journal.
+pub(crate) struct OpSpec {
+    pub col: &'static str,
+    pub id: String,
+    pub kind: OpKind,
+    pub fields: Option<synchrome_sync::Fields>,
+}
+
+/// Append ops to this device's journal (outbox): per-device `seq`, a fresh HLC each, the
+/// canonical line, chunk accounting. Shared by every collection (one journal per device).
+pub(crate) fn emit_ops(
+    tx: &Transaction<'_>,
+    pid: &str,
+    did: &str,
+    specs: &[OpSpec],
+    now_ms: u64,
+) -> Result<Vec<Op>, CaptureError> {
+    let mut next_seq: i64 = tx.query_row(
+        "SELECT next_seq FROM profiles WHERE profile_id = ?1",
+        [pid],
+        |r| r.get(0),
+    )?;
+    let mut clk = clock(tx, did)?;
+    let mut out = Vec::with_capacity(specs.len());
+    for sp in specs {
+        let hlc = clk.tick(now_ms)?;
+        let op = Op {
+            seq: next_seq as u64,
+            hlc: hlc.to_string(),
+            col: sp.col.into(),
+            id: sp.id.clone(),
+            op: sp.kind,
+            fields: sp.fields.clone(),
+            by: did.to_string(),
+        };
+        let line = op.to_line();
+        tx.execute(
+            "INSERT INTO ops (profile_id, seq, line) VALUES (?1, ?2, ?3)",
+            params![pid, next_seq, line],
+        )?;
+        append_chunk(tx, pid, did, next_seq as u64, line.len(), hlc.wall_ms)?;
+        out.push(op);
+        next_seq += 1;
+    }
+    if let Some(last) = &clk.last {
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('hlc_last', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [last.to_string()],
+        )?;
+    }
+    tx.execute(
+        "UPDATE profiles SET next_seq = ?2 WHERE profile_id = ?1",
+        params![pid, next_seq],
+    )?;
+    Ok(out)
+}
+
 /// Value of an entity column as a journal field value (for BASE snapshots).
 fn prior_value(
     field: &str,
@@ -245,12 +303,6 @@ pub(crate) fn persist(
     changes: &[Change],
     now_ms: u64,
 ) -> Result<usize, CaptureError> {
-    let mut next_seq: i64 = tx.query_row(
-        "SELECT next_seq FROM profiles WHERE profile_id = ?1",
-        [pid],
-        |r| r.get(0),
-    )?;
-    let mut clk = clock(tx, did)?;
     // per entity: (HLC per field set by these changes, deleted HLC, last local seq)
     #[derive(Default)]
     struct Touch {
@@ -259,32 +311,30 @@ pub(crate) fn persist(
         seq: i64,
         first_seq: i64,
     }
+    let specs: Vec<OpSpec> = changes
+        .iter()
+        .map(|ch| match ch {
+            Change::Set { sid, fields } => OpSpec {
+                col: bookmarks::COLLECTION,
+                id: sid.clone(),
+                kind: OpKind::Set,
+                fields: Some(fields.clone()),
+            },
+            Change::Delete { sid } => OpSpec {
+                col: bookmarks::COLLECTION,
+                id: sid.clone(),
+                kind: OpKind::Delete,
+                fields: None,
+            },
+        })
+        .collect();
+    let ops = emit_ops(tx, pid, did, &specs, now_ms)?;
     let mut touched: std::collections::HashMap<&str, Touch> = Default::default();
     let mut hlc_of: std::collections::HashMap<&str, String> = Default::default();
-    for ch in changes {
-        let hlc = clk.tick(now_ms)?;
-        let (kind, fields) = match ch {
-            Change::Set { fields, .. } => (OpKind::Set, Some(fields.clone())),
-            Change::Delete { .. } => (OpKind::Delete, None),
-        };
-        let op = Op {
-            seq: next_seq as u64,
-            hlc: hlc.to_string(),
-            col: bookmarks::COLLECTION.into(),
-            id: ch.sid().to_string(),
-            op: kind,
-            fields,
-            by: did.to_string(),
-        };
-        let line = op.to_line();
-        tx.execute(
-            "INSERT INTO ops (profile_id, seq, line) VALUES (?1, ?2, ?3)",
-            params![pid, next_seq, line],
-        )?;
-        append_chunk(tx, pid, did, next_seq as u64, line.len(), hlc.wall_ms)?;
+    for (ch, op) in changes.iter().zip(&ops) {
         let t = touched.entry(ch.sid()).or_default();
         if t.first_seq == 0 {
-            t.first_seq = next_seq;
+            t.first_seq = op.seq as i64;
         }
         match ch {
             Change::Set { fields, .. } => {
@@ -294,21 +344,9 @@ pub(crate) fn persist(
             }
             Change::Delete { .. } => t.deleted = Some(op.hlc.clone()),
         }
-        t.seq = next_seq;
-        hlc_of.insert(ch.sid(), op.hlc);
-        next_seq += 1;
+        t.seq = op.seq as i64;
+        hlc_of.insert(ch.sid(), op.hlc.clone());
     }
-    if let Some(last) = &clk.last {
-        tx.execute(
-            "INSERT INTO meta (key, value) VALUES ('hlc_last', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [last.to_string()],
-        )?;
-    }
-    tx.execute(
-        "UPDATE profiles SET next_seq = ?2 WHERE profile_id = ?1",
-        params![pid, next_seq],
-    )?;
     let published: i64 = tx.query_row(
         "SELECT published_through FROM profiles WHERE profile_id = ?1",
         [pid],
@@ -441,7 +479,7 @@ pub(crate) fn persist(
     Ok(changes.len())
 }
 
-fn set_cursor(
+pub(crate) fn set_cursor(
     tx: &Transaction<'_>,
     pid: &str,
     epoch: &str,
@@ -462,7 +500,7 @@ fn set_cursor(
     Ok(())
 }
 
-fn pending_of(tx: &Transaction<'_>, pid: &str) -> Result<u64, StateError> {
+pub(crate) fn pending_of(tx: &Transaction<'_>, pid: &str) -> Result<u64, StateError> {
     Ok(tx.query_row(
         "SELECT next_seq - 1 - published_through FROM profiles WHERE profile_id = ?1",
         [pid],

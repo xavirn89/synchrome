@@ -2,8 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-pub use synchrome_state::{ApplyOp, ApplyResult, BookmarkSyncStatus};
+pub use synchrome_state::{
+    ApplyOp, ApplyResult, BookmarkSyncStatus, ExtApplyOp, ExtApplyResult, ExtStatus,
+};
 pub use synchrome_sync::bookmarks::{BookmarkEvent, ChromiumNode};
+pub use synchrome_sync::extensions::{ExtEvent, ExtInfo};
 use uuid::Uuid;
 
 /// The mapping token as received from the extension. Redacted in `Debug`/`Display`; there is
@@ -83,6 +86,57 @@ pub enum ExtToApp {
         apply_id: String,
         results: Vec<ApplyResult>,
     },
+    /// One part of `chrome.management.getAll()` (reduced fields; never paths/permissions).
+    ExtensionsSnapshot {
+        snapshot_id: String,
+        epoch: String,
+        #[serde(default)]
+        covers_through: u64,
+        part: u32,
+        parts: u32,
+        items: Vec<ExtInfo>,
+    },
+    /// Incremental chrome.management events, numbered within the extension's epoch.
+    ExtensionsEvents {
+        epoch: String,
+        batch_id: String,
+        events: Vec<NumberedExtEvent>,
+    },
+    /// Download remote changes and return the next extensions apply plan.
+    ExtensionsPull {
+        pull_id: String,
+    },
+    /// Results of executing an `extensions_apply`.
+    ExtensionsApplied {
+        apply_id: String,
+        results: Vec<ExtApplyResult>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct NumberedExtEvent {
+    pub n: u64,
+    #[serde(flatten)]
+    pub event: ExtEvent,
+}
+
+/// Extensions limits (inventories are small; these are generous bounds).
+pub const MAX_EXT_SNAPSHOT_ITEMS: usize = 1000;
+pub const MAX_EXT_SNAPSHOT_PARTS: u32 = 16;
+pub const MAX_EXT_EVENTS_PER_BATCH: usize = 500;
+pub const MAX_EXT_APPLY_RESULTS: usize = synchrome_state::MAX_EXT_PLAN_OPS;
+const MAX_EXT_TEXT: usize = 1024;
+
+fn ext_info_ok(i: &ExtInfo) -> bool {
+    synchrome_sync::extensions::valid_id(&i.id)
+        && i.name.len() <= MAX_EXT_TEXT
+        && i.version.len() <= 64
+        && i.kind.len() <= 32
+        && i.install_type.len() <= 32
+        && i.update_url
+            .as_ref()
+            .map_or(true, |u| u.len() <= MAX_EXT_TEXT)
+        && i.disabled_reason.as_ref().map_or(true, |r| r.len() <= 64)
 }
 
 /// An event with its delivery number.
@@ -151,6 +205,69 @@ impl ExtToApp {
                     return Err("invalid_message");
                 }
                 if results.len() > MAX_APPLY_RESULTS {
+                    return Err("too_large");
+                }
+                Ok(())
+            }
+            ExtToApp::ExtensionsSnapshot {
+                snapshot_id,
+                epoch,
+                part,
+                parts,
+                items,
+                ..
+            } => {
+                if !id_ok(snapshot_id) || !id_ok(epoch) {
+                    return Err("invalid_message");
+                }
+                if *parts == 0 || *parts > MAX_EXT_SNAPSHOT_PARTS || part >= parts {
+                    return Err("too_large");
+                }
+                if items.len() > MAX_EXT_SNAPSHOT_ITEMS {
+                    return Err("too_large");
+                }
+                if !items.iter().all(ext_info_ok) {
+                    return Err("invalid_message");
+                }
+                Ok(())
+            }
+            ExtToApp::ExtensionsEvents {
+                epoch,
+                batch_id,
+                events,
+            } => {
+                if !id_ok(epoch) || !id_ok(batch_id) || events.is_empty() {
+                    return Err("invalid_message");
+                }
+                if events.len() > MAX_EXT_EVENTS_PER_BATCH {
+                    return Err("too_large");
+                }
+                if !events.windows(2).all(|w| w[0].n < w[1].n) || events[0].n == 0 {
+                    return Err("invalid_message");
+                }
+                let ok = events.iter().all(|e| match &e.event {
+                    ExtEvent::Uninstalled { id } => synchrome_sync::extensions::valid_id(id),
+                    ExtEvent::Installed { info }
+                    | ExtEvent::Enabled { info }
+                    | ExtEvent::Disabled { info } => ext_info_ok(info),
+                });
+                if !ok {
+                    return Err("invalid_message");
+                }
+                Ok(())
+            }
+            ExtToApp::ExtensionsPull { pull_id } => {
+                if id_ok(pull_id) {
+                    Ok(())
+                } else {
+                    Err("invalid_message")
+                }
+            }
+            ExtToApp::ExtensionsApplied { apply_id, results } => {
+                if !id_ok(apply_id) {
+                    return Err("invalid_message");
+                }
+                if results.len() > MAX_EXT_APPLY_RESULTS {
                     return Err("too_large");
                 }
                 Ok(())
@@ -259,6 +376,24 @@ pub enum AppToExt {
     /// Publication state after an ack or `sync_now`.
     SyncStatus {
         bookmarks: BookmarkSyncStatus,
+        /// Extensions counts (absent when unknown).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        extensions: Option<ExtStatus>,
+    },
+    /// Sent after the ops of an extensions message are durable (or why not).
+    ExtensionsAck {
+        batch_id: String,
+        result: AckResult,
+        ops: usize,
+        pending: u64,
+    },
+    /// Explicit chrome.management operations (may be empty). `user_actions` lists what needs
+    /// a click in the popup (Chromium refused without a user gesture): `(id, action)`.
+    ExtensionsApply {
+        pull_id: String,
+        apply_id: String,
+        ops: Vec<ExtApplyOp>,
+        user_actions: Vec<(String, String)>,
     },
     /// Explicit chrome.bookmarks operations to execute, in order (may be empty).
     BookmarksApply {
@@ -280,6 +415,8 @@ impl AppToExt {
             AppToExt::BookmarksAck { .. } => "bookmarks_ack",
             AppToExt::SyncStatus { .. } => "sync_status",
             AppToExt::BookmarksApply { .. } => "bookmarks_apply",
+            AppToExt::ExtensionsAck { .. } => "extensions_ack",
+            AppToExt::ExtensionsApply { .. } => "extensions_apply",
         }
     }
 }
@@ -468,6 +605,67 @@ mod tests {
             "bookmarks_ack"
         );
         assert_eq!(HandshakeStatus::ConnectedOffline.ui_state(), "connected");
+    }
+
+    #[test]
+    fn extension_messages_parse_validate_and_are_bounded() {
+        let id = "aaaabbbbccccddddeeeeffffgggghhhh";
+        let item = format!(
+            r#"{{"id":"{id}","name":"X","version":"1.0","enabled":true,"type":"extension","install_type":"normal","may_disable":true}}"#
+        );
+        let snap: ExtToApp = serde_json::from_str(&format!(
+            r#"{{"type":"extensions_snapshot","snapshot_id":"s","epoch":"e","part":0,"parts":1,"items":[{item}]}}"#
+        ))
+        .unwrap();
+        assert!(snap.validate().is_ok());
+        let ev: ExtToApp = serde_json::from_str(&format!(
+            r#"{{"type":"extensions_events","epoch":"e","batch_id":"b","events":[
+                {{"n":1,"kind":"installed","info":{item}}},{{"n":2,"kind":"disabled","info":{item}}},
+                {{"n":3,"kind":"enabled","info":{item}}},{{"n":4,"kind":"uninstalled","id":"{id}"}}]}}"#
+        ))
+        .unwrap();
+        assert!(ev.validate().is_ok());
+        let bad_id: ExtToApp = serde_json::from_str(
+            r#"{"type":"extensions_events","epoch":"e","batch_id":"b","events":[{"n":1,"kind":"uninstalled","id":"../../x"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(bad_id.validate(), Err("invalid_message"));
+        let many = format!(
+            r#"{{"type":"extensions_snapshot","snapshot_id":"s","epoch":"e","part":0,"parts":1,"items":[{}]}}"#,
+            vec![item.clone(); MAX_EXT_SNAPSHOT_ITEMS + 1].join(",")
+        );
+        let many: ExtToApp = serde_json::from_str(&many).unwrap();
+        assert_eq!(many.validate(), Err("too_large"));
+        let long_name = item.replace(
+            r#""name":"X""#,
+            &format!(r#""name":"{}""#, "n".repeat(2000)),
+        );
+        let long: ExtToApp = serde_json::from_str(&format!(
+            r#"{{"type":"extensions_snapshot","snapshot_id":"s","epoch":"e","part":0,"parts":1,"items":[{long_name}]}}"#
+        ))
+        .unwrap();
+        assert_eq!(long.validate(), Err("invalid_message"));
+        let applied: ExtToApp = serde_json::from_str(
+            r#"{"type":"extensions_applied","apply_id":"a","results":[{"op_id":1,"ok":false,"error":"gesture_required"}]}"#,
+        )
+        .unwrap();
+        assert!(applied.validate().is_ok());
+        let v = serde_json::to_value(AppToExt::ExtensionsApply {
+            pull_id: "p".into(),
+            apply_id: "a".into(),
+            ops: vec![ExtApplyOp {
+                op_id: 1,
+                action: synchrome_state::ExtAction::SetEnabled {
+                    id: id.into(),
+                    enabled: false,
+                },
+            }],
+            user_actions: vec![],
+        })
+        .unwrap();
+        assert_eq!(v["type"], "extensions_apply");
+        assert_eq!(v["ops"][0]["action"], "set_enabled");
+        assert_eq!(v["ops"][0]["enabled"], false);
     }
 
     #[test]

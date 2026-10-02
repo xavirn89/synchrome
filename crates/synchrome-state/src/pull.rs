@@ -173,6 +173,12 @@ fn apply_remote_op(
     op: &Op,
     now: i64,
 ) -> Result<bool, StateError> {
+    if op.col == synchrome_sync::extensions::COLLECTION {
+        return crate::ext::apply_remote_op(tx, pid, published_through, op, now);
+    }
+    if op.col != synchrome_sync::bookmarks::COLLECTION {
+        return Ok(false); // a collection this version does not know: skipped
+    }
     let row = load_row(tx, pid, &op.id)?;
     let local_pending = row.exists && row.local_seq > published_through;
     let open = crate::conflict::open_for(tx, pid, &op.id)?;
@@ -241,6 +247,12 @@ fn relevant(
 
 /// Merge one remote op into the materialised state by per-field LWW (no conflict check).
 pub(crate) fn apply_lww(tx: &Transaction<'_>, pid: &str, op: &Op) -> Result<(), StateError> {
+    if op.col == synchrome_sync::extensions::COLLECTION {
+        return crate::ext::lww(tx, pid, op);
+    }
+    if op.col != synchrome_sync::bookmarks::COLLECTION {
+        return Ok(());
+    }
     let row = load_row(tx, pid, &op.id)?;
     let mut pending = row.pending_fields.clone();
     match op.op {

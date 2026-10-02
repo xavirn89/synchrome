@@ -6,6 +6,7 @@
 //! come with the download slice.
 
 pub mod bookmarks;
+pub mod extensions;
 pub mod fractional;
 pub mod hlc;
 pub mod op;

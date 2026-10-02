@@ -152,6 +152,46 @@ CREATE TABLE conflict_remote (
 );
 ";
 
+/// v4 (M1 slice 10, extensions): the extensions inventory of a profile — shared state
+/// materialised from every device's journal (LWW per field; tombstone = uninstalled) next to
+/// this device's own observation (never published) — and conflicts tagged by collection.
+const V4: &str = "
+CREATE TABLE IF NOT EXISTS ext_entities (
+    profile_id TEXT NOT NULL,
+    ext_id TEXT NOT NULL,                    -- Chromium extension id (global identity)
+    -- shared (published) state
+    name TEXT NOT NULL DEFAULT '',
+    version TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'unknown',  -- webstore | edge_store | development | sideload | other
+    enabled INTEGER NOT NULL DEFAULT 1,      -- desired
+    deleted INTEGER NOT NULL DEFAULT 0,      -- uninstalled (tombstone)
+    field_hlc TEXT NOT NULL DEFAULT '{}',
+    deleted_hlc TEXT,
+    hlc TEXT NOT NULL DEFAULT '',
+    local_seq INTEGER NOT NULL DEFAULT 0,    -- seq of the last LOCAL op
+    base TEXT,                               -- pre-edit values/HLCs of unpublished changes
+    -- this device only (never published)
+    scope TEXT NOT NULL DEFAULT 'synced',    -- synced | protected (policy-installed: local only)
+    present INTEGER NOT NULL DEFAULT 0,      -- installed here now
+    seen INTEGER NOT NULL DEFAULT 0,         -- has been installed here (an absence is an uninstall only then)
+    local_enabled INTEGER,
+    may_disable INTEGER,
+    install_type TEXT,
+    disabled_reason TEXT,
+    pending_apply INTEGER NOT NULL DEFAULT 0, -- a remote change to bring to the browser
+    pending_fields TEXT NOT NULL DEFAULT '[]',
+    conflict INTEGER NOT NULL DEFAULT 0,
+    want TEXT,                               -- explicit user request: install | remove
+    local_state TEXT,                        -- user_action_required | protected | apply_failed | install_opened
+    local_error TEXT,
+    PRIMARY KEY (profile_id, ext_id)
+);
+ALTER TABLE conflicts ADD COLUMN col TEXT NOT NULL DEFAULT 'bookmarks';
+DROP INDEX IF EXISTS conflicts_one_open;
+CREATE UNIQUE INDEX conflicts_one_open ON conflicts (profile_id, col, sid)
+    WHERE status IN ('unresolved', 'resolving');
+";
+
 pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if v < 1 {
@@ -179,6 +219,10 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
             }
         }
         conn.pragma_update(None, "user_version", 3)?;
+    }
+    if v < 4 {
+        conn.execute_batch(&format!("BEGIN; {V4} COMMIT;"))?;
+        conn.pragma_update(None, "user_version", 4)?;
     }
     Ok(())
 }

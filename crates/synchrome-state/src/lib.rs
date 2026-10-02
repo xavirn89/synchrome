@@ -9,6 +9,7 @@
 mod apply;
 mod capture;
 mod conflict;
+mod ext;
 mod publish;
 mod pull;
 mod schema;
@@ -18,6 +19,10 @@ pub use capture::{CaptureError, CaptureOutcome, Source};
 pub use conflict::{
     ConflictKind, ConflictStatus, ConflictSubtype, ConflictView, Group, OptionView, Resolution,
     ResolveError, ResolveOutcome, SideView, Version,
+};
+pub use ext::{
+    ExtAction, ExtActionError, ExtApplyOp, ExtApplyResult, ExtPlan, ExtState, ExtStatus, ExtView,
+    UserExtAction, MAX_EXT_PLAN_OPS,
 };
 pub use publish::{
     publish, pull, sync, JournalSink, MappingCheck, PublishOutcome, PublishedEvent, SinkError,
@@ -347,6 +352,7 @@ impl StateDb {
         )?;
         for t in [
             "entities",
+            "ext_entities",
             "chromium_index",
             "ops",
             "chunks",

@@ -547,6 +547,32 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // Extensions of a mapping's profile: this device vs the synchronised state.
+        "--dev-ext-views" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-ext-views <mapping>");
+            };
+            match bookmarks::extensions_for_mapping(&state, mid) {
+                Ok(v) => out(serde_json::json!({ "extensions": v })),
+                Err(e) => fail(e),
+            }
+        }
+        // An explicit user action, exactly as the app's buttons do.
+        "--dev-ext-action" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-ext-action <mapping> <ext_id> <install|enable|disable|remove|keep|retry>");
+            };
+            let action = match serde_json::from_value::<synchrome_state::UserExtAction>(
+                serde_json::json!(arg(3)),
+            ) {
+                Ok(a) => a,
+                Err(_) => return fail("bad action"),
+            };
+            match bookmarks::extension_action(&state, mid, &arg(2), action).await {
+                Ok(()) => out(serde_json::json!({ "ok": true })),
+                Err(e) => fail(e),
+            }
+        }
         // Held remote ops of one conflict, in merge order: device, seq, HLC.
         "--dev-conflict-held" => match bookmarks::open_db()
             .and_then(|d| d.conflict_held(&arg(1)).map_err(|e| e.to_string()))
@@ -664,6 +690,17 @@ async fn run_async(args: &[String]) -> i32 {
                 .iter()
                 .filter(|o| o.op == synchrome_sync::OpKind::Delete)
                 .count());
+            // extensions ops: ids, kinds, field names and the enabled flag (no names)
+            v["ext_ops"] = serde_json::json!(ops
+                .iter()
+                .filter(|o| o.col == synchrome_sync::extensions::COLLECTION)
+                .map(|o| serde_json::json!({
+                    "seq": o.seq, "by": o.by, "id": o.id, "hlc": o.hlc,
+                    "op": if o.op == synchrome_sync::OpKind::Delete { "delete" } else { "set" },
+                    "fields": o.fields.as_ref().map(|f| f.keys().cloned().collect::<Vec<_>>()),
+                    "enabled": o.fields.as_ref().and_then(|f| f.get("enabled").cloned()),
+                }))
+                .collect::<Vec<_>>());
             out(v)
         }
         // Isolation probes run as ANOTHER account (B) against A's ids: everything must fail

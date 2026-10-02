@@ -8,6 +8,11 @@
 //   lifetime). Events are batched (debounce) and dropped only after the app acks them, i.e.
 //   after they are durable in the app's queue. The extension holds no credentials and never
 //   talks to Synchrome Cloud.
+// - Captures chrome.management (other extensions: id, name, version, enabled, type,
+//   installType, mayDisable; updateUrl only so the app can classify the store, never
+//   published) the same way, and executes only what the app plans: setEnabled, an uninstall
+//   the user confirmed in the app, or opening an official store page the user asked for.
+//   Conflict decisions live in the app; this extension never decides anything.
 // - Stores ONLY status (no token, no titles, no URLs) under "synchromeStatus".
 
 const HOST = "com.synchrome.host";
@@ -146,6 +151,58 @@ function nextBatch() {
   return out;
 }
 
+// ---------------------------------------------------------------- extensions capture
+const EXT_HASH_KEY = "lastAckedExtHash"; // chrome.storage.session
+const EXT_EVENTS_PER_BATCH = 200; // app limit 500
+const EXT_ITEMS_PER_PART = 400; // app limit 1000
+const SELF_ID = chrome.runtime.id;
+let extCounter = 0;
+let extQueue = [];
+let extNeedSnapshot = true;
+let extSuppress = false; // from the start of an extensions apply until the reconcile snapshot
+
+function extInfo(e) {
+  return {
+    id: e.id,
+    name: (e.name || "").slice(0, 256),
+    version: (e.version || "").slice(0, 64),
+    enabled: !!e.enabled,
+    type: e.type,
+    install_type: e.installType,
+    may_disable: !!e.mayDisable,
+    update_url: e.updateUrl ? e.updateUrl.slice(0, 512) : null,
+    disabled_reason: e.disabledReason ?? null,
+  };
+}
+// The app classifies again (apps, policy-installed, ids); never report ourselves.
+const extRelevant = (e) => !!e && e.id !== SELF_ID && e.type === "extension";
+
+function pushExt(ev) {
+  if (extSuppress) {
+    suppressedEvents += 1; // echoes of an extensions apply (the reconcile snapshot covers them)
+    return;
+  }
+  extCounter += 1;
+  extQueue.push({ n: extCounter, ...ev });
+  if (extQueue.length > 1000) {
+    extQueue = [];
+    extNeedSnapshot = true;
+  }
+  schedule(DEBOUNCE_MS);
+}
+chrome.management.onInstalled.addListener((e) => {
+  if (extRelevant(e)) pushExt({ kind: "installed", info: extInfo(e) });
+});
+chrome.management.onUninstalled.addListener((id) => {
+  if (id !== SELF_ID) pushExt({ kind: "uninstalled", id });
+});
+chrome.management.onEnabled.addListener((e) => {
+  if (extRelevant(e)) pushExt({ kind: "enabled", info: extInfo(e) });
+});
+chrome.management.onDisabled.addListener((e) => {
+  if (extRelevant(e)) pushExt({ kind: "disabled", info: extInfo(e) });
+});
+
 // ---------------------------------------------------------------- native port
 function openPort() {
   const port = chrome.runtime.connectNative(HOST);
@@ -158,8 +215,12 @@ function openPort() {
       if (msg.bookmarks.state === "not_synced") {
         // the app has no capture for this profile (new mapping, local state reset)
         needSnapshot = true;
-        chrome.storage.session.remove(SNAPSHOT_HASH_KEY);
+        extNeedSnapshot = true;
+        chrome.storage.session.remove([SNAPSHOT_HASH_KEY, EXT_HASH_KEY]);
       }
+    }
+    if (msg.type === "sync_status" && msg.extensions) {
+      saveStatus({ extensions: msg.extensions });
     }
     if (msg.type === "error") state.errors.push(msg.code);
     const i = waiters.findIndex((w) => w.match(msg));
@@ -199,6 +260,7 @@ function openPort() {
 }
 
 const isAck = (id) => (m) => m.type === "bookmarks_ack" && m.batch_id === id;
+const isExtAck = (id) => (m) => m.type === "extensions_ack" && m.batch_id === id;
 
 async function treeHash(parts) {
   const bytes = new TextEncoder().encode(JSON.stringify(parts));
@@ -267,6 +329,122 @@ async function sendEvents(p) {
   return true;
 }
 
+// ---------------------------------------------------------------- extensions transport
+async function sendExtSnapshot(p, force = false) {
+  extSuppress = false;
+  const covers = extCounter;
+  const items = (await chrome.management.getAll()).filter(extRelevant).map(extInfo);
+  items.sort((a, b) => (a.id < b.id ? -1 : 1));
+  const hash = await treeHash(items);
+  const prev = (await chrome.storage.session.get(EXT_HASH_KEY))[EXT_HASH_KEY];
+  if (!force && prev === hash) {
+    extNeedSnapshot = false;
+    extQueue = extQueue.filter((e) => e.n > covers);
+    return true;
+  }
+  const parts = [];
+  for (let i = 0; i < items.length; i += EXT_ITEMS_PER_PART) parts.push(items.slice(i, i + EXT_ITEMS_PER_PART));
+  if (!parts.length) parts.push([]);
+  const sid = crypto.randomUUID();
+  let last = null;
+  let status = null;
+  for (let i = 0; i < parts.length; i++) {
+    if (i === parts.length - 1) status = statusAfter(p);
+    p.post({ type: "extensions_snapshot", snapshot_id: sid, epoch, covers_through: covers, part: i, parts: parts.length, items: parts[i] });
+    last = await p.wait(isExtAck(`${sid}:${i}`), ACK_TIMEOUT_MS);
+    if (!last || last.result === "rejected") return false;
+  }
+  if (last.result !== "applied") return false;
+  await chrome.storage.session.set({ [EXT_HASH_KEY]: hash });
+  extNeedSnapshot = false;
+  extQueue = extQueue.filter((e) => e.n > covers);
+  await status;
+  return true;
+}
+
+async function sendExtEvents(p) {
+  while (extQueue.length) {
+    const batch = extQueue.slice(0, EXT_EVENTS_PER_BATCH);
+    const id = `x${epoch}:${batch[0].n}`;
+    const status = statusAfter(p);
+    p.post({ type: "extensions_events", epoch, batch_id: id, events: batch });
+    const ack = await p.wait(isExtAck(id), ACK_TIMEOUT_MS);
+    if (!ack || ack.result === "rejected") return false;
+    const last = batch[batch.length - 1].n;
+    extQueue = extQueue.filter((e) => e.n > last);
+    await status;
+  }
+  return true;
+}
+
+const STORE_PAGES = ["https://chromewebstore.google.com/detail/", "https://microsoftedge.microsoft.com/addons/detail/"];
+
+function extError(e) {
+  const m = String((e && e.message) || e);
+  if (/gesture/i.test(m)) return "gesture_required";
+  if (/no extension|failed to find|not found|doesn't exist/i.test(m)) return "not_found";
+  if (/cannot be (modified|disabled)|not allowed|policy/i.test(m)) return "protected";
+  return "failed";
+}
+
+// Execute only the explicit operations the app planned. Each is idempotent against the live
+// state (setEnabled compares first; an extension already gone is "not_found").
+async function executeExtApply(ops) {
+  extSuppress = true;
+  extNeedSnapshot = true;
+  const results = [];
+  for (const op of ops) {
+    try {
+      switch (op.action) {
+        case "set_enabled": {
+          const info = await chrome.management.get(op.id);
+          if (info.enabled !== op.enabled) {
+            if (!info.mayDisable) throw new Error("cannot be modified");
+            await chrome.management.setEnabled(op.id, op.enabled);
+          }
+          break;
+        }
+        case "uninstall":
+          // the user confirmed "Remove here" in the Synchrome app
+          await chrome.management.uninstall(op.id, { showConfirmDialog: false });
+          break;
+        case "open_install":
+          if (!STORE_PAGES.some((p) => op.url.startsWith(p) && op.url.slice(p.length) === op.id)) throw new Error("bad store url");
+          await chrome.tabs.create({ url: op.url, active: true });
+          break;
+        default:
+          throw new Error("unknown action");
+      }
+      results.push({ op_id: op.op_id, ok: true });
+    } catch (e) {
+      results.push({ op_id: op.op_id, ok: false, error: extError(e) });
+    }
+  }
+  return results;
+}
+
+async function extPullAndApply(p) {
+  for (let round = 0; round < 5; round++) {
+    const pullId = crypto.randomUUID();
+    const status = statusAfter(p);
+    p.post({ type: "extensions_pull", pull_id: pullId });
+    const plan = await p.wait((m) => m.type === "extensions_apply" && m.pull_id === pullId, ACK_TIMEOUT_MS);
+    if (!plan) return false;
+    await status;
+    // what Chromium refused without a gesture: the popup offers it as a click
+    await saveStatus({ ext_user_actions: plan.user_actions || [] });
+    if (!plan.ops || !plan.ops.length) return true;
+    const results = await executeExtApply(plan.ops);
+    const st = statusAfter(p);
+    p.post({ type: "extensions_applied", apply_id: plan.apply_id, results });
+    const ack = await p.wait(isExtAck(plan.apply_id), ACK_TIMEOUT_MS);
+    if (!ack) return false;
+    await st;
+    if (!(await sendExtSnapshot(p, true))) return false;
+  }
+  return true;
+}
+
 // One connection: hello, then snapshot/events, or sync_now when there is nothing to send.
 async function runOnce(syncNow) {
   const stored = await chrome.storage.local.get(TOKEN_KEY);
@@ -301,7 +479,9 @@ async function runOnce(syncNow) {
     if (hello.status !== "connected" && hello.status !== "connected_offline") {
       queue = []; // not linked: the snapshot after linking covers everything
       needSnapshot = true;
-      await chrome.storage.session.remove(SNAPSHOT_HASH_KEY);
+      extQueue = [];
+      extNeedSnapshot = true;
+      await chrome.storage.session.remove([SNAPSHOT_HASH_KEY, EXT_HASH_KEY]);
       return lastStatus;
     }
     let sent = false;
@@ -313,9 +493,18 @@ async function runOnce(syncNow) {
       if (!(await sendEvents(p))) return lastStatus;
       sent = true;
     }
+    if (extNeedSnapshot) {
+      if (!(await sendExtSnapshot(p))) return lastStatus;
+      sent = true;
+    }
+    if (extQueue.length) {
+      if (!(await sendExtEvents(p))) return lastStatus;
+      sent = true;
+    }
     if (hello.status === "connected") {
       // local changes are already with the app; now download and apply remote ones
       await pullAndApply(p);
+      await extPullAndApply(p);
     } else if (!sent && syncNow) {
       p.post({ type: "sync_now" });
       await p.wait((m) => m.type === "sync_status", ACK_TIMEOUT_MS);
@@ -436,7 +625,7 @@ function run(syncNow = false) {
     } finally {
       running = null;
       // events that arrived while we were sending
-      if (queue.length || needSnapshot) schedule(DEBOUNCE_MS, true);
+      if (queue.length || needSnapshot || extQueue.length || extNeedSnapshot) schedule(DEBOUNCE_MS, true);
     }
   })();
   return running;
@@ -447,9 +636,10 @@ function schedule(ms, afterRun = false) {
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = setTimeout(async () => {
     flushTimer = null;
-    const before = queue.length + (needSnapshot ? 1 : 0);
+    const pendingWork = () => queue.length + extQueue.length + (needSnapshot ? 1 : 0) + (extNeedSnapshot ? 1 : 0);
+    const before = pendingWork();
     await run(false);
-    const after = queue.length + (needSnapshot ? 1 : 0);
+    const after = pendingWork();
     // nothing moved (app unavailable / not linked): back off; the alarm keeps retrying
     if (after && after >= before) {
       backoffMs = Math.min(backoffMs ? backoffMs * 2 : 30000, 300000);

@@ -23,7 +23,7 @@ Rule of thumb that drives the whole design: **read live, write live when an API 
 
 ### 2.2 Installed extensions — ✅ list and enabled-state syncable; installation is assisted, not silent everywhere
 
-- Read via `chrome.management.getAll()` (path A). Sync only `installType == "normal"` (Web Store) items; dev/unpacked/sideload are device-local by nature.
+- Read via `chrome.management.getAll()` (path A). ~~Sync only `installType == "normal"` items~~ — revised by M1 slice 10 (docs/03 §3.4): every non-policy extension is in the inventory with its *source class*; unpacked/sideloaded/self-hosted ones are shown as "Unavailable" on devices that lack them (never installed), but their enabled state syncs where they exist. Policy-installed (`admin`) items stay local and protected.
 - Enabled/disabled: `management.setEnabled` from a UI click in the Synchrome popup (gesture requirement) — the popup shows "N extension changes pending — Apply". Attempt silently from the worker first; fall back to the gesture path on error.
 - Uninstall propagation: Chromium always shows a confirmation dialog for cross-extension uninstall → surfaced as a pending action the user confirms in the popup. Never silently uninstall.
 - **Installation on a new device**, in order of preference, chosen per browser/platform by the agent:

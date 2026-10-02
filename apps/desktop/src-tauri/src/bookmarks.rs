@@ -250,6 +250,11 @@ pub async fn sync_all(
     out
 }
 
+/// Extensions counts of a profile on this device (None when unknown).
+pub fn ext_status(profile_id: Uuid) -> Option<synchrome_state::ExtStatus> {
+    open_db().ok()?.ext_status(profile_id).ok()
+}
+
 /// Bookmarks status of a mapping of THIS device (None when it never captured).
 pub fn status_for_mapping(mapping_id: Uuid, profile_id: Uuid) -> Option<BookmarkSyncStatus> {
     let db = open_db().ok()?;
@@ -389,4 +394,50 @@ pub async fn resolve_for_mapping(
         .await;
     }
     Ok(out)
+}
+
+// ------------------------------------------------------------------ extensions (slice 10)
+
+fn own_profile(state: &AppState, mapping_id: Uuid) -> Result<(String, Uuid), String> {
+    let (account, pid) = profile_of_mapping(state, mapping_id)?;
+    let db = open_db()?;
+    if !db
+        .profile_account(pid)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|a| a == account)
+    {
+        return Err("this profile belongs to another account".into());
+    }
+    Ok((account, pid))
+}
+
+/// Extensions of a mapping's profile: this device vs the synchronised state.
+pub fn extensions_for_mapping(
+    state: &AppState,
+    mapping_id: Uuid,
+) -> Result<Vec<synchrome_state::ExtView>, String> {
+    let (_, pid) = own_profile(state, mapping_id)?;
+    open_db()?.ext_views(pid).map_err(|e| e.to_string())
+}
+
+/// An explicit user action on one extension (Install opens the store page, Remove was
+/// confirmed in the UI). The browser executes it on the extension's next pull; a changed
+/// enabled state is published right away.
+pub async fn extension_action(
+    state: &AppState,
+    mapping_id: Uuid,
+    ext_id: &str,
+    action: synchrome_state::UserExtAction,
+) -> Result<(), String> {
+    let (account, pid) = own_profile(state, mapping_id)?;
+    let mut db = open_db()?;
+    db.ext_user_action(&account, pid, ext_id, action, synchrome_sync::hlc::now_ms())
+        .map_err(|e| e.to_string())?;
+    drop(db);
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        publish_profile(state, pid),
+    )
+    .await;
+    Ok(())
 }

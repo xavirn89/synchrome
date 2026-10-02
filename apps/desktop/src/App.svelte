@@ -86,6 +86,47 @@
     retry: "retried",
     relocate: "moved to a valid folder",
   };
+  // ---- extensions (inventory + enabled state) ----
+  const X_STATE = {
+    synced: { label: "Synced", cls: "ok" },
+    missing: { label: "Missing", cls: "info" },
+    removed_elsewhere: { label: "Removed on another device", cls: "warn" },
+    applying: { label: "Applying", cls: "info" },
+    user_action_required: { label: "User action required", cls: "warn" },
+    protected: { label: "Protected", cls: "muted" },
+    conflict: { label: "Conflict", cls: "bad" },
+    apply_failed: { label: "Apply failed", cls: "bad" },
+    install_opened: { label: "Install opened in the browser", cls: "info" },
+  };
+  const X_AVAIL = { available: "Install available", unavailable: "Unavailable (not from a store)", incompatible: "Incompatible with this browser", unknown: "Unknown source" };
+  const X_ACTION = { install: "Install", enable: "Enable", disable: "Disable", remove: "Remove here", keep: "Keep here", retry: "Retry" };
+  let extOpen = $state({});
+  let extList = $state({});
+  let extConfirm = $state(null);
+  let extMsg = $state({});
+  async function loadExtensions(m) {
+    try { extList = { ...extList, [m.id]: await invoke("list_extensions", { mappingId: m.id }) }; }
+    catch (e) { actionError = String(e); }
+  }
+  async function toggleExtensions(m) {
+    const open = !extOpen[m.id];
+    extOpen = { ...extOpen, [m.id]: open };
+    if (open) await loadExtensions(m);
+  }
+  async function extAct(m, x, action) {
+    const key = `${x.ext_id}:${action}`;
+    if (action === "remove" && extConfirm !== key) { extConfirm = key; return; }
+    extConfirm = null; busyKey = `ext:${x.ext_id}`; actionError = null;
+    try {
+      await invoke("extension_action", { mappingId: m.id, extId: x.ext_id, action });
+      extMsg = { ...extMsg, [m.id]: `“${x.name}”: ${X_ACTION[action]} — ${action === "install" ? "the store page opens in the browser on the next sync" : "saved; the browser is updated on the next sync"}.` };
+      await loadExtensions(m);
+      mappings = await invoke("list_mappings");
+    } catch (e) { actionError = String(e); }
+    finally { busyKey = null; }
+  }
+  const onOff = (v) => (v === true ? "Enabled" : v === false ? "Disabled" : "—");
+
   let conflictsOpen = $state({});   // mapping id -> panel open
   let conflictList = $state({});    // mapping id -> ConflictView[]
   let confirmKey = $state(null);    // "<conflict>:<resolution>" waiting for confirmation
@@ -120,6 +161,14 @@
   /// Rows of the Local vs Remote comparison. A remote value absent means "unchanged there".
   function compareRows(c) {
     const has = (side, g) => side.changed.includes(g);
+    if (c.item_kind === "extension") {
+      const rows = [
+        { k: "Installed", l: c.local.exists ? "yes" : "removed", r: c.remote.exists ? "yes" : "removed" },
+        { k: "Enabled", l: onOff(c.local.enabled), r: c.remote.exists ? (has(c.remote, "enabled") ? onOff(c.remote.enabled) : "unchanged") : "—" },
+      ];
+      if (c.base) for (const row of rows) row.b = row.k === "Installed" ? (c.base.exists ? "yes" : "removed") : onOff(c.base.enabled);
+      return rows.map((x) => ({ ...x, diff: x.r !== "unchanged" && x.l !== x.r }));
+    }
     const rv = (g, v) => (c.remote.exists === false && g !== "existence" ? "—" : has(c.remote, g) ? v : "unchanged");
     const rows = [
       { k: "Exists", l: c.local.exists ? "yes" : "deleted", r: c.remote.exists ? "yes" : "deleted" },
@@ -200,8 +249,11 @@
       [devices, profiles, mappings] = await Promise.all([
         invoke("list_devices"), invoke("list_profiles"), invoke("list_mappings"),
       ]);
-      // open conflict panels show fresh data after every reload
-      for (const m of mappings) if (conflictsOpen[m.id]) await loadConflicts(m);
+      // open panels show fresh data after every reload
+      for (const m of mappings) {
+        if (conflictsOpen[m.id]) await loadConflicts(m);
+        if (extOpen[m.id]) await loadExtensions(m);
+      }
     } catch (e) {
       cloudDataError = String(e);
     } finally {
@@ -421,7 +473,7 @@
               {#each closed as c (c.conflict_id)}
                 <li class="row-item">
                   <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
-                  <span class="pname">{c.item_kind === "folder" ? "Folder" : "Bookmark"} “{c.name}”</span>
+                  <span class="pname">{c.item_kind === "folder" ? "Folder" : c.item_kind === "extension" ? "Extension" : "Bookmark"} “{c.name}”</span>
                   <span class="pdir">{c.status === "superseded" ? (c.detail ?? "no longer needed") : RES_DONE[c.resolution] ?? c.resolution}{c.resolution_ops ? ` · ${c.resolution_ops} change${c.resolution_ops === 1 ? "" : "s"} published${c.upload_pending ? " (uploading)" : ""}` : ""}</span>
                   <span class="pdir">{when(c.resolved_at)}</span>
                   {#if resolvedMsg[c.conflict_id]}<span class="ok small">{resolvedMsg[c.conflict_id]}</span>{/if}
@@ -430,6 +482,51 @@
             </ul>
           {/if}
         {/if}
+      </div>
+    {/if}
+  {/if}
+  {#if m.display_status === "extension_confirmed" && m.extensions}
+    {@const xs = m.extensions}
+    <div class="bookmarks-row">
+      <span class="small">Extensions</span>
+      <span class="badge small {xs.conflicts ? 'bad' : xs.differences || xs.missing || xs.user_action ? 'info' : 'ok'}">{xs.conflicts ? `Conflict · ${xs.conflicts}` : xs.differences || xs.missing || xs.user_action ? "Differences" : "Synced"}</span>
+      <span class="pdir">{xs.installed} installed · {xs.synced} synced · {xs.missing} missing · {xs.differences} differences · {xs.conflicts} conflicts{xs.user_action ? ` · ${xs.user_action} need you` : ""}</span>
+      <button class="tiny-btn" onclick={() => toggleExtensions(m)}>{extOpen[m.id] ? "Hide extensions" : "Extensions"}</button>
+    </div>
+    {#if extOpen[m.id]}
+      {@const xl = extList[m.id] ?? []}
+      <div class="conflicts">
+        {#if extMsg[m.id]}<p class="ok small" role="status">{extMsg[m.id]}</p>{/if}
+        {#if xl.length === 0}<p class="muted small">No extensions yet (the Synchrome extension itself is never listed).</p>{/if}
+        <table class="cmp">
+          <thead><tr><th>Extension</th><th>This device</th><th>Synchrome</th><th></th></tr></thead>
+          <tbody>
+            {#each xl as x (x.ext_id)}
+              <tr class={x.state === "synced" ? "" : "diff"}>
+                <td>{x.name}{#if x.version}<span class="pdir"> · v{x.version}</span>{/if}</td>
+                <td>{x.installed_here ? onOff(x.enabled_here) : "Missing"}</td>
+                <td>{x.installed_synced ? onOff(x.enabled_synced) : "Removed"}
+                  <br /><span class="badge small {X_STATE[x.state]?.cls ?? 'muted'}">{X_STATE[x.state]?.label ?? x.state}</span>
+                  {#if x.state === "missing"}<span class="pdir"> {X_AVAIL[x.availability] ?? x.availability}</span>{/if}
+                  {#if x.error}<span class="small bad"> {x.error}</span>{/if}
+                </td>
+                <td>
+                  {#each x.actions as a}
+                    {@const key = `${x.ext_id}:${a}`}
+                    <button class="tiny-btn {a === 'remove' ? 'danger' : ''}" disabled={busyKey === `ext:${x.ext_id}`} onclick={() => extAct(m, x, a)}>
+                      {extConfirm === key ? "Confirm: remove from this browser" : X_ACTION[a] ?? a}
+                    </button>
+                  {/each}
+                  {#if x.state === "conflict"}
+                    <button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Resolve conflict</button>
+                  {/if}
+                  {#if extConfirm?.startsWith(x.ext_id)}<button class="tiny-btn" onclick={() => (extConfirm = null)}>Cancel</button>{/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <p class="hint tiny">Installing opens the official store page; removing asks for confirmation. Nothing is installed or uninstalled automatically.</p>
       </div>
     {/if}
   {/if}

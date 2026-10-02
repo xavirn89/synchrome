@@ -517,6 +517,27 @@ async fn resolve_conflicts(
     bookmarks::resolve_for_mapping(&state, mapping_id, items).await
 }
 
+/// Extensions of a mapping of THIS device: this device vs the synchronised state.
+#[tauri::command]
+fn list_extensions(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+) -> Result<Vec<synchrome_state::ExtView>, String> {
+    bookmarks::extensions_for_mapping(&state, mapping_id)
+}
+
+/// Install (opens the official store page) / Enable / Disable / Remove (confirmed in the UI)
+/// / Keep / Retry for one extension of a mapping of THIS device.
+#[tauri::command]
+async fn extension_action(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+    ext_id: String,
+    action: synchrome_state::UserExtAction,
+) -> Result<(), String> {
+    bookmarks::extension_action(&state, mapping_id, &ext_id, action).await
+}
+
 /// Retry writing the mapping token into the local extension store (browser must be closed).
 #[tauri::command]
 async fn write_mapping_token_local(
@@ -687,6 +708,8 @@ pub fn run() {
             publish_bookmarks,
             list_conflicts,
             resolve_conflicts,
+            list_extensions,
+            extension_action,
             dev_ui_report
         ])
         .run(tauri::generate_context!())
