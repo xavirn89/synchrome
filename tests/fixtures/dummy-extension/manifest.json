@@ -2,7 +2,12 @@
   "manifest_version": 3,
   "name": "Synchrome Test Dummy",
   "version": "1.0.0",
-  "description": "Inert MV3 extension used only by Synchrome's end-to-end tests (no permissions, no code paths that touch anything).",
+  "description": "Inert MV3 extension used only by Synchrome's end-to-end tests: chrome.storage only (driven by the harness through page.html).",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuYmnMYf8Ptt3fpCVB1mtLdbiHZjB5Vjsr/JrcQY/RJC1z/cKxor5A3RCipaxTbSmlK1tSACTsgKDILMrJKqw05bDNVG6Vuquf7gNzaDWrI1yLN8swoLM70yW46Sdl/R1R5v6bxt6ZkQrjpTpVoeuAwJtJOiH8QiaDK1e3wSIAj44grFCGV3E2zJQs/+TsxRKsioAFEGORGEP81tGVwtCfCPSkyVtueHHjosyC9uCW8hOaZ9jwdjFN7guoW6fVlyh3Y6LUR2MV83rgiU7yy4cRlrWrgU2XGrYcapl214yFAqpATUDxR+OKV6BgY1qTPt9O1RjZX9UqSkbEitaHfpKpwIDAQAB",
-  "background": { "service_worker": "worker.js" }
+  "background": {
+    "service_worker": "worker.js"
+  },
+  "permissions": [
+    "storage"
+  ]
 }

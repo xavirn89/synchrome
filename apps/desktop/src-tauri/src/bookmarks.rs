@@ -246,6 +246,12 @@ pub async fn sync_all(
     let mut out = Vec::new();
     for p in ids {
         out.push((p, sync_profile(state, p).await));
+        // extension settings: read/written only while that profile's browser is closed
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            crate::ext_settings::settings_cycle(state, p),
+        )
+        .await;
     }
     out
 }
@@ -397,6 +403,11 @@ pub async fn resolve_for_mapping(
 }
 
 // ------------------------------------------------------------------ extensions (slice 10)
+
+/// The current account and this device's profile of a mapping (refuses another account's).
+pub fn own_profile_pub(state: &AppState, mapping_id: Uuid) -> Result<(String, Uuid), String> {
+    own_profile(state, mapping_id)
+}
 
 fn own_profile(state: &AppState, mapping_id: Uuid) -> Result<(String, Uuid), String> {
     let (account, pid) = profile_of_mapping(state, mapping_id)?;

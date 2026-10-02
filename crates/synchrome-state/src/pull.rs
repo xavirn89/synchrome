@@ -176,6 +176,9 @@ fn apply_remote_op(
     if op.col == synchrome_sync::extensions::COLLECTION {
         return crate::ext::apply_remote_op(tx, pid, published_through, op, now);
     }
+    if op.col == synchrome_sync::extension_settings::COLLECTION {
+        return crate::ext_settings::apply_remote_op(tx, pid, published_through, op, now);
+    }
     if op.col != synchrome_sync::bookmarks::COLLECTION {
         return Ok(false); // a collection this version does not know: skipped
     }
@@ -249,6 +252,9 @@ fn relevant(
 pub(crate) fn apply_lww(tx: &Transaction<'_>, pid: &str, op: &Op) -> Result<(), StateError> {
     if op.col == synchrome_sync::extensions::COLLECTION {
         return crate::ext::lww(tx, pid, op);
+    }
+    if op.col == synchrome_sync::extension_settings::COLLECTION {
+        return crate::ext_settings::lww(tx, pid, op);
     }
     if op.col != synchrome_sync::bookmarks::COLLECTION {
         return Ok(());

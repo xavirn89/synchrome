@@ -10,6 +10,7 @@ mod apply;
 mod capture;
 mod conflict;
 mod ext;
+mod ext_settings;
 mod publish;
 mod pull;
 mod schema;
@@ -23,6 +24,10 @@ pub use conflict::{
 pub use ext::{
     ExtAction, ExtActionError, ExtApplyOp, ExtApplyResult, ExtPlan, ExtState, ExtStatus, ExtView,
     UserExtAction, MAX_EXT_PLAN_OPS,
+};
+pub use ext_settings::{
+    SettingsCapture, SettingsConfig, SettingsError, SettingsJob, SettingsState, SettingsView,
+    SettingsWrite,
 };
 pub use publish::{
     publish, pull, sync, JournalSink, MappingCheck, PublishOutcome, PublishedEvent, SinkError,
@@ -205,6 +210,28 @@ impl StateDb {
         Ok(out)
     }
 
+    /// The confirmed capture source of a profile on this device (for the app's own cycles).
+    pub fn source_of(&self, profile_id: Uuid) -> Result<Option<Source>, StateError> {
+        let Some(p) = load_profile(&self.conn, &profile_id.to_string())? else {
+            return Ok(None);
+        };
+        let (Some(m), Some(identity)) = (
+            p.source_mapping_id
+                .as_deref()
+                .and_then(|m| Uuid::parse_str(m).ok()),
+            p.source_identity.clone(),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(Source {
+            mapping_id: m,
+            account_id: p.account_id,
+            device_id: Uuid::parse_str(&p.device_id).unwrap_or(Uuid::nil()),
+            profile_id,
+            identity,
+        }))
+    }
+
     /// Account that owns a profile's local state.
     pub fn profile_account(&self, profile_id: Uuid) -> Result<Option<String>, StateError> {
         Ok(load_profile(&self.conn, &profile_id.to_string())?.map(|p| p.account_id))
@@ -353,6 +380,8 @@ impl StateDb {
         for t in [
             "entities",
             "ext_entities",
+            "ext_settings_entities",
+            "ext_settings_config",
             "chromium_index",
             "ops",
             "chunks",

@@ -54,6 +54,7 @@ pub(crate) struct ExtRow {
     pub want: Option<String>,
     pub local_state: Option<String>,
     pub local_error: Option<String>,
+    pub local_version: Option<String>,
     /// (enabled, its HLC, deleted, its HLC) as loaded — the pre-edit values for BASE, since
     /// a row is changed before its ops are written.
     pub loaded: Option<(bool, Option<String>, bool, Option<String>)>,
@@ -61,7 +62,8 @@ pub(crate) struct ExtRow {
 
 const COLS: &str = "ext_id, name, version, source, enabled, deleted, field_hlc, deleted_hlc, hlc,
     local_seq, base, scope, present, seen, local_enabled, may_disable, install_type,
-    disabled_reason, pending_apply, pending_fields, conflict, want, local_state, local_error";
+    disabled_reason, pending_apply, pending_fields, conflict, want, local_state, local_error,
+    local_version";
 
 fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExtRow> {
     let fh: String = r.get(6)?;
@@ -95,6 +97,7 @@ fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExtRow> {
         want: r.get(21)?,
         local_state: r.get(22)?,
         local_error: r.get(23)?,
+        local_version: r.get(24)?,
         loaded: None,
     };
     row.loaded = Some((
@@ -129,9 +132,9 @@ fn save(conn: &Connection, pid: &str, e: &ExtRow) -> Result<(), StateError> {
         "INSERT INTO ext_entities (profile_id, ext_id, name, version, source, enabled, deleted,
              field_hlc, deleted_hlc, hlc, local_seq, base, scope, present, seen, local_enabled,
              may_disable, install_type, disabled_reason, pending_apply, pending_fields, conflict,
-             want, local_state, local_error)
+             want, local_state, local_error, local_version)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                 ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+                 ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
          ON CONFLICT(profile_id, ext_id) DO UPDATE SET name = excluded.name,
              version = excluded.version, source = excluded.source, enabled = excluded.enabled,
              deleted = excluded.deleted, field_hlc = excluded.field_hlc,
@@ -142,7 +145,7 @@ fn save(conn: &Connection, pid: &str, e: &ExtRow) -> Result<(), StateError> {
              disabled_reason = excluded.disabled_reason, pending_apply = excluded.pending_apply,
              pending_fields = excluded.pending_fields, conflict = excluded.conflict,
              want = excluded.want, local_state = excluded.local_state,
-             local_error = excluded.local_error",
+             local_error = excluded.local_error, local_version = excluded.local_version",
         params![
             pid,
             e.id,
@@ -168,7 +171,8 @@ fn save(conn: &Connection, pid: &str, e: &ExtRow) -> Result<(), StateError> {
             e.conflict as i64,
             e.want,
             e.local_state,
-            e.local_error
+            e.local_error,
+            e.local_version
         ],
     )?;
     Ok(())
@@ -284,6 +288,7 @@ fn observe(e: &mut ExtRow, info: &ExtInfo, out: &mut Vec<Pending>) {
     e.may_disable = Some(info.may_disable);
     e.install_type = Some(info.install_type.clone());
     e.disabled_reason = info.disabled_reason.clone();
+    e.local_version = Some(ex::clean_version(&info.version));
     if e.local_state.as_deref() == Some("install_opened") {
         e.local_state = None;
     }

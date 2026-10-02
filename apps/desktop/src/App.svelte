@@ -100,6 +100,42 @@
   };
   const X_AVAIL = { available: "Install available", unavailable: "Unavailable (not from a store)", incompatible: "Incompatible with this browser", unknown: "Unknown source" };
   const X_ACTION = { install: "Install", enable: "Enable", disable: "Disable", remove: "Remove here", keep: "Keep here", retry: "Retry" };
+  const S_STATE = {
+    off: { label: "Off", cls: "muted" },
+    waiting_for_browser_close: { label: "Waiting for browser to close", cls: "info" },
+    syncing: { label: "Syncing", cls: "info" },
+    synced: { label: "Synced", cls: "ok" },
+    version_mismatch: { label: "Version mismatch", cls: "warn" },
+    conflict: { label: "Conflict", cls: "bad" },
+    error: { label: "Error", cls: "bad" },
+  };
+  const S_MODE = { off: "Off", local: "Local only", local_sync: "Local + Sync" };
+  let setList = $state({});  // mapping id -> { ext_id -> SettingsView }
+  let setMode = $state({});  // "<mapping>:<ext>" -> chosen mode (before confirming)
+  async function loadSettings(m) {
+    try {
+      const l = await invoke("list_extension_settings", { mappingId: m.id });
+      setList = { ...setList, [m.id]: Object.fromEntries(l.map((v) => [v.ext_id, v])) };
+    } catch (e) { actionError = String(e); }
+  }
+  async function applyMode(m, x, mode) {
+    busyKey = `set:${x.ext_id}`; actionError = null;
+    try {
+      await invoke("set_extension_settings_mode", { mappingId: m.id, extId: x.ext_id, mode });
+      extMsg = { ...extMsg, [m.id]: `“${x.name}”: settings sync ${S_MODE[mode]}.` };
+      await loadSettings(m);
+    } catch (e) { actionError = String(e); }
+    finally { busyKey = null; }
+  }
+  async function settingsNow(m, x) {
+    busyKey = `set:${x.ext_id}`; actionError = null;
+    try {
+      const r = await invoke("extension_settings_sync_now", { mappingId: m.id });
+      extMsg = { ...extMsg, [m.id]: r.browser_running ? "The browser is open: extension settings are read and written when it is closed." : `Settings synced (${r.captured_ops} changes sent, ${r.keys_written} keys written).` };
+      await loadSettings(m);
+    } catch (e) { actionError = String(e); }
+    finally { busyKey = null; }
+  }
   let extOpen = $state({});
   let extList = $state({});
   let extConfirm = $state(null);
@@ -111,7 +147,7 @@
   async function toggleExtensions(m) {
     const open = !extOpen[m.id];
     extOpen = { ...extOpen, [m.id]: open };
-    if (open) await loadExtensions(m);
+    if (open) { await loadExtensions(m); await loadSettings(m); }
   }
   async function extAct(m, x, action) {
     const key = `${x.ext_id}:${action}`;
@@ -161,6 +197,14 @@
   /// Rows of the Local vs Remote comparison. A remote value absent means "unchanged there".
   function compareRows(c) {
     const has = (side, g) => side.changed.includes(g);
+    if (c.item_kind === "setting") {
+      const rows = [
+        { k: "Exists", l: c.local.exists ? "yes" : "deleted", r: c.remote.exists ? "yes" : "deleted" },
+        { k: "Value", l: c.local.value ?? "—", r: c.remote.exists ? (c.remote.value ?? "—") : "—" },
+      ];
+      if (c.base) for (const row of rows) row.b = row.k === "Exists" ? (c.base.exists ? "yes" : "deleted") : (c.base.value ?? "");
+      return rows.map((x) => ({ ...x, diff: x.l !== x.r }));
+    }
     if (c.item_kind === "extension") {
       const rows = [
         { k: "Installed", l: c.local.exists ? "yes" : "removed", r: c.remote.exists ? "yes" : "removed" },
@@ -252,7 +296,7 @@
       // open panels show fresh data after every reload
       for (const m of mappings) {
         if (conflictsOpen[m.id]) await loadConflicts(m);
-        if (extOpen[m.id]) await loadExtensions(m);
+        if (extOpen[m.id]) { await loadExtensions(m); await loadSettings(m); }
       }
     } catch (e) {
       cloudDataError = String(e);
@@ -473,7 +517,7 @@
               {#each closed as c (c.conflict_id)}
                 <li class="row-item">
                   <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
-                  <span class="pname">{c.item_kind === "folder" ? "Folder" : c.item_kind === "extension" ? "Extension" : "Bookmark"} “{c.name}”</span>
+                  <span class="pname">{c.item_kind === "folder" ? "Folder" : c.item_kind === "extension" ? "Extension" : c.item_kind === "setting" ? "Extension setting" : "Bookmark"} “{c.name}”</span>
                   <span class="pdir">{c.status === "superseded" ? (c.detail ?? "no longer needed") : RES_DONE[c.resolution] ?? c.resolution}{c.resolution_ops ? ` · ${c.resolution_ops} change${c.resolution_ops === 1 ? "" : "s"} published${c.upload_pending ? " (uploading)" : ""}` : ""}</span>
                   <span class="pdir">{when(c.resolved_at)}</span>
                   {#if resolvedMsg[c.conflict_id]}<span class="ok small">{resolvedMsg[c.conflict_id]}</span>{/if}
@@ -523,6 +567,31 @@
                   {#if extConfirm?.startsWith(x.ext_id)}<button class="tiny-btn" onclick={() => (extConfirm = null)}>Cancel</button>{/if}
                 </td>
               </tr>
+              {#if x.installed_here && x.state !== "protected"}
+                {@const sv = setList[m.id]?.[x.ext_id]}
+                {@const key = `${m.id}:${x.ext_id}`}
+                <tr class="settings-row"><td colspan="4">
+                  <span class="small">Settings sync</span>
+                  {#if sv}<span class="badge small {S_STATE[sv.state]?.cls ?? 'muted'}">{S_STATE[sv.state]?.label ?? sv.state}</span>{/if}
+                  <select value={setMode[key] ?? sv?.mode ?? "off"} onchange={(e) => (setMode = { ...setMode, [key]: e.currentTarget.value })} disabled={busyKey === `set:${x.ext_id}`}>
+                    <option value="off">Off</option><option value="local">Local only</option><option value="local_sync">Local + Sync</option>
+                  </select>
+                  {#if (setMode[key] ?? sv?.mode ?? "off") !== (sv?.mode ?? "off")}
+                    <button class="tiny-btn" onclick={() => applyMode(m, x, setMode[key])}>{(setMode[key] ?? "off") === "off" ? "Disable" : "Enable settings sync"}</button>
+                  {/if}
+                  {#if sv && sv.mode !== "off"}
+                    <span class="pdir">{sv.keys_local} keys local · {sv.keys_sync} keys sync · {sv.pending} pending · {sv.conflicts} conflicts · {sv.excluded_sensitive} excluded sensitive</span>
+                    {#if sv.state === "error" || sv.state === "waiting_for_browser_close" || sv.state === "version_mismatch"}
+                      <button class="tiny-btn" onclick={() => settingsNow(m, x)} disabled={busyKey === `set:${x.ext_id}`}>Retry</button>
+                    {/if}
+                    {#if sv.conflicts > 0}<button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Review conflicts</button>{/if}
+                    {#if sv.error}<span class="small bad">{sv.error}</span>{/if}
+                  {/if}
+                  {#if (setMode[key] ?? sv?.mode ?? "off") !== "off"}
+                    <span class="small warn">Extension settings may contain private data. Synchrome excludes keys that look sensitive (token, password, secret…), but cannot recognise every secret. Values are read and written only while this browser is closed.</span>
+                  {/if}
+                </td></tr>
+              {/if}
             {/each}
           </tbody>
         </table>
@@ -826,4 +895,6 @@
   .cmp td:first-child { color: #6b7988; width: 70px; }
   .cmp tr.diff td:not(:first-child) { color: #e0a94a; }
   .info { color: #5aa6e0; }
+  .settings-row td { padding-left: 18px; font-size: 12px; }
+  .settings-row select { font-size: 12px; padding: 2px 6px; margin: 0 6px; }
 </style>

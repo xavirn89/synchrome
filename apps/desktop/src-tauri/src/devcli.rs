@@ -573,6 +573,55 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // Keys of one extension store area (browser must be closed): names + value digests only.
+        "--dev-read-ext-area" => {
+            let area = match arg(4).as_str() {
+                "sync" => synchrome_browser::Area::Sync,
+                _ => synchrome_browser::Area::Local,
+            };
+            match synchrome_browser::read_extension_area(
+                std::path::Path::new(&arg(1)),
+                &arg(2),
+                &arg(3),
+                area,
+            ) {
+                Ok(kv) => out(
+                    serde_json::json!({ "keys": kv.iter().map(|(k, v)| (k.clone(), synchrome_bridge::token_sha256(v)[..12].to_string())).collect::<std::collections::BTreeMap<_, _>>() }),
+                ),
+                Err(e) => fail(e),
+            }
+        }
+        // Extension settings: mode (off | local | local_sync), one cycle now, per-extension state.
+        "--dev-settings-mode" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail(
+                    "usage: --dev-settings-mode <mapping> <ext_id> <off|local|local_sync>",
+                );
+            };
+            let mode = synchrome_sync::extension_settings::Mode::parse(&arg(3));
+            match crate::ext_settings::set_settings_mode(&state, mid, &arg(2), mode).await {
+                Ok(()) => out(serde_json::json!({ "ok": true, "mode": mode.as_str() })),
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-settings-cycle" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-settings-cycle <mapping>");
+            };
+            match crate::ext_settings::settings_sync_now(&state, mid).await {
+                Ok(r) => out(serde_json::json!({ "report": r })),
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-settings-views" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-settings-views <mapping>");
+            };
+            match crate::ext_settings::settings_for_mapping(&state, mid) {
+                Ok(v) => out(serde_json::json!({ "settings": v })),
+                Err(e) => fail(e),
+            }
+        }
         // Held remote ops of one conflict, in merge order: device, seq, HLC.
         "--dev-conflict-held" => match bookmarks::open_db()
             .and_then(|d| d.conflict_held(&arg(1)).map_err(|e| e.to_string()))
@@ -691,6 +740,22 @@ async fn run_async(args: &[String]) -> i32 {
                 .filter(|o| o.op == synchrome_sync::OpKind::Delete)
                 .count());
             // extensions ops: ids, kinds, field names and the enabled flag (no names)
+            v["settings_ops"] = serde_json::json!(ops
+                .iter()
+                .filter(|o| o.col == synchrome_sync::extension_settings::COLLECTION)
+                .map(|o| {
+                    let f = o.fields.as_ref();
+                    let value = f.and_then(|f| f.get("value"));
+                    serde_json::json!({
+                        "seq": o.seq, "by": o.by, "id": o.id, "hlc": o.hlc,
+                        "op": if o.op == synchrome_sync::OpKind::Delete { "delete" } else { "set" },
+                        "fields": f.map(|f| f.keys().cloned().collect::<Vec<_>>()),
+                        "ver": f.and_then(|f| f.get("ver").cloned()),
+                        // a digest only: values never leave the harness output
+                        "value_sha": value.map(|v| synchrome_bridge::token_sha256(&synchrome_sync::extension_settings::canonical(v))[..16].to_string()),
+                    })
+                })
+                .collect::<Vec<_>>());
             v["ext_ops"] = serde_json::json!(ops
                 .iter()
                 .filter(|o| o.col == synchrome_sync::extensions::COLLECTION)

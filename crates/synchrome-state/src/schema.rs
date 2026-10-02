@@ -192,6 +192,45 @@ CREATE UNIQUE INDEX conflicts_one_open ON conflicts (profile_id, col, sid)
     WHERE status IN ('unresolved', 'resolving');
 ";
 
+/// v5 (M1 slice 11, extension settings): per-key settings of other extensions
+/// (`chrome.storage.local` / `.sync`), shared LWW state next to this device's own store view,
+/// the per-extension choice (off / local / local+sync) and the locally observed version.
+const V5: &str = "
+ALTER TABLE ext_entities ADD COLUMN local_version TEXT;  -- version installed on THIS device
+CREATE TABLE IF NOT EXISTS ext_settings_entities (
+    profile_id TEXT NOT NULL,
+    ext_id TEXT NOT NULL,
+    area TEXT NOT NULL,                      -- local | sync
+    key TEXT NOT NULL,
+    -- shared (published) state
+    value TEXT,                              -- canonical JSON (NULL when deleted)
+    deleted INTEGER NOT NULL DEFAULT 0,
+    writer_version TEXT,                     -- extension version of the device that wrote the value
+    field_hlc TEXT NOT NULL DEFAULT '{}',
+    deleted_hlc TEXT,
+    hlc TEXT NOT NULL DEFAULT '',
+    local_seq INTEGER NOT NULL DEFAULT 0,
+    base TEXT,
+    -- this device
+    local_value TEXT,                        -- the store's value at the last capture/apply (NULL = absent)
+    pending_apply INTEGER NOT NULL DEFAULT 0,-- remote value to write into the store
+    conflict INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (profile_id, ext_id, area, key)
+);
+CREATE TABLE IF NOT EXISTS ext_settings_config (
+    profile_id TEXT NOT NULL,
+    ext_id TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'off',        -- off | local | local_sync (per device, opt-in)
+    exclude TEXT NOT NULL DEFAULT '[]',      -- extra denylist (exact keys or prefix*)
+    status TEXT,                             -- last cycle: waiting | synced | syncing | version_mismatch | error
+    error TEXT,
+    excluded TEXT NOT NULL DEFAULT '{}',     -- per area: {\"local\": [sensitive, other], \"sync\": [...]}
+    last_capture_at INTEGER,
+    last_apply_at INTEGER,
+    PRIMARY KEY (profile_id, ext_id)
+);
+";
+
 pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if v < 1 {
@@ -223,6 +262,10 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     if v < 4 {
         conn.execute_batch(&format!("BEGIN; {V4} COMMIT;"))?;
         conn.pragma_update(None, "user_version", 4)?;
+    }
+    if v < 5 {
+        conn.execute_batch(&format!("BEGIN; {V5} COMMIT;"))?;
+        conn.pragma_update(None, "user_version", 5)?;
     }
     Ok(())
 }

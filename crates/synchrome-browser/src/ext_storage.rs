@@ -18,10 +18,41 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub const LOCAL_EXTENSION_SETTINGS: &str = "Local Extension Settings";
+pub const SYNC_EXTENSION_SETTINGS: &str = "Sync Extension Settings";
+
+/// Which `chrome.storage` area (both are LevelDB stores of the same format; `session` is
+/// memory-only and out of scope).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Area {
+    Local,
+    Sync,
+}
+
+impl Area {
+    pub fn dir(self) -> &'static str {
+        match self {
+            Area::Local => LOCAL_EXTENSION_SETTINGS,
+            Area::Sync => SYNC_EXTENSION_SETTINGS,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Area::Local => "local",
+            Area::Sync => "sync",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Area> {
+        match s {
+            "local" => Some(Area::Local),
+            "sync" => Some(Area::Sync),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ExtStorageError {
-    #[error("the browser is running for this user-data directory; close it before writing")]
+    #[error("the browser is running for this user-data directory; close it first")]
     BrowserRunning,
     #[error("the extension store is locked (LevelDB LOCK held); close the browser and retry")]
     Locked,
@@ -63,9 +94,19 @@ fn ldb(e: impl std::fmt::Display) -> ExtStorageError {
 
 /// `<udd>/<profile>/Local Extension Settings/<ext_id>`
 pub fn extension_store_path(user_data_dir: &Path, profile_dir: &str, ext_id: &str) -> PathBuf {
+    area_store_path(user_data_dir, profile_dir, ext_id, Area::Local)
+}
+
+/// `<udd>/<profile>/{Local,Sync} Extension Settings/<ext_id>`
+pub fn area_store_path(
+    user_data_dir: &Path,
+    profile_dir: &str,
+    ext_id: &str,
+    area: Area,
+) -> PathBuf {
     user_data_dir
         .join(profile_dir)
-        .join(LOCAL_EXTENSION_SETTINGS)
+        .join(area.dir())
         .join(ext_id)
 }
 
@@ -304,6 +345,172 @@ pub fn write_extension_setting(
     })
 }
 
+/// Read every key of one area store of an extension (from a temporary copy; the live store is
+/// never opened). Refuses while the browser runs: a copy of a store in use can miss its
+/// newest records, and a missing key would look like a delete.
+pub fn read_extension_area(
+    user_data_dir: &Path,
+    profile_dir: &str,
+    ext_id: &str,
+    area: Area,
+) -> Result<BTreeMap<String, String>, ExtStorageError> {
+    validate(profile_dir, ext_id, "x")?;
+    if is_browser_running(user_data_dir) {
+        return Err(ExtStorageError::BrowserRunning);
+    }
+    let store = area_store_path(user_data_dir, profile_dir, ext_id, area);
+    if store.exists() && is_store_locked(&store) {
+        return Err(ExtStorageError::Locked);
+    }
+    read_store_copy(&store)
+}
+
+/// What a batch write did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchReport {
+    pub store_path: PathBuf,
+    pub backup_path: Option<PathBuf>,
+    pub written: usize,
+    pub deleted: usize,
+    /// Keys present before and not part of the batch (left exactly as they were).
+    pub preserved_keys: usize,
+}
+
+/// Apply `puts` (key, JSON text) and `deletes` to one area store of one extension, safely:
+/// browser closed, store LOCK free, backup outside the profile, staging copy, verification
+/// (every written key reads back, every deleted key is gone, every other key is unchanged),
+/// atomic swap; on any failure nothing changes. Only the given extension's store is touched.
+pub fn apply_extension_area(
+    user_data_dir: &Path,
+    profile_dir: &str,
+    ext_id: &str,
+    area: Area,
+    puts: &[(String, String)],
+    deletes: &[String],
+    backup_root: &Path,
+) -> Result<BatchReport, ExtStorageError> {
+    validate(profile_dir, ext_id, "x")?;
+    for (k, v) in puts {
+        if k.is_empty() {
+            return Err(ExtStorageError::Invalid("empty key".into()));
+        }
+        serde_json::from_str::<serde_json::Value>(v)
+            .map_err(|e| ExtStorageError::Invalid(format!("value of {k:?} is not JSON: {e}")))?;
+    }
+    if is_browser_running(user_data_dir) {
+        return Err(ExtStorageError::BrowserRunning);
+    }
+    let store = area_store_path(user_data_dir, profile_dir, ext_id, area);
+    let existed = store.exists();
+    if existed && is_store_locked(&store) {
+        return Err(ExtStorageError::Locked);
+    }
+    let backup_path = if existed {
+        let b = backup_root.join(format!(
+            "{}-{}-{}-{}",
+            unique_suffix(),
+            profile_dir.replace(' ', "_"),
+            area.as_str(),
+            ext_id
+        ));
+        copy_dir(&store, &b)?;
+        Some(b)
+    } else {
+        None
+    };
+    let parent = store
+        .parent()
+        .ok_or_else(|| ExtStorageError::Invalid("store has no parent".into()))?
+        .to_path_buf();
+    std::fs::create_dir_all(&parent).map_err(|e| io(&parent, e))?;
+    let suffix = unique_suffix();
+    let staging = parent.join(format!("{ext_id}.synchrome-staging-{suffix}"));
+    let _ = std::fs::remove_dir_all(&staging);
+    if existed {
+        copy_dir(&store, &staging)?;
+    } else {
+        std::fs::create_dir_all(&staging).map_err(|e| io(&staging, e))?;
+    }
+    let result = (|| {
+        let before = if existed {
+            read_all(&staging)?
+        } else {
+            BTreeMap::new()
+        };
+        {
+            let opt = Options {
+                create_if_missing: true,
+                ..Options::default()
+            };
+            let mut db = DB::open(&staging, opt).map_err(ldb)?;
+            for (k, v) in puts {
+                db.put(k.as_bytes(), v.as_bytes()).map_err(ldb)?;
+            }
+            for k in deletes {
+                db.delete(k.as_bytes()).map_err(ldb)?;
+            }
+            db.flush().map_err(ldb)?;
+        }
+        let after = read_all(&staging)?;
+        for (k, v) in puts {
+            if after.get(k) != Some(v) {
+                return Err(ExtStorageError::Verify(format!("{k:?} not read back")));
+            }
+        }
+        for k in deletes {
+            if after.contains_key(k) {
+                return Err(ExtStorageError::Verify(format!("{k:?} still present")));
+            }
+        }
+        let touched: std::collections::BTreeSet<&str> = puts
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .chain(deletes.iter().map(String::as_str))
+            .collect();
+        let mut preserved = 0;
+        for (k, v) in before.iter().filter(|(k, _)| !touched.contains(k.as_str())) {
+            if after.get(k) != Some(v) {
+                return Err(ExtStorageError::Verify(format!(
+                    "unrelated key {k:?} changed"
+                )));
+            }
+            preserved += 1;
+        }
+        if after.len() != preserved + puts.len() {
+            return Err(ExtStorageError::Verify(
+                "unexpected keys after write".into(),
+            ));
+        }
+        Ok(preserved)
+    })();
+    let preserved_keys = match result {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    if existed {
+        let old = parent.join(format!("{ext_id}.synchrome-old-{suffix}"));
+        std::fs::rename(&store, &old).map_err(|e| io(&store, e))?;
+        if let Err(e) = std::fs::rename(&staging, &store) {
+            let _ = std::fs::rename(&old, &store);
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(io(&store, e));
+        }
+        let _ = std::fs::remove_dir_all(&old);
+    } else {
+        std::fs::rename(&staging, &store).map_err(|e| io(&store, e))?;
+    }
+    Ok(BatchReport {
+        store_path: store,
+        backup_path,
+        written: puts.len(),
+        deleted: deletes.len(),
+        preserved_keys,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +683,132 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read_dir(udd.path()).unwrap().count(), 0);
+    }
+
+    fn seed_area(udd: &Path, profile: &str, ext: &str, area: Area, kv: &[(&str, &str)]) {
+        let store = area_store_path(udd, profile, ext, area);
+        std::fs::create_dir_all(&store).unwrap();
+        let opt = Options {
+            create_if_missing: true,
+            ..Options::default()
+        };
+        let mut db = DB::open(&store, opt).unwrap();
+        for (k, v) in kv {
+            db.put(k.as_bytes(), v.as_bytes()).unwrap();
+        }
+        db.flush().unwrap();
+    }
+
+    const OTHER: &str = "abcdefghijklmnopabcdefghijklmnop";
+
+    #[test]
+    fn batch_writes_one_area_of_one_extension_and_preserves_everything_else() {
+        let udd = tempfile::tempdir().unwrap();
+        let backups = tempfile::tempdir().unwrap();
+        seed_area(
+            udd.path(),
+            "Default",
+            EXT,
+            Area::Local,
+            &[("keep", "1"), ("gone", "2"), ("old", "\"a\"")],
+        );
+        seed_area(udd.path(), "Default", EXT, Area::Sync, &[("s", "true")]);
+        seed_area(udd.path(), "Default", OTHER, Area::Local, &[("x", "9")]);
+        let r = apply_extension_area(
+            udd.path(),
+            "Default",
+            EXT,
+            Area::Local,
+            &[
+                ("old".into(), "\"b\"".into()),
+                ("new".into(), "{\"n\":[1,2]}".into()),
+            ],
+            &["gone".into()],
+            backups.path(),
+        )
+        .unwrap();
+        assert_eq!((r.written, r.deleted, r.preserved_keys), (2, 1, 1));
+        let local = read_extension_area(udd.path(), "Default", EXT, Area::Local).unwrap();
+        assert_eq!(local.len(), 3);
+        assert_eq!(
+            (local["keep"].as_str(), local["old"].as_str()),
+            ("1", "\"b\"")
+        );
+        assert!(!local.contains_key("gone"));
+        assert_eq!(
+            read_extension_area(udd.path(), "Default", EXT, Area::Sync).unwrap()["s"],
+            "true"
+        );
+        assert_eq!(
+            read_extension_area(udd.path(), "Default", OTHER, Area::Local).unwrap()["x"],
+            "9"
+        );
+        let b = read_all(r.backup_path.as_ref().unwrap()).unwrap();
+        assert_eq!(b.len(), 3, "backup = the store as it was");
+    }
+
+    #[test]
+    fn batch_refuses_open_browser_or_held_lock_and_bad_values_without_changes() {
+        use std::os::unix::io::AsRawFd;
+        let udd = tempfile::tempdir().unwrap();
+        let backups = tempfile::tempdir().unwrap();
+        seed_area(udd.path(), "Default", EXT, Area::Local, &[("k", "1")]);
+        let bad = apply_extension_area(
+            udd.path(),
+            "Default",
+            EXT,
+            Area::Local,
+            &[("k".into(), "not json".into())],
+            &[],
+            backups.path(),
+        );
+        assert!(matches!(bad, Err(ExtStorageError::Invalid(_))));
+        let store = area_store_path(udd.path(), "Default", EXT, Area::Local);
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.join("LOCK"))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let locked = apply_extension_area(
+            udd.path(),
+            "Default",
+            EXT,
+            Area::Local,
+            &[("k".into(), "2".into())],
+            &[],
+            backups.path(),
+        );
+        assert!(matches!(locked, Err(ExtStorageError::Locked)));
+        assert!(matches!(
+            read_extension_area(udd.path(), "Default", EXT, Area::Local),
+            Err(ExtStorageError::Locked)
+        ));
+        drop(f);
+        std::os::unix::fs::symlink("host-1234", udd.path().join("SingletonLock")).unwrap();
+        let running = apply_extension_area(
+            udd.path(),
+            "Default",
+            EXT,
+            Area::Local,
+            &[("k".into(), "2".into())],
+            &[],
+            backups.path(),
+        );
+        assert!(matches!(running, Err(ExtStorageError::BrowserRunning)));
+        std::fs::remove_file(udd.path().join("SingletonLock")).unwrap();
+        assert_eq!(
+            read_extension_area(udd.path(), "Default", EXT, Area::Local).unwrap()["k"],
+            "1",
+            "unchanged"
+        );
+        assert_eq!(
+            std::fs::read_dir(backups.path()).unwrap().count(),
+            0,
+            "nothing even backed up"
+        );
     }
 }

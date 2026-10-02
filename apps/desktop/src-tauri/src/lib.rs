@@ -11,6 +11,7 @@
 mod bookmarks;
 #[cfg(debug_assertions)]
 mod devcli;
+mod ext_settings;
 mod host;
 mod local_token;
 
@@ -538,6 +539,35 @@ async fn extension_action(
     bookmarks::extension_action(&state, mapping_id, &ext_id, action).await
 }
 
+/// Settings sync state of the extensions of a mapping of THIS device (counts only).
+#[tauri::command]
+fn list_extension_settings(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+) -> Result<Vec<synchrome_state::SettingsView>, String> {
+    ext_settings::settings_for_mapping(&state, mapping_id)
+}
+
+/// Off / Local only / Local + Sync for one extension's settings, on THIS device (opt-in).
+#[tauri::command]
+async fn set_extension_settings_mode(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+    ext_id: String,
+    mode: synchrome_sync::extension_settings::Mode,
+) -> Result<(), String> {
+    ext_settings::set_settings_mode(&state, mapping_id, &ext_id, mode).await
+}
+
+/// Run the extension settings cycle now (reads/writes only if the browser is closed).
+#[tauri::command]
+async fn extension_settings_sync_now(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+) -> Result<ext_settings::CycleReport, String> {
+    ext_settings::settings_sync_now(&state, mapping_id).await
+}
+
 /// Retry writing the mapping token into the local extension store (browser must be closed).
 #[tauri::command]
 async fn write_mapping_token_local(
@@ -710,6 +740,9 @@ pub fn run() {
             resolve_conflicts,
             list_extensions,
             extension_action,
+            list_extension_settings,
+            set_extension_settings_mode,
+            extension_settings_sync_now,
             dev_ui_report
         ])
         .run(tauri::generate_context!())

@@ -84,6 +84,8 @@ pub enum Group {
     Existence,
     /// Extensions: the enabled flag.
     Enabled,
+    /// Extension settings: the key's value.
+    Value,
 }
 
 macro_rules! str_enum {
@@ -133,6 +135,9 @@ pub struct Version {
     /// Extensions only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Extension settings only: canonical JSON of the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,6 +169,7 @@ impl Version {
             Group::Location => eq(&self.parent, &other.parent) && eq(&self.pos, &other.pos),
             Group::Existence => self.exists == other.exists,
             Group::Enabled => other.enabled.is_none() || self.enabled == other.enabled,
+            Group::Value => self.value == other.value,
         }
     }
 }
@@ -460,6 +466,7 @@ fn base_version(e: &Ent, local: &Version, published: i64) -> Option<Version> {
             Group::Location => rec.f.contains_key("parentId") || rec.f.contains_key("pos"),
             Group::Existence => rec.f.contains_key("deleted"),
             Group::Enabled => rec.f.contains_key("enabled"),
+            Group::Value => rec.f.contains_key("value"),
         };
         if !known {
             b.changed.remove(g);
@@ -532,6 +539,7 @@ fn group_hlc(v: &Version, g: Group) -> Option<&str> {
         Group::Location => &["parentId", "pos"],
         Group::Existence => &["deleted"],
         Group::Enabled => &["enabled"],
+        Group::Value => &["value"],
     };
     f.iter()
         .filter_map(|k| v.hlc.get(*k))
@@ -597,6 +605,9 @@ pub(crate) fn options(c: &Row) -> Vec<Resolution> {
     use Resolution::*;
     if c.col == synchrome_sync::extensions::COLLECTION {
         return crate::ext::options(c);
+    }
+    if c.col == synchrome_sync::extension_settings::COLLECTION {
+        return crate::ext_settings::options(c);
     }
     match (c.kind, c.subtype) {
         (ConflictKind::LocalPending, ConflictSubtype::EditEdit) => {
@@ -1425,6 +1436,9 @@ impl StateDb {
         if c.col == synchrome_sync::extensions::COLLECTION {
             return crate::ext::resolve(tx, &c, res, &prof.device_id, published, now_ms);
         }
+        if c.col == synchrome_sync::extension_settings::COLLECTION {
+            return crate::ext_settings::resolve(tx, &c, res, &prof.device_id, published, now_ms);
+        }
         let c = if c.kind != ConflictKind::Orphan {
             if !recompute(&tx, &c, published, now)? {
                 tx.commit()?;
@@ -1517,7 +1531,7 @@ impl StateDb {
                                 e.pos = pos.clone();
                             }
                         }
-                        Group::Existence | Group::Enabled => {}
+                        Group::Existence | Group::Enabled | Group::Value => {}
                     };
                     for g in &r.changed {
                         take(*g, &mut e, r);
@@ -1823,6 +1837,8 @@ pub struct SideView {
     pub exists: bool,
     /// Extensions only.
     pub enabled: Option<bool>,
+    /// Extension settings only (canonical JSON).
+    pub value: Option<String>,
     pub title: Option<String>,
     pub url: Option<String>,
     pub folder: Option<Vec<String>>,
@@ -1923,6 +1939,9 @@ fn side(state: &BookmarkState, sid: &str, v: &Version, full: bool) -> SideView {
     if show(Group::Enabled) || full {
         s.enabled = v.enabled;
     }
+    if show(Group::Value) || full {
+        s.value = v.value.clone();
+    }
     if show(Group::Url) {
         s.url = v.url.clone();
     }
@@ -1987,6 +2006,8 @@ impl StateDb {
             let e = state.entities.get(&c.sid);
             let item_kind = if c.col == synchrome_sync::extensions::COLLECTION {
                 "extension"
+            } else if c.col == synchrome_sync::extension_settings::COLLECTION {
+                "setting"
             } else {
                 e.map(|e| e.kind.as_str()).unwrap_or("url")
             }
@@ -2148,7 +2169,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 4);
+        assert_eq!(n, 5);
     }
 
     #[test]
