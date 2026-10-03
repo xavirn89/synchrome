@@ -165,6 +165,13 @@
     } catch (e) { actionError = String(e); }
     finally { busyKey = null; }
   }
+  // Realtime + compaction diagnostics (slice 13), per mapping of this device
+  let diag = $state({});
+  async function loadDiag(m) {
+    try { diag = { ...diag, [m.id]: await invoke("sync_diagnostics", { mappingId: m.id }) }; }
+    catch (e) { /* no local state for this mapping yet */ }
+  }
+  const ago = (t) => { if (!t) return "never"; const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
   let extOpen = $state({});
   let extList = $state({});
   let extConfirm = $state(null);
@@ -326,7 +333,7 @@
       for (const m of mappings) {
         if (conflictsOpen[m.id]) await loadConflicts(m);
         if (extOpen[m.id]) { await loadExtensions(m); await loadSettings(m); }
-        if (m.display_status === "extension_confirmed") await loadPrefs(m);
+        if (m.display_status === "extension_confirmed") { await loadPrefs(m); await loadDiag(m); }
       }
     } catch (e) {
       cloudDataError = String(e);
@@ -628,6 +635,16 @@
         <p class="hint tiny">Installing opens the official store page; removing asks for confirmation. Nothing is installed or uninstalled automatically.</p>
       </div>
     {/if}
+  {/if}
+  {#if m.display_status === "extension_confirmed" && diag[m.id]}
+    {@const dg = diag[m.id]}
+    <div class="bookmarks-row sync-health">
+      <span class="small">Sync health</span>
+      <span class="badge small {dg.realtime.connected ? 'ok' : 'muted'}">{dg.realtime.connected ? "Realtime connected" : dg.realtime.enabled ? "Realtime disconnected" : "Realtime off"}</span>
+      <span class="pdir">snapshot {dg.cloud?.current_generation ? `generation ${dg.cloud.current_generation}` : "none yet"} · {dg.snapshot_generations_kept} kept · last compacted {ago(dg.local.last_compaction_at)}{dg.local.last_gc_at ? ` · journals cleaned ${ago(dg.local.last_gc_at)}` : ""}</span>
+      {#if dg.gc_blocked}<span class="small warn">Journal cleanup paused: {dg.cloud.gc_blockers} device{dg.cloud.gc_blockers === 1 ? "" : "s"} mapped to this profile cannot read snapshots yet (update Synchrome there, or remove the device).</span>{/if}
+      {#if dg.local.snapshot_generation}<span class="small">This device started from snapshot generation {dg.local.snapshot_generation}{dg.local.bootstrap_fallback ? " (previous generation, the current one failed verification)" : ""}.</span>{/if}
+    </div>
   {/if}
   {#if m.display_status === "extension_confirmed"}
     {@const pv = prefList[m.id]}

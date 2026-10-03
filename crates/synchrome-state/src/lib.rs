@@ -9,6 +9,7 @@
 mod apply;
 mod browser_prefs;
 mod capture;
+pub mod compaction;
 mod conflict;
 mod ext;
 mod ext_settings;
@@ -386,6 +387,7 @@ impl StateDb {
             "ext_settings_config",
             "browser_preferences_entities",
             "browser_preferences_config",
+            "compaction_state",
             "chromium_index",
             "ops",
             "chunks",

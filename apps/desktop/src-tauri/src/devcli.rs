@@ -1130,6 +1130,238 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // ---------------------------------------------------------------- slice 13
+        // Compact a mapping's profile now: `force` ignores the thresholds and the client-side
+        // 6 h rule (debug only); every database rule still applies.
+        "--dev-compact" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-compact <mapping> [force]");
+            };
+            let t = std::time::Instant::now();
+            match crate::compaction::compact_now(&state, mid, arg(2) == "force").await {
+                Ok(o) => {
+                    out(serde_json::json!({ "outcome": o, "ms": t.elapsed().as_millis() as u64 }))
+                }
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-gc" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-gc <mapping>");
+            };
+            match crate::compaction::gc_now(&state, mid).await {
+                Ok(r) => out(serde_json::json!({ "gc": r })),
+                Err(e) => fail(e),
+            }
+        }
+        "--dev-report-cursors" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-report-cursors <mapping>");
+            };
+            match crate::compaction::report_now(&state, mid).await {
+                Ok(sent) => out(serde_json::json!({ "sent": sent })),
+                Err(e) => fail(e),
+            }
+        }
+        // Diagnostics of a mapping's profile: database status, local bookkeeping, generations.
+        "--dev-compaction-status" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-compaction-status <mapping>");
+            };
+            let diag = match crate::compaction::diagnostics(&state, mid).await {
+                Ok(d) => d,
+                Err(e) => return fail(e),
+            };
+            let pid = match bookmarks::own_profile_pub(&state, mid) {
+                Ok((_, p)) => p,
+                Err(e) => return fail(e),
+            };
+            use synchrome_state::compaction::CompactionSink;
+            let rows = bookmarks::CloudSink::new(&state)
+                .list_snapshots(pid)
+                .await
+                .unwrap_or_default();
+            out(serde_json::json!({
+                "diagnostics": diag,
+                "generations": rows.iter().map(|r| serde_json::json!({
+                    "generation": r.generation, "state": r.state, "watermarks": r.watermarks,
+                    "bytes": r.bytes, "expired": r.expired,
+                })).collect::<Vec<_>>(),
+            }))
+        }
+        // Shared-state digest (published columns only) per collection: convergence checks.
+        "--dev-shared-digest" => {
+            let Ok(mid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-shared-digest <mapping>");
+            };
+            let pid = match bookmarks::own_profile_pub(&state, mid) {
+                Ok((_, p)) => p,
+                Err(e) => return fail(e),
+            };
+            match bookmarks::open_db()
+                .and_then(|d| d.shared_state_digest(pid).map_err(|e| e.to_string()))
+            {
+                Ok(d) => out(serde_json::json!({ "digest": d })),
+                Err(e) => fail(e),
+            }
+        }
+        // Cloud usage of a profile (journal vs snapshot objects, bytes, publication rows).
+        "--dev-cloud-usage" => {
+            let Ok(pid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-cloud-usage <profile>");
+            };
+            let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
+                return fail("not signed in");
+            };
+            let objs = cloud
+                .list_tree_sized(&session, &format!("profiles/{pid}"))
+                .await
+                .unwrap_or_default();
+            let events = cloud
+                .list_store_events(&session, pid)
+                .await
+                .map(|v| v.len())
+                .ok();
+            let (mut jo, mut jb, mut so, mut sb) = (0u64, 0u64, 0u64, 0u64);
+            for (p, b) in &objs {
+                if p.contains("/journal/") {
+                    jo += 1;
+                    jb += b;
+                } else if p.contains("/snapshots/") {
+                    so += 1;
+                    sb += b;
+                }
+            }
+            out(serde_json::json!({
+                "journal_objects": jo, "journal_bytes": jb, "snapshot_objects": so, "snapshot_bytes": sb,
+                "objects": objs.len(), "store_events": events,
+            }))
+        }
+        // sync_cursors rows of a profile (devices, protocol, retired, applied counts).
+        "--dev-cursor-rows" => {
+            let Ok(pid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-cursor-rows <profile>");
+            };
+            let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
+                return fail("not signed in");
+            };
+            match cloud.list_cursor_rows(&session, pid).await {
+                Ok(v) => out(
+                    serde_json::json!({ "rows": v.iter().map(|r| serde_json::json!({
+                    "device_id": r.device_id, "applied": r.applied, "published_through": r.published_through,
+                    "snapshot_generation": r.snapshot_generation, "snapshot_protocol": r.snapshot_protocol,
+                    "retired": r.retired_at.is_some(), "updated_at": r.updated_at,
+                })).collect::<Vec<_>>() }),
+                ),
+                Err(e) => fail(e),
+            }
+        }
+        // Explicit user action: remove a device from a profile's compaction (retired_at).
+        "--dev-retire-device" => {
+            let (Ok(pid), Ok(dev)) = (Uuid::parse_str(&arg(1)), Uuid::parse_str(&arg(2))) else {
+                return fail("usage: --dev-retire-device <profile> <device>");
+            };
+            let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
+                return fail("not signed in");
+            };
+            match cloud.retire_device(&session, pid, dev).await {
+                Ok(()) => out(serde_json::json!({ "retired": true })),
+                Err(e) => fail(e),
+            }
+        }
+        // A fixture "old client": a device of this account mapped to the profile that never
+        // reports snapshot support (blocks journal GC until retired / removed).
+        "--dev-fixture-old-device" => {
+            let Ok(pid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-fixture-old-device <profile>");
+            };
+            let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
+                return fail("not signed in");
+            };
+            let me = synchrome_device::DeviceIdentity {
+                device_id: Uuid::new_v4(),
+                device_name: "E2E old-client fixture".into(),
+                platform: "macos".into(),
+                os_version: None,
+                app_version: "0.0.0-old".into(),
+            };
+            if let Err(e) = cloud.upsert_device(&session, &me).await {
+                return fail(e);
+            }
+            match cloud
+                .map_local_profile(
+                    &session,
+                    pid,
+                    me.device_id,
+                    BrowserKind::Helium,
+                    "Fixture Old",
+                )
+                .await
+            {
+                Ok(m) => out(serde_json::json!({ "device_id": me.device_id, "mapping_id": m.id })),
+                Err(e) => fail(e),
+            }
+        }
+        // RLS probe (run as ANOTHER account): nothing of the target's compaction is visible or
+        // writable. Prints booleans/counts only.
+        "--dev-compaction-probe-foreign" => {
+            let (Ok(acct), Ok(pid), Ok(dev)) = (
+                Uuid::parse_str(&arg(1)),
+                Uuid::parse_str(&arg(2)),
+                Uuid::parse_str(&arg(3)),
+            ) else {
+                return fail("usage: --dev-compaction-probe-foreign <account> <profile> <device> <snapshot rel path>");
+            };
+            let (Ok(session), Ok(cloud), Ok(me)) =
+                (state.session().await, state.cloud(), state.device())
+            else {
+                return fail("not signed in");
+            };
+            let rel = arg(4);
+            let snaps = cloud
+                .list_snapshot_rows(&session, pid)
+                .await
+                .map(|v| v.len());
+            let status = cloud.compaction_status(&session, pid).await;
+            let cursors = cloud.list_cursor_rows(&session, pid).await.map(|v| v.len());
+            let gc = cloud.gc_journal_events(&session, pid, dev, 1).await;
+            let claim = cloud.claim_snapshot(&session, pid, 1, me.device_id).await;
+            let retire = cloud.retire_device(&session, pid, dev).await;
+            let read = cloud
+                .get_object_by_full_name(&session, &format!("{acct}/{rel}"))
+                .await;
+            let write = cloud
+                .put_object_by_full_name(
+                    &session,
+                    &format!("{acct}/profiles/{pid}/snapshots/0000000099/manifest.json"),
+                    b"{}".to_vec(),
+                )
+                .await;
+            out(serde_json::json!({
+                "as_user": session.user_id,
+                "snapshot_rows_visible": snaps.ok(),
+                "status_sees_generation": status.as_ref().ok().map(|s| s.current_generation.is_some()),
+                "status_blockers": status.as_ref().ok().map(|s| s.gc_blockers),
+                "cursor_rows_visible": cursors.ok(),
+                "gc_refused": gc.is_err(),
+                "claim_refused": claim.is_err(),
+                "retire_refused": retire.is_err(),
+                "snapshot_object_readable": read.map(|o| o.is_some()).unwrap_or(false),
+                "snapshot_write_refused": write.is_err(),
+            }))
+        }
+        "--dev-delete-device-id" => {
+            let Ok(dev) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-delete-device-id <device>");
+            };
+            let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
+                return fail("not signed in");
+            };
+            match cloud.delete_device(&session, dev).await {
+                Ok(()) => out(serde_json::json!({ "deleted": true })),
+                Err(e) => fail(e),
+            }
+        }
         "--dev-delete-profile" => {
             let Ok(id) = Uuid::parse_str(&arg(1)) else {
                 return fail("bad profile id");
@@ -1138,14 +1370,11 @@ async fn run_async(args: &[String]) -> i32 {
                 Ok(s) => s,
                 Err(e) => return fail(e),
             };
-            let purged = bookmarks::purge_profile(&state, &session, id).await;
-            match state.cloud() {
-                Ok(c) => match c.delete_profile(&session, id).await {
-                    Ok(()) => out(
-                        serde_json::json!({ "deleted_profile": true, "purged_objects": purged.ok() }),
-                    ),
-                    Err(e) => fail(e),
-                },
+            match bookmarks::delete_profile_everywhere(&state, &session, id).await {
+                Ok(r) if r.deleted => out(serde_json::json!({
+                    "deleted_profile": true, "purged_objects": r.objects_deleted, "leftovers": r.leftovers,
+                })),
+                Ok(r) => fail(r.error.unwrap_or_default()),
                 Err(e) => fail(e),
             }
         }
@@ -1164,14 +1393,15 @@ async fn run_async(args: &[String]) -> i32 {
             let all = cloud.list_mappings(&session).await.unwrap_or_default();
             let profile = all.iter().find(|m| m.id == id).map(|m| m.profile_id);
             let unmapped = cloud.unmap_local_profile(&session, id).await.is_ok();
-            let purged = match profile {
-                Some(p) => bookmarks::purge_profile(&state, &session, p).await.ok(),
+            let deletion = match profile {
+                Some(p) => bookmarks::delete_profile_everywhere(&state, &session, p)
+                    .await
+                    .ok(),
                 None => None,
             };
-            let deleted_profile = match profile {
-                Some(p) => cloud.delete_profile(&session, p).await.is_ok(),
-                None => false,
-            };
+            let purged = deletion.as_ref().map(|d| d.objects_deleted);
+            let deleted_profile = deletion.as_ref().is_some_and(|d| d.deleted);
+            let leftovers = deletion.as_ref().map(|d| d.leftovers);
             let _ = local_token::registry().remove_mapping(id);
             let remaining = cloud
                 .list_mappings(&session)
@@ -1185,6 +1415,7 @@ async fn run_async(args: &[String]) -> i32 {
             };
             out(serde_json::json!({
                 "unmapped": unmapped, "deleted_profile": deleted_profile, "purged_objects": purged,
+                "leftover_objects": leftovers,
                 "remaining_mappings": remaining, "device_deleted": device_deleted,
             }))
         }

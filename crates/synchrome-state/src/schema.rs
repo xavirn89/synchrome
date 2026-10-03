@@ -267,6 +267,28 @@ CREATE TABLE IF NOT EXISTS browser_preferences_config (
 );
 ";
 
+/// v7 (slice 13): local compaction / bootstrap bookkeeping (device-local, never published).
+const V7: &str = "
+CREATE TABLE IF NOT EXISTS compaction_state (
+    profile_id TEXT PRIMARY KEY,
+    snapshot_generation INTEGER,             -- generation this device's state was bootstrapped from
+    bootstrapped_at INTEGER,
+    bootstrap_ms INTEGER,
+    bootstrap_fallback INTEGER NOT NULL DEFAULT 0,  -- 1 = the previous generation was used
+    last_report TEXT,                        -- canonical JSON of the last sync_cursors report
+    last_compaction_at INTEGER,
+    last_compaction_generation INTEGER,
+    last_compaction_ms INTEGER,
+    last_compaction_error TEXT,
+    last_gc_at INTEGER,
+    last_gc_events INTEGER,
+    last_gc_objects INTEGER,
+    gc_blockers INTEGER,
+    cloud_generation INTEGER,                -- latest ready generation seen in the cloud
+    last_status_at INTEGER
+);
+";
+
 pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if v < 1 {
@@ -306,6 +328,10 @@ pub fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     if v < 6 {
         conn.execute_batch(&format!("BEGIN; {V6} COMMIT;"))?;
         conn.pragma_update(None, "user_version", 6)?;
+    }
+    if v < 7 {
+        conn.execute_batch(&format!("BEGIN; {V7} COMMIT;"))?;
+        conn.pragma_update(None, "user_version", 7)?;
     }
     Ok(())
 }

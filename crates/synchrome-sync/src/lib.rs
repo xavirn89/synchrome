@@ -12,6 +12,8 @@ pub mod extensions;
 pub mod fractional;
 pub mod hlc;
 pub mod op;
+pub mod snapshot;
+pub mod wake;
 
 pub use hlc::{Hlc, HlcClock, HlcError};
 pub use op::{Fields, Op, OpKind};

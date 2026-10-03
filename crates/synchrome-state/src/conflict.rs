@@ -2177,7 +2177,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 6);
+        assert_eq!(n, 7);
     }
 
     #[test]

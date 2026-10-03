@@ -10,11 +10,13 @@
 
 mod bookmarks;
 mod browser_prefs;
+mod compaction;
 #[cfg(debug_assertions)]
 mod devcli;
 mod ext_settings;
 mod host;
 mod local_token;
+mod realtime;
 
 use local_token::MappingView;
 use std::sync::Arc;
@@ -142,11 +144,21 @@ async fn sign_in(
     email: String,
     password: String,
 ) -> Result<AccountStatus, String> {
-    state
+    let st = state
         .auth()?
         .sign_in(email.trim(), &password)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // the Realtime supervisor follows the signed-in account
+    realtime::set_account(
+        state
+            .auth()?
+            .stored_session()
+            .ok()
+            .flatten()
+            .map(|s| s.user_id),
+    );
+    Ok(st)
 }
 
 #[tauri::command]
@@ -160,6 +172,7 @@ async fn refresh_session(state: State<'_, AppState>) -> Result<AccountStatus, St
 
 #[tauri::command]
 async fn sign_out(state: State<'_, AppState>) -> Result<AccountStatus, String> {
+    realtime::set_account(None);
     match state.auth()?.sign_out().await {
         Ok(()) => Ok(AccountStatus::signed_out()),
         Err(e) => Ok(AccountStatus::signed_out().with_error(format!("signed out locally; {e}"))),
@@ -301,13 +314,12 @@ async fn rename_profile(
 #[tauri::command]
 async fn delete_profile(state: State<'_, AppState>, profile_id: Uuid) -> Result<(), String> {
     let session = state.session().await?;
-    // Store objects first (the row's FKs do not reach Storage), then the row.
-    bookmarks::purge_profile(&state, &session, profile_id).await?;
-    state
-        .cloud()?
-        .delete_profile(&session, profile_id)
-        .await
-        .map_err(|e| e.to_string())
+    // objects the server allows → the row (cascades events/snapshots/cursors) → the rest
+    let r = bookmarks::delete_profile_everywhere(&state, &session, profile_id).await?;
+    match r.error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Summaries + local write state, for the UI. Never contains a token.
@@ -597,6 +609,15 @@ async fn browser_preferences_sync_now(
     browser_prefs::prefs_sync_now(&state, mapping_id).await
 }
 
+/// Realtime + compaction diagnostics of a mapping of THIS device (counts and generations).
+#[tauri::command]
+async fn sync_diagnostics(
+    state: State<'_, AppState>,
+    mapping_id: Uuid,
+) -> Result<compaction::Diagnostics, String> {
+    compaction::diagnostics(&state, mapping_id).await
+}
+
 /// Retry writing the mapping token into the local extension store (browser must be closed).
 #[tauri::command]
 async fn write_mapping_token_local(
@@ -727,6 +748,17 @@ pub fn run() {
         .setup(|_app| {
             #[cfg(debug_assertions)]
             start_dev_ui_driver(_app);
+            // Realtime wake-up: one connection for the account signed in at startup (if any)
+            realtime::start();
+            {
+                let s = AppState::new();
+                realtime::set_account(
+                    s.auth()
+                        .ok()
+                        .and_then(|a| a.stored_session().ok().flatten())
+                        .map(|x| x.user_id),
+                );
+            }
             // Background publisher: retries the bookmarks outbox (offline, app restarts,
             // a host killed mid-upload). The per-profile lease in state.sqlite keeps it from
             // racing a native host that is publishing at the same moment.
@@ -775,6 +807,7 @@ pub fn run() {
             list_browser_preferences,
             set_browser_preferences_mode,
             browser_preferences_sync_now,
+            sync_diagnostics,
             dev_ui_report
         ])
         .run(tauri::generate_context!())

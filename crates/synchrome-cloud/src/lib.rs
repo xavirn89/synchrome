@@ -7,12 +7,15 @@
 //!
 //! Scope so far: devices (upsert/touch/list), profiles (create/rename/delete/list) and local ↔
 //! cloud profile mappings (map/unmap/list/lookup/confirm), store objects in Storage (journal
-//! chunks) and `store_events`. No Realtime or CAS yet.
+//! chunks) and `store_events`, compaction metadata (migration 0005) and the Realtime wake-up
+//! protocol (Phoenix over WebSocket; the socket itself lives in the app).
 
 mod client;
+pub mod compaction;
 mod mapping;
 mod models;
 mod ops;
+pub mod realtime;
 mod storage;
 
 pub use client::{

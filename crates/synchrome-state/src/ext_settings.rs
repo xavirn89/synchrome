@@ -699,6 +699,11 @@ pub(crate) fn lww(tx: &Transaction<'_>, pid: &str, op: &Op) -> Result<(), StateE
             {
                 e.deleted = false;
             }
+            if e.deleted {
+                // a deleted entity carries no value, whatever the delivery order (the field
+                // HLC is still recorded, so an older set can never come back)
+                e.value = None;
+            }
             if !e.deleted && e.local_value != e.value {
                 e.pending_apply = true;
             }
@@ -706,7 +711,18 @@ pub(crate) fn lww(tx: &Transaction<'_>, pid: &str, op: &Op) -> Result<(), StateE
         }
         OpKind::Delete => {
             let newest = e.field_hlc.values().max().cloned().unwrap_or_default();
-            if e.deleted || newest.as_str() >= op.hlc.as_str() {
+            if e.deleted {
+                // keep the NEWEST tombstone: a set between two deletes must not depend on
+                // which delete arrived first (convergence)
+                if e.deleted_hlc
+                    .as_deref()
+                    .map_or(true, |d| d < op.hlc.as_str())
+                {
+                    e.deleted_hlc = Some(op.hlc.clone());
+                }
+                return save(tx, pid, &e);
+            }
+            if newest.as_str() >= op.hlc.as_str() {
                 return save(tx, pid, &e);
             }
             e.deleted = true;

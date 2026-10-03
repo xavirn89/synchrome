@@ -681,8 +681,18 @@ pub(crate) fn lww(tx: &Transaction<'_>, pid: &str, op: &Op) -> Result<(), StateE
         }
         OpKind::Delete => {
             let newest = e.field_hlc.values().max().cloned().unwrap_or_default();
-            if e.deleted || newest.as_str() >= op.hlc.as_str() {
-                return save(tx, pid, &e); // idempotent / a newer set wins
+            if e.deleted {
+                // keep the NEWEST tombstone (convergence with concurrent deletes)
+                if e.deleted_hlc
+                    .as_deref()
+                    .map_or(true, |d| d < op.hlc.as_str())
+                {
+                    e.deleted_hlc = Some(op.hlc.clone());
+                }
+                return save(tx, pid, &e);
+            }
+            if newest.as_str() >= op.hlc.as_str() {
+                return save(tx, pid, &e); // a newer set wins
             }
             // removed on another device: never uninstalled automatically here
             e.deleted = true;

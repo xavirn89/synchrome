@@ -2,8 +2,9 @@
 //! chrome.bookmarks semantics (create appends, non-recursive folder removal…) and simulated
 //! devices that capture, sync, plan, apply and reconcile like the host + extension do.
 #![allow(dead_code)]
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
+use synchrome_state::compaction::*;
 use synchrome_state::*;
 use synchrome_sync::bookmarks::ChromiumNode;
 use uuid::Uuid;
@@ -14,13 +15,48 @@ pub struct Cloud {
     pub objects: HashMap<(String, String), Vec<u8>>,
     pub events: Vec<(String, PublishedEvent)>,
     pub hidden: HashSet<u64>, // seq_to of events hidden from listings (simulates a gap)
+    // ---- migration 0005 contract (compaction)
+    pub now_ms: u64, // the DATABASE clock
+    pub snaps: Vec<FSnap>,
+    pub cursors: HashMap<(String, Uuid, String), FCur>,
+    pub mapped: HashSet<(String, Uuid, String)>,
 }
+
+#[derive(Clone, Debug)]
+pub struct FSnap {
+    pub account: String,
+    pub profile: Uuid,
+    pub generation: u64,
+    pub state: String,
+    pub created_by: String,
+    pub manifest_path: Option<String>,
+    pub sha: Option<String>,
+    pub watermarks: BTreeMap<String, u64>,
+    pub bytes: u64,
+    pub claimed: u64,
+    pub expires: u64,
+    pub ready_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FCur {
+    pub applied: BTreeMap<String, u64>,
+    pub published: u64,
+    pub protocol: i32,
+    pub retired: bool,
+    pub updated: u64,
+}
+
+pub const MIN: u64 = 60_000;
+pub const DAY: u64 = 24 * 60 * MIN;
 
 pub struct Sink<'a> {
     pub cloud: &'a Mutex<Cloud>,
     pub account: String,
     pub offline: bool,
     pub mappings: HashSet<Uuid>,
+    /// Never bootstrap from a snapshot unless history is gone (measures full replay).
+    pub full_replay: bool,
 }
 
 impl JournalSink for Sink<'_> {
@@ -76,6 +112,18 @@ impl JournalSink for Sink<'_> {
                 seq_to: e.seq_to,
             })
             .collect())
+    }
+    async fn ready_snapshots(&self, p: Uuid) -> Result<Vec<SnapshotRow>, SinkError> {
+        let a = self.account_id().await?;
+        let c = self.cloud.lock().unwrap();
+        Ok(c.ready(&a, p)
+            .iter()
+            .take(2)
+            .map(|s| Cloud::row(s, c.now_ms))
+            .collect())
+    }
+    fn prefer_snapshot_bootstrap(&self) -> bool {
+        !self.full_replay
     }
     async fn get_chunk(&self, path: &str) -> Result<Option<Vec<u8>>, SinkError> {
         let a = self.account_id().await?;
@@ -335,13 +383,20 @@ impl World {
     pub fn device(&mut self) -> Dev {
         let m = Uuid::new_v4();
         self.mappings.insert(m);
+        let id = Uuid::new_v4();
+        // mapped to the profile in the cloud (profile_mappings): a GC blocker until it reports
+        self.cloud.lock().unwrap().mapped.insert((
+            self.account.clone(),
+            self.profile,
+            id.to_string(),
+        ));
         Dev {
             db: StateDb::open_in_memory().unwrap(),
             br: Browser::new(),
             src: Source {
                 mapping_id: m,
                 account_id: self.account.clone(),
-                device_id: Uuid::new_v4(),
+                device_id: id,
                 profile_id: self.profile,
                 identity: format!("helium|/tmp/{m}|Default"),
             },
@@ -353,6 +408,7 @@ impl World {
             account: self.account.clone(),
             offline: false,
             mappings: self.mappings.clone(),
+            full_replay: false,
         }
     }
     pub fn tick(&self) -> u64 {
@@ -442,4 +498,385 @@ pub fn plan_kinds(plan: &ApplyPlan) -> Vec<&'static str> {
             ApplyAction::Delete { .. } => "delete",
         })
         .collect()
+}
+
+// ------------------------------------------------------------------ fake 0005 contract
+impl Cloud {
+    fn ready(&self, a: &str, p: Uuid) -> Vec<FSnap> {
+        let mut v: Vec<FSnap> = self
+            .snaps
+            .iter()
+            .filter(|s| s.account == a && s.profile == p && s.state == "ready")
+            .cloned()
+            .collect();
+        v.sort_by_key(|s| std::cmp::Reverse(s.generation));
+        v
+    }
+    pub fn status(&self, a: &str, p: Uuid) -> CompactionStatus {
+        let ready = self.ready(a, p);
+        let blockers = self
+            .mapped
+            .iter()
+            .filter(|(x, q, _d)| x == a && *q == p)
+            .filter(|(x, q, d)| {
+                !self
+                    .cursors
+                    .get(&(x.clone(), *q, d.clone()))
+                    .is_some_and(|c| c.retired || c.protocol >= 1)
+            })
+            .count() as u32;
+        let cur = ready.first();
+        let prev = ready.get(1);
+        let mine: Vec<&FSnap> = self
+            .snaps
+            .iter()
+            .filter(|s| s.account == a && s.profile == p)
+            .collect();
+        let live = mine
+            .iter()
+            .any(|s| s.state == "building" && s.expires > self.now_ms);
+        let last = mine.iter().map(|s| s.claimed).max();
+        CompactionStatus {
+            current_generation: cur.map(|c| c.generation),
+            previous_generation: prev.map(|c| c.generation),
+            journal_gc_watermarks: prev.map(|c| c.watermarks.clone()),
+            gc_blockers: blockers,
+            journal_gc_ok: prev.is_some()
+                && cur.is_some_and(|c| self.now_ms >= c.ready_at.unwrap() + 10 * MIN)
+                && blockers == 0,
+            generation_cleanup_ok: cur.is_some_and(|c| self.now_ms >= c.ready_at.unwrap() + DAY),
+            claim_allowed: !live && last.map_or(true, |l| self.now_ms >= l + 6 * 60 * MIN),
+        }
+    }
+    fn gc_allowed(&self, a: &str, p: Uuid, d: &str, seq: u64) -> bool {
+        let st = self.status(a, p);
+        st.journal_gc_ok
+            && st
+                .journal_gc_watermarks
+                .and_then(|w| w.get(d).copied())
+                .is_some_and(|w| w >= seq)
+    }
+    fn row(s: &FSnap, now: u64) -> SnapshotRow {
+        SnapshotRow {
+            generation: s.generation,
+            state: s.state.clone(),
+            created_by: s.created_by.clone(),
+            manifest_path: s.manifest_path.clone(),
+            manifest_sha256: s.sha.clone(),
+            watermarks: s.watermarks.clone(),
+            bytes: s.bytes,
+            claimed_at: Some(s.claimed.to_string()),
+            expires_at: Some(s.expires.to_string()),
+            ready_at: s.ready_at.map(|r| r.to_string()),
+            expired: s.state == "building" && s.expires <= now,
+        }
+    }
+}
+
+fn path_parts(path: &str) -> Vec<&str> {
+    path.split('/').collect()
+}
+
+impl CompactionSink for Sink<'_> {
+    async fn compaction_status(&self, p: Uuid) -> Result<CompactionStatus, SinkError> {
+        let a = self.account_id().await?;
+        Ok(self.cloud.lock().unwrap().status(&a, p))
+    }
+    async fn list_snapshots(&self, p: Uuid) -> Result<Vec<SnapshotRow>, SinkError> {
+        let a = self.account_id().await?;
+        let c = self.cloud.lock().unwrap();
+        Ok(c.snaps
+            .iter()
+            .filter(|s| s.account == a && s.profile == p)
+            .map(|s| Cloud::row(s, c.now_ms))
+            .collect())
+    }
+    async fn list_cursors(&self, p: Uuid) -> Result<Vec<CursorRow>, SinkError> {
+        let a = self.account_id().await?;
+        let c = self.cloud.lock().unwrap();
+        Ok(c.cursors
+            .iter()
+            .filter(|((x, q, _), _)| x == &a && *q == p)
+            .map(|((_, _, d), r)| CursorRow {
+                device_id: d.clone(),
+                applied: r.applied.clone(),
+                snapshot_protocol: r.protocol,
+                retired: r.retired,
+                active: c.now_ms.saturating_sub(r.updated) <= 30 * DAY,
+            })
+            .collect())
+    }
+    async fn report_cursors(&self, p: Uuid, rep: &CursorReport) -> Result<(), SinkError> {
+        let a = self.account_id().await?;
+        let mut c = self.cloud.lock().unwrap();
+        let now = c.now_ms;
+        // the reporting device is the one whose own journal is `published_through`; tests
+        // report through `report_as`
+        let dev = REPORTER.with(|r| r.borrow().clone());
+        let e = c.cursors.entry((a, p, dev)).or_default();
+        if e.applied != rep.applied
+            || e.published != rep.published_through
+            || e.protocol != rep.snapshot_protocol
+        {
+            e.updated = now;
+        }
+        e.applied = rep.applied.clone();
+        e.published = rep.published_through;
+        e.protocol = rep.snapshot_protocol;
+        e.retired = false;
+        Ok(())
+    }
+    async fn claim_snapshot(&self, p: Uuid, generation: u64) -> Result<(), SinkError> {
+        let a = self.account_id().await?;
+        let mut c = self.cloud.lock().unwrap();
+        let latest = c
+            .snaps
+            .iter()
+            .filter(|s| s.account == a && s.profile == p)
+            .map(|s| s.generation)
+            .max()
+            .unwrap_or(0);
+        if generation != latest + 1 {
+            return Err(SinkError::Rejected("generation".into()));
+        }
+        let now = c.now_ms;
+        c.snaps.push(FSnap {
+            account: a,
+            profile: p,
+            generation,
+            state: "building".into(),
+            created_by: String::new(),
+            manifest_path: None,
+            sha: None,
+            watermarks: BTreeMap::new(),
+            bytes: 0,
+            claimed: now,
+            expires: now + 30 * MIN,
+            ready_at: None,
+        });
+        Ok(())
+    }
+    async fn put_snapshot_object(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        _ct: &str,
+    ) -> Result<(), SinkError> {
+        let a = self.account_id().await?;
+        let mut c = self.cloud.lock().unwrap();
+        let parts = path_parts(path);
+        let ok = parts.len() == 5
+            && parts[2] == "snapshots"
+            && c.snaps.iter().any(|s| {
+                s.account == a
+                    && s.profile.to_string() == parts[1]
+                    && format!("{:010}", s.generation) == parts[3]
+                    && s.state == "building"
+                    && s.expires > c.now_ms
+            });
+        if !ok {
+            return Err(SinkError::Forbidden(
+                "snapshot object outside a building claim".into(),
+            ));
+        }
+        c.objects.insert((a, path.into()), bytes.to_vec());
+        Ok(())
+    }
+    async fn mark_ready(
+        &self,
+        p: Uuid,
+        generation: u64,
+        info: &ReadyInfo,
+    ) -> Result<(), SinkError> {
+        let (manifest_path, sha, wm, bytes) = (
+            &info.manifest_path,
+            &info.manifest_sha256,
+            &info.watermarks,
+            info.bytes,
+        );
+        let a = self.account_id().await?;
+        let mut c = self.cloud.lock().unwrap();
+        let now = c.now_ms;
+        let Some(i) = c
+            .snaps
+            .iter()
+            .position(|s| s.account == a && s.profile == p && s.generation == generation)
+        else {
+            return Err(SinkError::Rejected("no claim".into()));
+        };
+        if c.snaps[i].state != "building" || c.snaps[i].expires <= now {
+            return Err(SinkError::Rejected("claim expired or not building".into()));
+        }
+        let prev = c
+            .snaps
+            .iter()
+            .filter(|s| {
+                s.account == a && s.profile == p && s.state == "ready" && s.generation < generation
+            })
+            .max_by_key(|s| s.generation)
+            .map(|s| s.watermarks.clone())
+            .unwrap_or_default();
+        for (d, w) in &prev {
+            if wm.get(d).map_or(true, |x| x < w) {
+                return Err(SinkError::Rejected("watermark lowered".into()));
+            }
+        }
+        for (d, w) in wm {
+            let lo = prev.get(d).copied().unwrap_or(0);
+            if *w <= lo {
+                continue;
+            }
+            let mut evs: Vec<&PublishedEvent> = c
+                .events
+                .iter()
+                .filter(|(x, e)| x == &a && e.profile_id == p && e.device_id.to_string() == *d)
+                .map(|(_, e)| e)
+                .collect();
+            evs.sort_by_key(|e| e.seq_to);
+            let straddle = evs.iter().any(|e| {
+                (e.seq_from <= lo && e.seq_to > lo) || (e.seq_from <= *w && e.seq_to > *w)
+            });
+            let inside: Vec<&&PublishedEvent> = evs
+                .iter()
+                .filter(|e| e.seq_from > lo && e.seq_to <= *w)
+                .collect();
+            let at_w = inside.iter().filter(|e| e.seq_to == *w).count();
+            let mut prev_to = lo;
+            let mut breaks = 0;
+            for e in &inside {
+                if e.seq_from != prev_to + 1 {
+                    breaks += 1;
+                }
+                prev_to = e.seq_to;
+            }
+            if at_w != 1 || breaks != 0 || straddle {
+                return Err(SinkError::Rejected(
+                    "watermark is not the end of a contiguous chain".into(),
+                ));
+            }
+            let min_applied = c
+                .cursors
+                .iter()
+                .filter(|((x, q, r), cur)| {
+                    x == &a
+                        && *q == p
+                        && r != d
+                        && !cur.retired
+                        && cur.protocol >= 1
+                        && now.saturating_sub(cur.updated) <= 30 * DAY
+                })
+                .map(|(_, cur)| cur.applied.get(d).copied().unwrap_or(0))
+                .min();
+            if min_applied.is_some_and(|m| *w > m) {
+                return Err(SinkError::Rejected(
+                    "watermark not applied by every active reader".into(),
+                ));
+            }
+        }
+        let s = &mut c.snaps[i];
+        s.state = "ready".into();
+        s.manifest_path = Some(manifest_path.clone());
+        s.sha = Some(sha.clone());
+        s.watermarks = wm.clone();
+        s.bytes = bytes;
+        s.ready_at = Some(now);
+        Ok(())
+    }
+    async fn mark_superseded(&self, p: Uuid, generation: u64) -> Result<(), SinkError> {
+        let a = self.account_id().await?;
+        let mut c = self.cloud.lock().unwrap();
+        let ready = c.ready(&a, p);
+        let newer = ready.iter().filter(|s| s.generation > generation).count();
+        let stable = ready
+            .first()
+            .is_some_and(|s| c.now_ms >= s.ready_at.unwrap() + DAY);
+        if newer < 2 || !stable {
+            return Err(SinkError::Rejected(
+                "still current/previous or not stable".into(),
+            ));
+        }
+        if let Some(s) = c.snaps.iter_mut().find(|s| {
+            s.account == a && s.profile == p && s.generation == generation && s.state == "ready"
+        }) {
+            s.state = "superseded".into();
+        }
+        Ok(())
+    }
+    async fn delete_snapshot_row(&self, p: Uuid, generation: u64) -> Result<bool, SinkError> {
+        let a = self.account_id().await?;
+        let mut c = self.cloud.lock().unwrap();
+        let now = c.now_ms;
+        let before = c.snaps.len();
+        c.snaps.retain(|s| {
+            !(s.account == a
+                && s.profile == p
+                && s.generation == generation
+                && (s.state == "superseded" || (s.state == "building" && s.expires <= now)))
+        });
+        Ok(c.snaps.len() < before)
+    }
+    async fn list_objects(&self, prefix: &str) -> Result<Vec<ObjectInfo>, SinkError> {
+        let a = self.account_id().await?;
+        let c = self.cloud.lock().unwrap();
+        let mut v: Vec<ObjectInfo> = c
+            .objects
+            .iter()
+            .filter(|((x, path), _)| x == &a && path.starts_with(prefix))
+            .map(|((_, path), b)| ObjectInfo {
+                path: path.clone(),
+                bytes: b.len() as u64,
+            })
+            .collect();
+        v.sort_by(|x, y| x.path.cmp(&y.path));
+        Ok(v)
+    }
+    async fn delete_objects(&self, paths: &[String]) -> Result<usize, SinkError> {
+        let a = self.account_id().await?;
+        let mut c = self.cloud.lock().unwrap();
+        let mut n = 0;
+        for path in paths {
+            let parts = path_parts(path);
+            let allowed = if parts.len() >= 3 && parts[2] == "snapshots" {
+                !c.snaps.iter().any(|s| {
+                    s.account == a
+                        && s.profile.to_string() == parts[1]
+                        && format!("{:010}", s.generation) == parts[3]
+                        && s.state == "ready"
+                })
+            } else if parts.len() == 7 && parts[2] == "journal" {
+                let p = Uuid::parse_str(parts[1]).unwrap();
+                let first: u64 = parts[6].trim_end_matches(".jsonl").parse().unwrap();
+                c.gc_allowed(&a, p, parts[3], first)
+            } else {
+                true
+            };
+            if allowed && c.objects.remove(&(a.clone(), path.clone())).is_some() {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+    async fn gc_events(&self, p: Uuid, d: &str, through: u64) -> Result<u64, SinkError> {
+        let a = self.account_id().await?;
+        let mut c = self.cloud.lock().unwrap();
+        if !c.gc_allowed(&a, p, d, through) {
+            return Err(SinkError::Rejected("journal GC not allowed".into()));
+        }
+        let before = c.events.len();
+        c.events.retain(|(x, e)| {
+            !(x == &a && e.profile_id == p && e.device_id.to_string() == d && e.seq_to <= through)
+        });
+        Ok((before - c.events.len()) as u64)
+    }
+}
+
+thread_local! {
+    /// Which device the fake's `report_cursors` records (the real sink knows its own device).
+    pub static REPORTER: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+pub async fn report_as(w: &World, d: &mut Dev) {
+    REPORTER.with(|r| *r.borrow_mut() = d.src.device_id.to_string());
+    let sink = w.sink();
+    report_cursors(&mut d.db, &sink, w.profile).await.unwrap();
 }

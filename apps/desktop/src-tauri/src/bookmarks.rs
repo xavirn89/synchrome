@@ -75,6 +75,34 @@ macro_rules! with_session {
     }};
 }
 
+/// Like `with_session!` but returns the raw `CloudError` (callers map rejections).
+macro_rules! with_session_raw {
+    ($sink:expr, |$s:ident, $c:ident| $call:expr) => {{
+        let $c = $sink.cloud()?;
+        let first = {
+            let $s = $sink.session().await?;
+            $call.await
+        };
+        match first {
+            Err(CloudError::Unauthorized) => {
+                let $s = $sink.refreshed().await?;
+                $call.await
+            }
+            r => r,
+        }
+    }};
+}
+
+/// A database refusal (check / trigger / privilege / lost race) is `Rejected`; anything else
+/// keeps the usual mapping. Messages are short and carry no values.
+fn map_rej(e: CloudError) -> SinkError {
+    if synchrome_cloud::compaction::is_rejection(&e) {
+        SinkError::Rejected(e.to_string().chars().take(160).collect())
+    } else {
+        map_cloud(e)
+    }
+}
+
 impl<'a> CloudSink<'a> {
     pub fn new(state: &'a AppState) -> Self {
         Self {
@@ -148,7 +176,50 @@ impl JournalSink for CloudSink<'_> {
     }
 
     async fn get_chunk(&self, path: &str) -> Result<Option<Vec<u8>>, SinkError> {
-        with_session!(self, |s, c| c.get_object(&s, path))
+        #[allow(unused_mut)]
+        let mut got = with_session!(self, |s, c| c.get_object(&s, path))?;
+        // debug builds only: simulate a corrupted snapshot generation (E2E fallback test)
+        #[cfg(debug_assertions)]
+        if let (Ok(g), Some(b)) = (
+            std::env::var("SYNCHROME_DEV_CORRUPT_SNAPSHOT_GEN"),
+            got.as_mut(),
+        ) {
+            if path.contains(&format!("/snapshots/{:0>10}/", g))
+                && path.ends_with(".jsonl")
+                && !b.is_empty()
+            {
+                b[0] ^= 1;
+            }
+        }
+        Ok(got)
+    }
+
+    async fn ready_snapshots(
+        &self,
+        profile_id: Uuid,
+    ) -> Result<Vec<synchrome_state::compaction::SnapshotRow>, SinkError> {
+        let rows = match with_session_raw!(self, |s, c| c.list_snapshot_rows(&s, profile_id)) {
+            Ok(r) => r,
+            // an instance without 0005: no snapshots
+            Err(CloudError::SchemaMissing(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(map_cloud(e)),
+        };
+        let mut v: Vec<_> = rows
+            .into_iter()
+            .filter(|r| r.state == "ready")
+            .map(|r| crate::compaction::snapshot_row(r, false))
+            .collect();
+        v.sort_by_key(|s| std::cmp::Reverse(s.generation));
+        v.truncate(2);
+        Ok(v)
+    }
+
+    fn prefer_snapshot_bootstrap(&self) -> bool {
+        #[cfg(debug_assertions)]
+        if std::env::var("SYNCHROME_DEV_FULL_REPLAY").is_ok_and(|v| v == "1") {
+            return false;
+        }
+        true
     }
 
     async fn account_id(&self) -> Result<String, SinkError> {
@@ -258,6 +329,13 @@ pub async fn sync_all(
             crate::browser_prefs::prefs_cycle(state, p),
         )
         .await;
+        // compaction (slice 13): cursor report; at most every 10 min the database is asked
+        // whether a snapshot / journal GC is due
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            crate::compaction::after_sync(state, p),
+        )
+        .await;
     }
     out
 }
@@ -273,26 +351,60 @@ pub fn status_for_mapping(mapping_id: Uuid, profile_id: Uuid) -> Option<Bookmark
     db.status(profile_id, mapping_id).ok()
 }
 
-/// Remove a profile's store objects and local state (before deleting the cloud profile).
-pub async fn purge_profile(
+/// Outcome of deleting a cloud profile with everything it owns.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ProfileDeletion {
+    pub deleted: bool,
+    pub objects_deleted: usize,
+    /// Objects still under the profile's prefix afterwards (expected 0).
+    pub leftovers: usize,
+    pub error: Option<String>,
+}
+
+/// Delete a cloud profile under the 0005 contract: (1) the objects the server lets us delete
+/// now (journal chunks already garbage-collectable, non-ready snapshot objects), (2) the
+/// profile row — its `store_events`, snapshot generations and cursors go by FK cascade (it is
+/// refused while the profile is still mapped somewhere), (3) every remaining object under the
+/// profile's prefix (allowed once the row is gone), (4) verify nothing is left. Local state of
+/// the profile is forgotten in every case.
+pub async fn delete_profile_everywhere(
     state: &AppState,
     session: &Session,
     profile_id: Uuid,
-) -> Result<usize, String> {
-    let n = state
-        .cloud()?
-        .delete_profile_objects(session, profile_id)
-        .await
-        .or_else(|e| match e {
-            // bucket not there yet (0004 not applied) = nothing to delete
-            CloudError::SchemaMissing(_) | CloudError::NotFound => Ok(0),
-            e => Err(e),
-        })
-        .map_err(|e| e.to_string())?;
+) -> Result<ProfileDeletion, String> {
+    let cloud = state.cloud()?;
+    let tolerate = |e: CloudError| match e {
+        // bucket not there yet = nothing to delete
+        CloudError::SchemaMissing(_) | CloudError::NotFound => Ok(0),
+        e => Err(e.to_string()),
+    };
+    let mut rep = ProfileDeletion {
+        objects_deleted: cloud
+            .delete_profile_objects(session, profile_id)
+            .await
+            .or_else(tolerate)?,
+        ..Default::default()
+    };
     if let Ok(mut db) = open_db() {
         let _ = db.forget_profile(profile_id);
     }
-    Ok(n)
+    match cloud.delete_profile(session, profile_id).await {
+        Ok(()) => rep.deleted = true,
+        Err(e) => {
+            rep.error = Some(e.to_string());
+            return Ok(rep);
+        }
+    }
+    rep.objects_deleted += cloud
+        .delete_profile_objects(session, profile_id)
+        .await
+        .or_else(tolerate)?;
+    rep.leftovers = cloud
+        .list_tree(session, &format!("profiles/{profile_id}"))
+        .await
+        .map(|v| v.len())
+        .or_else(tolerate)?;
+    Ok(rep)
 }
 
 // ------------------------------------------------------------------ conflicts (slice 9)
@@ -457,4 +569,199 @@ pub async fn extension_action(
     )
     .await;
     Ok(())
+}
+
+// ------------------------------------------------------------------ compaction (slice 13)
+
+impl synchrome_state::compaction::CompactionSink for CloudSink<'_> {
+    async fn compaction_status(
+        &self,
+        profile_id: Uuid,
+    ) -> Result<synchrome_state::compaction::CompactionStatus, SinkError> {
+        let r =
+            with_session_raw!(self, |s, c| c.compaction_status(&s, profile_id)).map_err(map_rej)?;
+        Ok(crate::compaction::status(r))
+    }
+
+    async fn list_snapshots(
+        &self,
+        profile_id: Uuid,
+    ) -> Result<Vec<synchrome_state::compaction::SnapshotRow>, SinkError> {
+        let st =
+            with_session_raw!(self, |s, c| c.compaction_status(&s, profile_id)).map_err(map_rej)?;
+        let now = synchrome_cloud::compaction::parse_ts_micros(&st.server_now).unwrap_or(i64::MAX);
+        let rows = with_session_raw!(self, |s, c| c.list_snapshot_rows(&s, profile_id))
+            .map_err(map_rej)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let expired = r.state == "building"
+                    && r.expires_at
+                        .as_deref()
+                        .and_then(synchrome_cloud::compaction::parse_ts_micros)
+                        .is_some_and(|e| e <= now);
+                crate::compaction::snapshot_row(r, expired)
+            })
+            .collect())
+    }
+
+    async fn list_cursors(
+        &self,
+        profile_id: Uuid,
+    ) -> Result<Vec<synchrome_state::compaction::CursorRow>, SinkError> {
+        let st =
+            with_session_raw!(self, |s, c| c.compaction_status(&s, profile_id)).map_err(map_rej)?;
+        let now = synchrome_cloud::compaction::parse_ts_micros(&st.server_now).unwrap_or(0);
+        let rows =
+            with_session_raw!(self, |s, c| c.list_cursor_rows(&s, profile_id)).map_err(map_rej)?;
+        const THIRTY_DAYS_US: i64 = 30 * 24 * 3600 * 1_000_000;
+        Ok(rows
+            .into_iter()
+            .map(|r| synchrome_state::compaction::CursorRow {
+                device_id: r.device_id.to_string(),
+                applied: r
+                    .applied
+                    .into_iter()
+                    .map(|(k, v)| (k, v.max(0) as u64))
+                    .collect(),
+                snapshot_protocol: r.snapshot_protocol,
+                retired: r.retired_at.is_some(),
+                active: synchrome_cloud::compaction::parse_ts_micros(&r.updated_at)
+                    .is_some_and(|u| now - u <= THIRTY_DAYS_US),
+            })
+            .collect())
+    }
+
+    async fn report_cursors(
+        &self,
+        profile_id: Uuid,
+        rep: &synchrome_state::compaction::CursorReport,
+    ) -> Result<(), SinkError> {
+        let me = self.state.device().map_err(SinkError::Other)?.device_id;
+        let row = synchrome_cloud::compaction::CursorReportDto {
+            profile_id,
+            device_id: me,
+            applied: rep
+                .applied
+                .iter()
+                .map(|(k, v)| (k.clone(), *v as i64))
+                .collect(),
+            published_through: rep.published_through as i64,
+            snapshot_generation: rep.snapshot_generation.map(|g| g as i64),
+            snapshot_protocol: rep.snapshot_protocol,
+        };
+        with_session_raw!(self, |s, c| c.report_cursor_row(&s, &row)).map_err(map_rej)
+    }
+
+    async fn claim_snapshot(&self, profile_id: Uuid, generation: u64) -> Result<(), SinkError> {
+        let me = self.state.device().map_err(SinkError::Other)?.device_id;
+        with_session_raw!(self, |s, c| c.claim_snapshot(
+            &s,
+            profile_id,
+            generation as i64,
+            me
+        ))
+        .map_err(map_rej)
+    }
+
+    async fn put_snapshot_object(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<(), SinkError> {
+        with_session_raw!(self, |s, c| c.put_object(
+            &s,
+            path,
+            bytes.to_vec(),
+            content_type
+        ))
+        .map_err(map_rej)
+    }
+
+    async fn mark_ready(
+        &self,
+        profile_id: Uuid,
+        generation: u64,
+        info: &synchrome_state::compaction::ReadyInfo,
+    ) -> Result<(), SinkError> {
+        let (manifest_path, manifest_sha256, counts, bytes) = (
+            info.manifest_path.as_str(),
+            info.manifest_sha256.as_str(),
+            &info.counts,
+            info.bytes,
+        );
+        let wm: std::collections::BTreeMap<String, i64> = info
+            .watermarks
+            .iter()
+            .map(|(k, v)| (k.clone(), *v as i64))
+            .collect();
+        with_session_raw!(self, |s, c| c.mark_snapshot_ready(
+            &s,
+            profile_id,
+            generation as i64,
+            manifest_path,
+            manifest_sha256,
+            &wm,
+            counts,
+            bytes as i64
+        ))
+        .map_err(map_rej)
+    }
+
+    async fn mark_superseded(&self, profile_id: Uuid, generation: u64) -> Result<(), SinkError> {
+        with_session_raw!(self, |s, c| c.mark_snapshot_superseded(
+            &s,
+            profile_id,
+            generation as i64
+        ))
+        .map_err(map_rej)
+    }
+
+    async fn delete_snapshot_row(
+        &self,
+        profile_id: Uuid,
+        generation: u64,
+    ) -> Result<bool, SinkError> {
+        with_session_raw!(self, |s, c| c.delete_snapshot_row(
+            &s,
+            profile_id,
+            generation as i64
+        ))
+        .map_err(map_rej)
+    }
+
+    async fn list_objects(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<synchrome_state::compaction::ObjectInfo>, SinkError> {
+        let v = with_session_raw!(self, |s, c| c.list_tree_sized(&s, prefix)).map_err(map_rej)?;
+        Ok(v.into_iter()
+            .map(|(path, bytes)| synchrome_state::compaction::ObjectInfo { path, bytes })
+            .collect())
+    }
+
+    async fn delete_objects(&self, paths: &[String]) -> Result<usize, SinkError> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        with_session_raw!(self, |s, c| c.delete_objects(&s, paths)).map_err(map_rej)
+    }
+
+    async fn gc_events(
+        &self,
+        profile_id: Uuid,
+        device_id: &str,
+        through: u64,
+    ) -> Result<u64, SinkError> {
+        let d = Uuid::parse_str(device_id).map_err(|_| SinkError::Other("device id".into()))?;
+        let n = with_session_raw!(self, |s, c| c.gc_journal_events(
+            &s,
+            profile_id,
+            d,
+            through as i64
+        ))
+        .map_err(map_rej)?;
+        Ok(n.max(0) as u64)
+    }
 }

@@ -36,6 +36,10 @@ pub enum SinkError {
     SchemaMissing(String),
     #[error("cloud error")]
     Other(String),
+    /// The server refused a write on purpose (a database rule / check), e.g. a watermark
+    /// the database does not accept or a lost compaction claim.
+    #[error("refused by the server")]
+    Rejected(String),
 }
 
 impl SinkError {
@@ -46,6 +50,7 @@ impl SinkError {
             SinkError::Forbidden(_) => "forbidden",
             SinkError::SchemaMissing(_) => "schema_missing",
             SinkError::Other(_) => "other",
+            SinkError::Rejected(_) => "rejected",
         }
     }
 }
@@ -88,11 +93,23 @@ pub trait JournalSink: Sync {
         &self,
         profile_id: Uuid,
     ) -> impl Future<Output = Result<Vec<crate::pull::RemoteEvent>, SinkError>> + Send;
-    /// One journal chunk; `None` if it does not exist (yet).
+    /// One journal chunk; `None` if it does not exist (yet). Also used for snapshot objects.
     fn get_chunk(
         &self,
         path: &str,
     ) -> impl Future<Output = Result<Option<Vec<u8>>, SinkError>> + Send;
+    /// Ready snapshot generations of a profile, newest first (at most current + previous).
+    /// Stores without compaction have none.
+    fn ready_snapshots(
+        &self,
+        _profile_id: Uuid,
+    ) -> impl Future<Output = Result<Vec<crate::compaction::SnapshotRow>, SinkError>> + Send {
+        async { Ok(Vec::new()) }
+    }
+    /// Debug harness only: false forces a full replay even when a snapshot exists.
+    fn prefer_snapshot_bootstrap(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,7 +271,7 @@ fn user_message(e: &SinkError) -> String {
         SinkError::SchemaMissing(_) => {
             "the cloud is not ready for bookmarks (migration 0004 missing)".into()
         }
-        SinkError::Other(_) => "upload failed; will retry".into(),
+        SinkError::Other(_) | SinkError::Rejected(_) => "upload failed; will retry".into(),
     }
 }
 

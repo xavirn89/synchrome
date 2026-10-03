@@ -165,7 +165,7 @@ const COLUMN: &[(&str, &str)] = &[
 /// Held: the entity has unpublished LOCAL ops, or an open conflict that is not just an
 /// orphan (whose remote ops keep flowing so the remote side can fix it) and not already being
 /// resolved (the resolution's op is newer than everything held; later ops merge by LWW).
-fn apply_remote_op(
+pub(crate) fn apply_remote_op(
     tx: &Transaction<'_>,
     pid: &str,
     published_through: i64,
@@ -339,8 +339,18 @@ pub(crate) fn apply_lww(tx: &Transaction<'_>, pid: &str, op: &Op) -> Result<(), 
                 return Ok(());
             }
             let newest = row.field_hlc.values().max().cloned().unwrap_or_default();
-            if row.deleted || newest.as_str() >= op.hlc.as_str() {
-                return Ok(()); // already deleted (idempotent) or a newer set wins
+            if row.deleted {
+                // keep the NEWEST tombstone: a set between two concurrent deletes must not
+                // depend on which delete arrived first (convergence)
+                tx.execute(
+                    "UPDATE entities SET deleted_hlc = ?3 WHERE profile_id = ?1 AND sid = ?2
+                       AND (deleted_hlc IS NULL OR deleted_hlc < ?3)",
+                    params![pid, op.id, op.hlc],
+                )?;
+                return Ok(());
+            }
+            if newest.as_str() >= op.hlc.as_str() {
+                return Ok(()); // a newer set wins
             }
             pending.insert("deleted".into());
             tx.execute(
@@ -359,6 +369,46 @@ pub(crate) fn remote_pending(conn: &rusqlite::Connection, pid: &str) -> Result<u
         [pid],
         |r| r.get::<_, i64>(0),
     )? as u64)
+}
+
+/// Must this device import the snapshot before pulling the tail? Yes when it never pulled
+/// anything for this profile (fast path, unless disabled), or when for some source device its
+/// cursor is below the snapshot watermark and the publications right after the cursor are no
+/// longer listed (folded and garbage-collected).
+fn needs_import(
+    conn: &rusqlite::Connection,
+    pid: &str,
+    own: &str,
+    events: &[RemoteEvent],
+    cur: &crate::compaction::SnapshotRow,
+    prefer: bool,
+) -> Result<bool, StateError> {
+    let mut st = conn
+        .prepare("SELECT device_id, applied_through FROM remote_cursors WHERE profile_id = ?1")?;
+    let cursors: BTreeMap<String, i64> = st
+        .query_map([pid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<Result<_, _>>()?;
+    if prefer && cursors.is_empty() && cur.watermarks.iter().any(|(d, w)| d != own && *w > 0) {
+        return Ok(true);
+    }
+    for (d, w) in &cur.watermarks {
+        if d == own {
+            continue;
+        }
+        let c = cursors.get(d).copied().unwrap_or(0).max(0) as u64;
+        if c >= *w {
+            continue;
+        }
+        let next = events
+            .iter()
+            .filter(|e| &e.device_id == d && e.seq_to > c)
+            .map(|e| e.seq_from)
+            .min();
+        if next != Some(c + 1) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Pull with the lease already held (or from tests).
@@ -419,23 +469,77 @@ pub(crate) async fn pull_locked<S: JournalSink>(
             return Ok(fail_kind(&e));
         }
     }
-    let events = match sink.list_events(profile_id).await {
-        Ok(e) => e,
+    let snaps = match sink.ready_snapshots(profile_id).await {
+        Ok(s) => s,
         Err(e) => {
             record_download(&db.conn, &pid, Some(e.kind()), Some(&e.to_string()), now)?;
             return Ok(fail_kind(&e));
         }
     };
-    let mut by_device: BTreeMap<String, Vec<RemoteEvent>> = BTreeMap::new();
-    for ev in events.into_iter().filter(|e| e.device_id != row.device_id) {
-        by_device.entry(ev.device_id.clone()).or_default().push(ev);
-    }
     let mut stats = PullStats::default();
-    for (device, mut evs) in by_device {
-        evs.sort_by_key(|e| (e.seq_from, e.seq_to));
-        evs.dedup_by_key(|e| (e.seq_from, e.seq_to));
-        for ev in evs {
-            let cursor: i64 = db
+    let mut imported = false;
+    loop {
+        let events = match sink.list_events(profile_id).await {
+            Ok(e) => e,
+            Err(e) => {
+                record_download(&db.conn, &pid, Some(e.kind()), Some(&e.to_string()), now)?;
+                return Ok(fail_kind(&e));
+            }
+        };
+        // snapshot bootstrap (docs/03 §3.7): a device that never pulled, or whose cursor is below
+        // history that was folded and garbage-collected, imports the current (else previous)
+        // verified snapshot through the normal merge first
+        let mut folded_race = false;
+        if !imported {
+            if let Some(cur) = snaps.first() {
+                if needs_import(
+                    &db.conn,
+                    &pid,
+                    &row.device_id,
+                    &events,
+                    cur,
+                    sink.prefer_snapshot_bootstrap(),
+                )? {
+                    match crate::compaction::import(
+                        db,
+                        sink,
+                        profile_id,
+                        &row.device_id,
+                        &snaps,
+                        now,
+                    )
+                    .await?
+                    {
+                        Ok(imp) => {
+                            imported = true;
+                            stats.ops += imp.ops;
+                            stats.conflicts += imp.conflicts;
+                        }
+                        Err(why) => {
+                            record_download(
+                                &db.conn,
+                                &pid,
+                                Some("snapshot_invalid"),
+                                Some(&why),
+                                now,
+                            )?;
+                            return Ok(PullOutcome::Blocked {
+                                kind: "snapshot_invalid".into(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let mut by_device: BTreeMap<String, Vec<RemoteEvent>> = BTreeMap::new();
+        for ev in events.into_iter().filter(|e| e.device_id != row.device_id) {
+            by_device.entry(ev.device_id.clone()).or_default().push(ev);
+        }
+        for (device, mut evs) in by_device {
+            evs.sort_by_key(|e| (e.seq_from, e.seq_to));
+            evs.dedup_by_key(|e| (e.seq_from, e.seq_to));
+            for ev in evs {
+                let cursor: i64 = db
                 .conn
                 .query_row(
                     "SELECT applied_through FROM remote_cursors WHERE profile_id = ?1 AND device_id = ?2",
@@ -444,46 +548,56 @@ pub(crate) async fn pull_locked<S: JournalSink>(
                 )
                 .optional()?
                 .unwrap_or(0);
-            if ev.seq_to as i64 <= cursor {
-                continue; // already applied (or a duplicate event)
-            }
-            if ev.seq_from as i64 > cursor + 1 {
-                stats.gaps.push((device.clone(), cursor as u64 + 1));
-                set_gap(&db.conn, &pid, &device, Some(cursor + 1), now)?;
-                break;
-            }
-            let bytes = match sink.get_chunk(&ev.path).await {
-                Ok(Some(b)) => b,
-                Ok(None) => {
+                if ev.seq_to as i64 <= cursor {
+                    continue; // already applied (or a duplicate event)
+                }
+                if ev.seq_from as i64 > cursor + 1 {
                     stats.gaps.push((device.clone(), cursor as u64 + 1));
                     set_gap(&db.conn, &pid, &device, Some(cursor + 1), now)?;
                     break;
                 }
-                Err(e) => {
-                    record_download(&db.conn, &pid, Some(e.kind()), Some(&e.to_string()), now)?;
-                    return Ok(fail_kind(&e));
-                }
-            };
-            let ops = match verify_chunk(&bytes, &ev) {
-                Ok(o) => o,
-                Err(why) => {
-                    record_download(
-                        &db.conn,
-                        &pid,
-                        Some("corrupt"),
-                        Some(&format!("remote journal rejected: {why}")),
-                        now,
-                    )?;
-                    return Ok(PullOutcome::Blocked {
-                        kind: "corrupt".into(),
-                    });
-                }
-            };
-            let tx = db
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            // re-read inside the transaction: a concurrent puller may have advanced it
-            let cursor: i64 = tx
+                let bytes = match sink.get_chunk(&ev.path).await {
+                    Ok(Some(b)) => b,
+                    Ok(None) => {
+                        // folded and garbage-collected between our listing and the download
+                        if !imported
+                            && snaps
+                                .first()
+                                .and_then(|s| s.watermarks.get(&device))
+                                .is_some_and(|w| *w >= ev.seq_to)
+                        {
+                            folded_race = true;
+                            break;
+                        }
+                        stats.gaps.push((device.clone(), cursor as u64 + 1));
+                        set_gap(&db.conn, &pid, &device, Some(cursor + 1), now)?;
+                        break;
+                    }
+                    Err(e) => {
+                        record_download(&db.conn, &pid, Some(e.kind()), Some(&e.to_string()), now)?;
+                        return Ok(fail_kind(&e));
+                    }
+                };
+                let ops = match verify_chunk(&bytes, &ev) {
+                    Ok(o) => o,
+                    Err(why) => {
+                        record_download(
+                            &db.conn,
+                            &pid,
+                            Some("corrupt"),
+                            Some(&format!("remote journal rejected: {why}")),
+                            now,
+                        )?;
+                        return Ok(PullOutcome::Blocked {
+                            kind: "corrupt".into(),
+                        });
+                    }
+                };
+                let tx = db
+                    .conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                // re-read inside the transaction: a concurrent puller may have advanced it
+                let cursor: i64 = tx
                 .query_row(
                     "SELECT applied_through FROM remote_cursors WHERE profile_id = ?1 AND device_id = ?2",
                     params![pid, device],
@@ -491,45 +605,66 @@ pub(crate) async fn pull_locked<S: JournalSink>(
                 )
                 .optional()?
                 .unwrap_or(0);
-            let published: i64 = tx.query_row(
-                "SELECT published_through FROM profiles WHERE profile_id = ?1",
-                [&pid],
-                |r| r.get(0),
-            )?;
-            let last: Option<String> = tx
-                .query_row("SELECT value FROM meta WHERE key = 'hlc_last'", [], |r| {
-                    r.get(0)
-                })
-                .optional()?;
-            let mut clock = HlcClock::new(row.device_id.clone(), last.and_then(|s| s.parse().ok()));
-            let mut through = cursor;
-            for op in ops.iter().filter(|o| o.seq as i64 > cursor) {
-                if apply_remote_op(&tx, &pid, published, &device, op, now)? {
-                    stats.conflicts += 1;
-                }
-                if let Ok(h) = op.hlc.parse() {
-                    clock.observe(&h);
-                }
-                stats.ops += 1;
-                through = op.seq as i64;
-            }
-            if let Some(l) = &clock.last {
-                tx.execute(
-                    "INSERT INTO meta (key, value) VALUES ('hlc_last', ?1)
-                     ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
-                    [l.to_string()],
+                let published: i64 = tx.query_row(
+                    "SELECT published_through FROM profiles WHERE profile_id = ?1",
+                    [&pid],
+                    |r| r.get(0),
                 )?;
-            }
-            tx.execute(
+                let last: Option<String> = tx
+                    .query_row("SELECT value FROM meta WHERE key = 'hlc_last'", [], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+                let mut clock =
+                    HlcClock::new(row.device_id.clone(), last.and_then(|s| s.parse().ok()));
+                let mut through = cursor;
+                for op in ops.iter().filter(|o| o.seq as i64 > cursor) {
+                    if apply_remote_op(&tx, &pid, published, &device, op, now)? {
+                        stats.conflicts += 1;
+                    }
+                    if let Ok(h) = op.hlc.parse() {
+                        clock.observe(&h);
+                    }
+                    stats.ops += 1;
+                    through = op.seq as i64;
+                }
+                if let Some(l) = &clock.last {
+                    tx.execute(
+                        "INSERT INTO meta (key, value) VALUES ('hlc_last', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+                        [l.to_string()],
+                    )?;
+                }
+                tx.execute(
                 "INSERT INTO remote_cursors (profile_id, device_id, applied_through, gap_at, updated_at)
                  VALUES (?1, ?2, ?3, NULL, ?4)
                  ON CONFLICT(profile_id, device_id) DO UPDATE SET applied_through = MAX(applied_through, excluded.applied_through),
                         gap_at = NULL, updated_at = excluded.updated_at",
                 params![pid, device, through, now],
             )?;
-            tx.commit()?;
-            stats.chunks += 1;
+                tx.commit()?;
+                stats.chunks += 1;
+            }
         }
+        if folded_race && !imported {
+            match crate::compaction::import(db, sink, profile_id, &row.device_id, &snaps, now)
+                .await?
+            {
+                Ok(imp) => {
+                    imported = true;
+                    stats.ops += imp.ops;
+                    stats.conflicts += imp.conflicts;
+                    continue; // list again and pull the tail
+                }
+                Err(why) => {
+                    record_download(&db.conn, &pid, Some("snapshot_invalid"), Some(&why), now)?;
+                    return Ok(PullOutcome::Blocked {
+                        kind: "snapshot_invalid".into(),
+                    });
+                }
+            }
+        }
+        break;
     }
     record_download(&db.conn, &pid, None, None, now)?;
     stats.remote_pending = remote_pending(&db.conn, &pid)?;

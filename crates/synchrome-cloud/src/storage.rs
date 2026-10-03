@@ -298,6 +298,68 @@ impl<T: RestTransport> CloudClient<T> {
         Ok(out)
     }
 
+    /// Every object under a store folder with its size, recursively (store-relative paths).
+    pub async fn list_tree_sized(
+        &self,
+        session: &Session,
+        rel_dir: &str,
+    ) -> Result<Vec<(String, u64)>, CloudError> {
+        #[derive(Deserialize)]
+        struct Item {
+            name: String,
+            #[serde(default)]
+            id: Option<serde_json::Value>,
+            #[serde(default)]
+            metadata: Option<serde_json::Value>,
+        }
+        let mut out = Vec::new();
+        let mut dirs = vec![rel_dir.to_string()];
+        while let Some(d) = dirs.pop() {
+            let name = self.object_name(session, &d)?;
+            let mut offset = 0;
+            loop {
+                let bytes = self
+                    .storage(
+                        session,
+                        "POST",
+                        &format!("/object/list/{STORE_BUCKET}"),
+                        &[],
+                        Body::Json(serde_json::json!({
+                            "prefix": name, "limit": 1000, "offset": offset,
+                            "sortBy": { "column": "name", "order": "asc" }
+                        })),
+                    )
+                    .await?;
+                let items: Vec<Item> = serde_json::from_slice(&bytes)
+                    .map_err(|e| CloudError::InvalidResponse(format!("storage list: {e}")))?;
+                let n = items.len();
+                for it in items {
+                    if it.name.is_empty() || it.name.starts_with('.') {
+                        continue;
+                    }
+                    let path = format!("{d}/{}", it.name);
+                    if it.id.as_ref().map_or(true, |v| v.is_null()) {
+                        dirs.push(path);
+                    } else {
+                        let size = it
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.get("size"))
+                            .and_then(|s| s.as_u64())
+                            .unwrap_or(0);
+                        out.push((path, size));
+                    }
+                }
+                if n < 1000 {
+                    break;
+                }
+                offset += n;
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     /// Every object under a store folder, recursively (store-relative paths).
     pub async fn list_tree(
         &self,
@@ -421,24 +483,36 @@ impl<T: RestTransport> CloudClient<T> {
             .unwrap_or(false))
     }
 
+    /// Every publication row of a profile (paged: PostgREST caps a response at its max_rows).
     pub async fn list_store_events(
         &self,
         session: &Session,
         profile_id: Uuid,
     ) -> Result<Vec<StoreEvent>, CloudError> {
-        let bytes = self
-            .rest_call(
-                session,
-                "GET",
-                &format!(
-                    "/store_events?profile_id=eq.{profile_id}&select=profile_id,device_id,path,seq_from,seq_to,hlc,created_at&order=seq_to.asc"
-                ),
-                &[],
-                None,
-            )
-            .await?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| CloudError::InvalidResponse(format!("store_events: {e}")))
+        const PAGE: usize = 1000;
+        let mut out: Vec<StoreEvent> = Vec::new();
+        loop {
+            let bytes = self
+                .rest_call(
+                    session,
+                    "GET",
+                    &format!(
+                        "/store_events?profile_id=eq.{profile_id}&select=profile_id,device_id,path,seq_from,seq_to,hlc,created_at&order=device_id.asc,seq_to.asc&limit={PAGE}&offset={}",
+                        out.len()
+                    ),
+                    &[],
+                    None,
+                )
+                .await?;
+            let page: Vec<StoreEvent> = serde_json::from_slice(&bytes)
+                .map_err(|e| CloudError::InvalidResponse(format!("store_events: {e}")))?;
+            let n = page.len();
+            out.extend(page);
+            if n < PAGE {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     async fn rest_call(
