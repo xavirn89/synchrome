@@ -45,6 +45,16 @@ To repeat at the supported narrow width, set the temporary window to 720 pixels 
 
 Also use macOS accessibility/pointer/keyboard interactions to check navigation, form entry, Escape, focus, appearance and actual narrow window geometry. Capture the native window including its title bar. The minimum supported outer window is 720×520; browser viewport dimensions exclude native title-bar height.
 
+WKWebView does not focus mouse-clicked buttons by default. Open a dialog from a previously unfocused control, use Tab and Escape, and verify that focus returns to that control. The deterministic harness includes this regression without pre-focusing its New profile button. `use:dialogTrigger` captures the invoking control before the dialog opens.
+
+The final runs used actual 720×528 and 1512×917 interior viewports, changed with the native window zoom action. Their reports are `native-validation-narrow.json` and `native-validation-wide.json`; `native-manual-validation.json` records the complementary macOS interactions.
+
+## Check the packaged frontend
+
+Build from `apps/desktop` with `pnpm tauri build --debug --bundles app`. This produces `target/debug/bundle/macos/Synchrome.app` at the repository root. To check it safely, copy this bundle into a temporary directory, give the copy a distinct bundle identifier, and launch it with the same empty cloud environment, restricted discovery and a separate isolated data/driver directory. Do not replace the installed application.
+
+The package loads `tauri://localhost` resources rather than the Vite URL. Confirm that neither the preview object nor sample-data banner exists and that native account/cloud probes are signed out and unconfigured. With cloud explicitly disabled, the configuration warning and gated authentication controls are expected. `native-packaged-auth.jpg` records this clean boot; normal form entry and validation are exercised in the labelled native DEV run. The debug package is for local review, not a signed/notarized release.
+
 ## Other checks
 
 `pnpm test` checks product/transport rules. `pnpm build` must produce no preview fixture chunk. Run cargo fmt, clippy and workspace tests. Existing live native/cloud E2E harnesses continue to require their explicitly authorized test accounts and disposable browser profiles; sample UI acceptance does not replace those integration scenarios.

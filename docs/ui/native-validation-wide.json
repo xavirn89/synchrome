@@ -1,0 +1,280 @@
+{
+  "generatedAt": "2026-10-03T19:52:20.792666+00:00",
+  "runtime": "Tauri 2 / native macOS WKWebView",
+  "driver": "/private/tmp/synchrome-ui-native/driver",
+  "scope": "Real desktop frontend and dialogs; auth/cloud/companion operations use token-free DEV fixtures",
+  "nativeMetadata": {
+    "isolatedDevice": true,
+    "nativeBrowserCount": 0,
+    "nativeCloudUnconfigured": true,
+    "nativeSignedOut": true,
+    "version": "Synchrome/1.0.0"
+  },
+  "geometry": {
+    "height": 917,
+    "narrowWindow": false,
+    "pageWidth": 1512,
+    "width": 1512
+  },
+  "checks": [
+    {
+      "name": "Native overview shows three central profiles",
+      "passed": true
+    },
+    {
+      "name": "Navigation exposes the five product areas",
+      "passed": true
+    },
+    {
+      "name": "Mixed attention names incomplete connections without claiming all are syncing",
+      "passed": true
+    },
+    {
+      "name": "The attention action opens the conflict screen it describes",
+      "passed": true
+    },
+    {
+      "name": "Profile relationships group browsers under two Macs",
+      "passed": true
+    },
+    {
+      "name": "Remote connections do not claim a live synced state",
+      "passed": true
+    },
+    {
+      "name": "A second local source cannot be connected silently",
+      "passed": true
+    },
+    {
+      "name": "Primary profile view hides internal identifiers",
+      "passed": true
+    },
+    {
+      "name": "Native modal has a labelled title and contains focus",
+      "passed": true
+    },
+    {
+      "name": "Dialog cancellation restores a previously unfocused invoking control",
+      "passed": true
+    },
+    {
+      "name": "Blank profile names have an inline validation error",
+      "passed": true
+    },
+    {
+      "name": "Duplicate names are rejected before creating a profile",
+      "passed": true
+    },
+    {
+      "name": "Starting fresh does not connect or change a browser",
+      "passed": true
+    },
+    {
+      "name": "Mapping stays pending until the companion confirms it",
+      "passed": true
+    },
+    {
+      "name": "Companion confirmation alone does not announce first sync",
+      "passed": true
+    },
+    {
+      "name": "First sync completion follows actual observed fixture sync",
+      "passed": true
+    },
+    {
+      "name": "Renaming preserves the existing browser relationship",
+      "passed": true
+    },
+    {
+      "name": "Disconnect explains that local browser data is kept",
+      "passed": true
+    },
+    {
+      "name": "Disconnect retains the central profile",
+      "passed": true
+    },
+    {
+      "name": "First entry explains the browser to central-profile relationship",
+      "passed": true
+    },
+    {
+      "name": "Permission guidance is specific and offers Helium without access",
+      "passed": true
+    },
+    {
+      "name": "Import creates a core profile and maps its chosen local origin",
+      "passed": true
+    },
+    {
+      "name": "Import does not invent a completed sync",
+      "passed": true
+    },
+    {
+      "name": "Companion instructions show a concrete setup path",
+      "passed": true
+    },
+    {
+      "name": "Incomplete setup remains discoverable on its profile",
+      "passed": true
+    },
+    {
+      "name": "An open browser produces guidance before connecting",
+      "passed": true
+    },
+    {
+      "name": "The pending browser link does not claim sync is active",
+      "passed": true
+    },
+    {
+      "name": "Retry advances to companion setup after the browser closes",
+      "passed": true
+    },
+    {
+      "name": "A new Mac offers existing profiles instead of requiring an import",
+      "passed": true
+    },
+    {
+      "name": "Existing-profile onboarding opens the shared profile selector",
+      "passed": true
+    },
+    {
+      "name": "Connecting another Mac reuses the profile without duplicating it",
+      "passed": true
+    },
+    {
+      "name": "Delete explicitly distinguishes cloud and local data",
+      "passed": true
+    },
+    {
+      "name": "Delete requires the exact profile name",
+      "passed": true
+    },
+    {
+      "name": "A mismatched confirmation cannot delete",
+      "passed": true
+    },
+    {
+      "name": "A failed disconnection keeps the cloud profile for retry",
+      "passed": true
+    },
+    {
+      "name": "Delete removes all mappings and profile cloud files",
+      "passed": true
+    },
+    {
+      "name": "Deleting a cloud profile preserves every browser fixture",
+      "passed": true
+    },
+    {
+      "name": "Incomplete cloud cleanup does not appear as full deletion success",
+      "passed": true
+    },
+    {
+      "name": "Conflict comparison presents local and remote versions",
+      "passed": true
+    },
+    {
+      "name": "Conflict decisions update the actual fixture state",
+      "passed": true
+    },
+    {
+      "name": "Sign in is a labelled native desktop form",
+      "passed": true
+    },
+    {
+      "name": "Validation focuses the field needing correction",
+      "passed": true
+    },
+    {
+      "name": "Native auth errors get specific plain-language feedback",
+      "passed": true
+    },
+    {
+      "name": "Signup has immediate password validation",
+      "passed": true
+    },
+    {
+      "name": "Email confirmation is shown as pending success",
+      "passed": true
+    },
+    {
+      "name": "Successful sign in enters progressive onboarding",
+      "passed": true
+    },
+    {
+      "name": "Sign out explains pause and preserved data",
+      "passed": true
+    },
+    {
+      "name": "Signing out returns to the auth form",
+      "passed": true
+    },
+    {
+      "name": "Offline has a clear data-preservation notice",
+      "passed": true
+    },
+    {
+      "name": "Offline connection state does not claim synced",
+      "passed": true
+    },
+    {
+      "name": "Empty state offers import and starting fresh",
+      "passed": true
+    },
+    {
+      "name": "Dark appearance is applied and its selection announced",
+      "passed": true
+    },
+    {
+      "name": "Light appearance is applied and persisted",
+      "passed": true
+    },
+    {
+      "name": "Current native window has no horizontal page overflow",
+      "passed": true
+    },
+    {
+      "name": "Visible controls have accessible names",
+      "passed": true
+    },
+    {
+      "name": "Preview banner leaves the account control inside the native viewport",
+      "passed": true
+    },
+    {
+      "name": "Native profiles fits the supported window width",
+      "passed": true
+    },
+    {
+      "name": "Native devices fits the supported window width",
+      "passed": true
+    },
+    {
+      "name": "Native activity fits the supported window width",
+      "passed": true
+    },
+    {
+      "name": "Native settings fits the supported window width",
+      "passed": true
+    },
+    {
+      "name": "A pending cloud probe does not appear connected",
+      "passed": true
+    },
+    {
+      "name": "Partial cloud availability uses an attention state",
+      "passed": true
+    },
+    {
+      "name": "Settings and shell agree on partial cloud availability",
+      "passed": true
+    }
+  ],
+  "passed": 63,
+  "failed": 0,
+  "limitations": [
+    "No live cloud auth, real browser data, OS permission grants or companion installation were exercised.",
+    "Native pointer/keyboard interaction and screenshots are validated separately through Computer Use.",
+    "Window overflow is measured at the actual native size recorded in geometry."
+  ]
+}

@@ -56,6 +56,7 @@ Motion is limited to pending work and brief dialog/toast arrival; reduced motion
 - Attention copy could describe a conflict while its action opened a different connection; mixed setup states could be described as already syncing.
 - Unknown or partial cloud probes could be labelled and styled as a fully connected service.
 - The sample-data banner could push account access below the narrow development window; the shell now accounts for its height across the skip link.
+- WKWebView does not focus mouse-clicked buttons by default, so modal dismissal could restore focus to the main content. Dialog launch controls now capture focus before opening; native mouse/Tab/Escape checks confirm restoration to the invoking button.
 
 ## Verification and evidence
 
@@ -65,7 +66,7 @@ The native deterministic harness is `tests/experiments/ui_redesign_native.py`. I
 
 Computer Use additionally checks actual macOS accessibility controls, keyboard dismissal, profile creation, navigation, themes and screenshots. Desktop acceptance takes place in Tauri following the user's clarification. Playwright MCP also exercises the actual frontend as a complementary check, including auth/signup, first entry, import, companion/first sync, connection replacement failure/retry, disconnect, creation, busy dialogs, deletion failures, conflicts, Settings, themes, narrow layout and reduced motion. Browser-only preview results are not claimed as native synchronization results.
 
-`native-validation.json` records the executed native UI checks. Captures in this directory show the native window, including its title bar and development-data label. `../ui-before.png` records the original monocolumn interface.
+`native-validation-narrow.json` and `native-validation-wide.json` record the final executed native UI checks. `native-validation.json` preserves the earlier wide run. `native-manual-validation.json` records macOS pointer/keyboard/resize checks and the production-bundle boot. Captures in this directory show the native window, including its title bar; fixture runs have an explicit development-data label. `../ui-before.png` records the original monocolumn interface.
 
 Rust tests cover deletion orchestration with mocked REST/Storage and real in-memory SQLite. Frontend Node tests cover transport isolation, creation/import, first sync, safe deletion, partial failures, state priorities, conflict totals and device grouping. Existing integration harnesses were adapted to the new navigation, disclosure controls and logout confirmation. Their credential-dependent live-cloud scenarios are retained rather than rerun against personal data.
 
@@ -79,7 +80,10 @@ Rust tests cover deletion orchestration with mocked REST/Storage and real in-mem
 | `cargo build -p synchrome-desktop --features tauri/custom-protocol` | Passed with the production frontend embedded |
 | `pnpm tauri build --debug --bundles app` | Passed; local macOS bundle at `target/debug/bundle/macos/Synchrome.app` |
 | Native WKWebView UI harness at 720 px | 63 passed, zero failed; `native-validation-narrow.json` |
+| Native WKWebView UI harness at 1512 px | 63 passed, zero failed; `native-validation-wide.json` |
 | Earlier wide native WKWebView run | 50 passed, zero failed; `native-validation.json` |
+| Native pointer/keyboard and resize | Passed; actual 720 × 528 and 1512 × 917 interior sizes, mouse-open/Tab/Escape returns focus to New profile and Delete Work |
+| Packaged production-frontend clean boot | Passed at `tauri://localhost`, 960 × 648 interior; preview absent, isolated native services intentionally unconfigured |
 | Playwright MCP UI checks | 46 passed, zero failed; `playwright-validation.json` |
 | Existing Python integration harness syntax | All 32 parse successfully |
 
@@ -87,9 +91,25 @@ The native harness is reproducible with `NATIVE-TESTING.md`. The Playwright MCP 
 
 The Impeccable frontend detector ran once on the changed Svelte/CSS surfaces and returned no findings. A fresh delegated finish review identified the three attention/cloud/banner issues listed above; they were corrected together and verified with the added product and UI regressions.
 
-The follow-up reviewer confirmed the three functional corrections from code and the executed native assertions. Its visual disposition remains **recapture**: the final attention/cloud/banner regions still need updated native images. Computer Use reported the Mac locked, and the user was asked to unlock it. Existing JPEG captures document the native implementation before that final correction batch; they must not be presented as post-fix visual approval. Native pointer/keyboard resize and fresh auth/Settings captures also remain pending. The completed native DOM runs and their scope are recorded above.
+The follow-up reviewer inspected fresh native narrow, light/dark, pending-cloud and partial-cloud captures and returned **ship** for the three original findings, all scored resolved. `finish-review.md` preserves that scoped verdict; it is not whole-surface approval. The subsequent WKWebView pointer-focus correction was verified separately through actual mouse/Tab/Escape interactions and the strengthened native harness, and the documenter aligned the durable dialog rule.
+
+Computer Use resized the actual macOS window using its native zoom action, entered dummy authentication values, observed inline invalid-email validation and field focus, navigated Profiles/Settings, switched themes, and dismissed dialogs with Escape. A temporary copy of the rebuilt bundle also loaded the embedded production frontend at `tauri://localhost` with no fixture object or banner. Its cloud environment was deliberately empty, so the configuration warning and disabled sign-in fields are expected; no live login was attempted. All tests used isolated native data and restricted browser discovery.
 
 The local `.app` is a debug build with production frontend assets, suitable for local review. It does not replace `/Applications/Synchrome.app` or constitute a signed/notarized release.
+
+## Native capture index
+
+| Evidence | Captures |
+| --- | --- |
+| Overview, final attention and themes | `native-overview-light.jpg`, `native-overview-dark.jpg`, `native-narrow.jpg` |
+| Profiles, Mac/browser hierarchy and creation | `native-profiles-light.jpg`, `native-profiles-dark.jpg`, `native-created-profile.jpg` |
+| Authentication and local validation | `native-auth.jpg`, `native-auth-validation.jpg`, `native-auth-narrow.jpg` |
+| Protected deletion scope | `native-delete.jpg` |
+| Pending cloud state | `native-cloud-pending.jpg`, `native-settings-pending.jpg` |
+| Partial service state and diagnostics | `native-cloud-partial.jpg`, `native-settings-partial.jpg` |
+| Embedded production frontend with isolated, unconfigured native services | `native-packaged-auth.jpg` |
+
+The creation capture records the earlier native run; all other captures were refreshed after the final attention/cloud/banner corrections. JPEG files are original macOS window captures, including native chrome.
 
 ## Durable documentation
 

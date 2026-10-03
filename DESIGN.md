@@ -354,6 +354,10 @@ Navigation stays immediate. Items are 44px high with 8px corners, muted text and
 
 `Dialog.svelte` wraps native `<dialog>`, labels it with generated IDs, contains focus, restores the invoking focus target and protects busy operations from dismissal. The close action has an accessible name. Backdrop dismissal requires a primary pointer press and release outside the dialog; dragging from inside must not close it. Prevent duplicate mutations while a protected operation is in flight.
 
+`App.svelte` applies `use:dialogTrigger` to controls that open dialogs. Its capture-phase click listener focuses the invoking control with `preventScroll: true` before `Dialog.svelte` records `document.activeElement`, because WKWebView does not focus mouse-clicked buttons by default. Preserve this action on new dialog triggers.
+
+**The Invoking Control Rule.** Return focus to the invoking control when it remains in the document, including a control that was unfocused before a mouse click opened the dialog; verify this in the macOS app.
+
 Standard dialog width is bounded to 480px; wide dialogs to 720px. Both use a 48px total window gutter and a maximum height of the viewport minus 64px. Headers use 28px padding and content uses 24px/28px/28px; below 540px, the gutter becomes 24px total, maximum height subtracts 32px and interior padding becomes 22px.
 
 First connection introduces the relationship between a browser, a Synchrome profile and other Macs before browser selection. Keep Explore workspace available. Access problems such as Full Disk Access have specific recovery guidance. Manual creation makes an unconnected shared profile. Import uses the existing create-and-map API, then guides the user through the native connector and companion. Show only relevant setup steps. A stored link is pending; companion confirmation and the first successful upload are distinct milestones. Completion copy requires evidence of first sync.
@@ -388,7 +392,7 @@ Technical panels retain extension settings, preference modes, conflict options, 
 - **Do** keep contextual actions beside the selected profile or browser connection and preserve the profile → Mac → browser hierarchy.
 - **Do** preserve semantic main/navigation/section landmarks, input labels, `aria-current`, icon-button names, visible focus, the skip link and status/error announcements.
 - **Do** exercise frontend flows in both themes with keyboard navigation, errors, empty states and narrow desktop windows.
-- **Do** verify the rebuilt macOS app for boot, authentication fields, native dialogs, dismissal/focus restoration, appearance and window resizing after substantial UI changes.
+- **Do** verify the rebuilt macOS app for boot, authentication fields, native dialogs, dismissal/focus restoration, appearance and window resizing after substantial UI changes. Include opening from a previously unfocused mouse-clicked control and restoring focus after dismissal.
 
 ### Don't:
 

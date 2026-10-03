@@ -89,9 +89,10 @@ class Driver:
             time.sleep(0.15)
         raise AssertionError("Timed out waiting for: " + expression)
 
-    def click(self, name, root="dialog() || document"):
+    def click(self, name, root="dialog() || document", focus=True):
         self.wait(f"btn({json.dumps(name)}, {root}) && !btn({json.dumps(name)}, {root}).disabled")
-        self.evaluate(f"const el=btn({json.dumps(name)}, {root}); el.focus(); el.click(); return true;")
+        focus_statement = "el.focus();" if focus else ""
+        self.evaluate(f"const el=btn({json.dumps(name)}, {root}); {focus_statement} el.click(); return true;")
 
     def fill(self, selector, value):
         self.wait(f"shown(document.querySelector({json.dumps(selector)}))")
@@ -163,11 +164,14 @@ class Suite:
         self.check("Remote connections do not claim a live synced state", "text(document.querySelector('.remote-note')).includes('does not show its live status')")
         self.check("A second local source cannot be connected silently", "btn('Connect browser',document).disabled")
         self.check("Primary profile view hides internal identifiers", "!document.querySelector('.profile-detail').innerText.match(/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/)")
-        d.click("New profile", "document")
+        # Safari/WKWebView does not focus a pointer-clicked button itself.
+        # Start elsewhere and let the UI record the real invoking control.
+        d.evaluate("document.querySelector('#main-content').focus(); return true;")
+        d.click("New profile", "document", focus=False)
         self.check("Native modal has a labelled title and contains focus", "dialog().getAttribute('aria-labelledby') && document.getElementById(dialog().getAttribute('aria-labelledby')) && dialog().contains(document.activeElement)")
         d.evaluate("dialog().dispatchEvent(new Event('cancel',{cancelable:true})); return true;")
         d.wait("!dialog()")
-        self.check("Dialog cancellation restores the invoking control", "text(document.activeElement).includes('New profile')")
+        self.check("Dialog cancellation restores a previously unfocused invoking control", "text(document.activeElement).includes('New profile')")
 
     def create_connect(self):
         d = self.driver

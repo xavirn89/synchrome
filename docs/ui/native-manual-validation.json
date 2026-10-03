@@ -1,0 +1,83 @@
+{
+  "generatedAt": "2026-10-03T20:56:07.999334+00:00",
+  "runtime": "Tauri 2 / native macOS WKWebView",
+  "interactionDriver": "Computer Use (@oai/sky)",
+  "scope": "Real macOS window controls, pointer, keyboard, screenshots; product mutations use token-free in-memory DEV fixtures",
+  "viewports": [
+    {
+      "width": 720,
+      "height": 528,
+      "outerWidth": 720,
+      "outerHeight": 560,
+      "accountBottom": 514,
+      "pageWidth": 720
+    },
+    {
+      "width": 1512,
+      "height": 917,
+      "accountBottom": 903,
+      "pageWidth": 1512
+    }
+  ],
+  "checks": [
+    {
+      "name": "Actual native zoom changes the window from 720\u00d7528 to 1512\u00d7917 and back",
+      "passed": true
+    },
+    {
+      "name": "Account action remains inside both native viewports",
+      "passed": true
+    },
+    {
+      "name": "Native auth accepts dummy input, masks password and focuses Email on invalid-email submission",
+      "passed": true
+    },
+    {
+      "name": "Tab reaches confirmation input after a mouse-opened Delete Work dialog",
+      "passed": true
+    },
+    {
+      "name": "Escape dismisses Delete Work, restores Delete Work focus and retains the fixture profile",
+      "passed": true
+    },
+    {
+      "name": "At 720px, mouse-opened New profile dismisses with Escape and restores New profile focus",
+      "passed": true
+    },
+    {
+      "name": "Native appearance switches to Dark and Light",
+      "passed": true
+    },
+    {
+      "name": "Pending cloud is blue and matches expanded Settings diagnostics",
+      "passed": true
+    },
+    {
+      "name": "Partial cloud is amber and matches Settings auth200/database503/storage200 fixture diagnostics",
+      "passed": true
+    }
+  ],
+  "packagedBoot": {
+    "authLabels": [
+      "Email",
+      "Password"
+    ],
+    "browserCount": 0,
+    "gatedSignin": true,
+    "height": 648,
+    "nativeCloudUnconfigured": true,
+    "nativeSignedOut": true,
+    "previewAbsent": true,
+    "previewBannerAbsent": true,
+    "runtime": true,
+    "title": "Synchrome \u2014 Welcome",
+    "url": "tauri://localhost",
+    "width": 960
+  },
+  "limitations": [
+    "Production-bundle boot used a temporary copy with a distinct macOS bundle identifier and isolated native data.",
+    "Empty SUPABASE environment intentionally disables native login; configuration gating is expected in its screenshot.",
+    "No personal browser data, live account, real cloud mutations, native browser writes or cross-Mac convergence were tested.",
+    "The production bundle is a local debug package, unsigned and not notarized."
+  ]
+}

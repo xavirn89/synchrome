@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-03T19:04:17.639010Z",
+  "generatedAt": "2026-10-03T19:51:43.848267Z",
   "title": "Design System: Synchrome",
   "extensions": {
     "colorMeta": {
@@ -612,7 +612,7 @@
       "name": "Native Dialog Surface",
       "kind": "custom",
       "refersTo": "dialog",
-      "description": "Visual preview of Dialog.svelte; runtime focus containment, dismissal guards and focus restoration remain native application behavior.",
+      "description": "Visual preview of Dialog.svelte; runtime trigger focus capture, native focus containment, dismissal guards and restoration to a connected invoking control remain application behavior.",
       "html": "<section class=\"ds-dialog\" role=\"dialog\" aria-labelledby=\"ds-dialog-title\" aria-describedby=\"ds-dialog-description\"><header class=\"ds-dialog-header\"><div class=\"ds-dialog-heading\"><h2 id=\"ds-dialog-title\">Create a profile</h2><p id=\"ds-dialog-description\">Give your shared browsing workspace a name.</p></div><button type=\"button\" class=\"ds-dialog-close\" aria-label=\"Close dialog\"><svg width=\"19\" height=\"19\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\" focusable=\"false\"><path d=\"m6 6 12 12\" /><path d=\"M18 6 6 18\" /></svg></button></header><div class=\"ds-dialog-content\"><label class=\"ds-dialog-field\" for=\"ds-dialog-name\">Profile name<input id=\"ds-dialog-name\" placeholder=\"For example, Work\" /></label></div></section>",
       "css": ".ds-dialog{width:min(480px,calc(100vw - 48px));max-height:calc(100dvh - 64px);margin:auto;padding:0;border:0;border-radius:16px;background:var(--surface);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;box-shadow:0 24px 72px rgb(0 0 0 / 24%);overflow:auto;}.ds-dialog-header{display:flex;align-items:flex-start;gap:24px;padding:28px 28px 0;}.ds-dialog-heading{min-width:0;flex:1;}.ds-dialog-heading h2{margin:0;font-size:20px;line-height:1.35;font-weight:650;letter-spacing:-.025em;overflow-wrap:anywhere;}.ds-dialog-heading p{margin:9px 0 0;color:var(--muted);font-size:14px;line-height:1.6;overflow-wrap:anywhere;}.ds-dialog-close{display:grid;place-items:center;flex-shrink:0;width:36px;height:36px;margin:-5px -7px 0 0;padding:0;border:0;border-radius:8px;color:var(--muted);background:transparent;cursor:pointer;}.ds-dialog-close:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}.ds-dialog-close:active{background:var(--accent-soft);}.ds-dialog-close:disabled{opacity:.4;cursor:default;}.ds-dialog-content{padding:24px 28px 28px;}.ds-dialog-field{display:grid;gap:8px;font-size:13px;font-weight:600;}.ds-dialog-field input{box-sizing:border-box;min-width:0;min-height:42px;padding:10px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;font-weight:400;color:var(--fg);background:var(--surface);border:1px solid var(--line);border-radius:8px;caret-color:var(--accent);}.ds-dialog-field input:focus{border-color:var(--accent);}.ds-dialog-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }.ds-dialog-field input::placeholder{color:var(--muted);}@media(hover:hover) and (pointer:fine){.ds-dialog-close:hover:not(:disabled){background:var(--bg);color:var(--fg);}}@media(max-width:540px){.ds-dialog{width:calc(100vw - 24px);max-height:calc(100dvh - 32px);}.ds-dialog-header{padding:22px 22px 0;}.ds-dialog-content{padding:22px;}}"
     }
@@ -647,6 +647,11 @@
         "name": "The Quiet Surface Rule",
         "body": "Separate content with shared surface tones and thin borders; reserve strong elevation for modal dialogs and action feedback.",
         "section": "elevation"
+      },
+      {
+        "name": "The Invoking Control Rule",
+        "body": "Return focus to the invoking control when it remains in the document, including a control that was unfocused before a mouse click opened the dialog; verify this in the macOS app.",
+        "section": "components"
       }
     ],
     "dos": [
@@ -656,7 +661,7 @@
       "**Do** keep contextual actions beside the selected profile or browser connection and preserve the profile → Mac → browser hierarchy.",
       "**Do** preserve semantic main/navigation/section landmarks, input labels, `aria-current`, icon-button names, visible focus, the skip link and status/error announcements.",
       "**Do** exercise frontend flows in both themes with keyboard navigation, errors, empty states and narrow desktop windows.",
-      "**Do** verify the rebuilt macOS app for boot, authentication fields, native dialogs, dismissal/focus restoration, appearance and window resizing after substantial UI changes."
+      "**Do** verify the rebuilt macOS app for boot, authentication fields, native dialogs, dismissal/focus restoration, appearance and window resizing after substantial UI changes. Include opening from a previously unfocused mouse-clicked control and restoring focus after dismissal."
     ],
     "donts": [
       "**Don't** introduce independent palettes, decorative metrics grids, topology canvases, glyph icons or ornamental page/list motion into the workspace.",

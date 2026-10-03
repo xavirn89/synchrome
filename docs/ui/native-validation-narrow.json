@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-03T18:55:48.854743+00:00",
+  "generatedAt": "2026-10-03T20:56:20.565326+00:00",
   "runtime": "Tauri 2 / native macOS WKWebView",
   "driver": "/private/tmp/synchrome-ui-native/driver",
   "scope": "Real desktop frontend and dialogs; auth/cloud/companion operations use token-free DEV fixtures",
@@ -54,7 +54,7 @@
       "passed": true
     },
     {
-      "name": "Dialog cancellation restores the invoking control",
+      "name": "Dialog cancellation restores a previously unfocused invoking control",
       "passed": true
     },
     {
