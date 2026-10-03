@@ -94,6 +94,7 @@ Install → Sign in → "Your account has: Personal, Trabajo, Dev"
 ## 3. Runtime behaviour
 
 - **Login start**: `synchromed` starts, refreshes the session from the keychain, subscribes to store change notifications (Supabase Realtime) or starts polling (other stores), checks the pending-apply queue for profiles that are closed.
+- **Realtime wake-up (slice 13, `03` §3.7 A)**: one supervised WebSocket per signed-in account in the app process (`tokio-tungstenite`, explicit `User-Agent`), Phoenix join of `postgres_changes` INSERT on `public.store_events` with the user's access token; events → per-profile dirty flag → coalesced early sync (500 ms debounce, ≤ 1 in flight + 1 trailing, ≥ 2 s apart); backoff 1–60 s; a catch-up sync of every mapped profile after each (re)connect; torn down on logout / account change. The periodic 30 s loop is unchanged.
 - **Browser open, extension present**: live loop — events → ops → debounce (60 s) → push; incoming ops → live applies immediately; file-level changes accumulate in the pending plan; tray/popup show "N changes apply when you close the browser".
 - **Browser open, extension absent**: file-mode capture every 15 min from live-safe files; same pending plan for applies.
 - **Browser closes**: liveness clears → grace period → authoritative snapshots → execute plan with backups → verify → push resulting ops.

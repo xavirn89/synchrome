@@ -253,3 +253,70 @@ delta; Helium restart continues with 0 new ops; cloud unreachable → changes qu
 and published after recovery with contiguous `seq`; user B cannot list, read or write A's
 objects (GET → not found, PUT into A's profile → 403 by `synchrome_journal_object_ok`) nor
 see or insert A's `store_events`; cleanup purges the objects and rows (accounts back to 0).
+
+## 0005 — compaction metadata (`sync_cursors`, `profile_snapshots`) + Realtime on `store_events`
+
+- Migration: [`0005_compaction_realtime.sql`](0005_compaction_realtime.sql)
+- Rollback:  [`0005_compaction_realtime.rollback.sql`](0005_compaction_realtime.rollback.sql)
+- Spec: `docs/03` §3.7 (M1 slice 13). **Status: written, NOT applied — awaiting review.**
+
+### What it creates / modifies
+
+| Object | Kind | Notes |
+|---|---|---|
+| `public.sync_cursors` | table | PK `(profile_id, device_id)`; `applied jsonb {source device: applied_through}`, `published_through`, `snapshot_generation`, `updated_at` (server time), `retired_at`. Composite FKs to `profiles` / `devices` (cascade). RLS enabled + forced, 4 owner policies. Column grants: insert/update only the client-owned columns. |
+| `public.synchrome_sync_cursors_touch()` | trigger function (INVOKER) | `updated_at := now()` when cursors change; a change that only sets/clears `retired_at` (another device retiring this one) does not count as activity. |
+| `public.profile_snapshots` | table | unique `(profile_id, generation)` = compaction lock; `state building → ready → superseded`; `manifest_path` (checked: own profile, zero-padded generation), `manifest_sha256` (hex 64), `watermarks`, `counts`, `bytes`, `claimed_at`, `expires_at` (+30 min), `ready_at`. FK to `profiles` (cascade); `created_by` has **no** FK on purpose (deleting a device must not delete the snapshot holding its folded history). Partial index on ready rows. RLS enabled + forced, 4 owner policies; insert grant only `(profile_id, generation, created_by)`, update grant only state + manifest/metadata columns. |
+| `public.synchrome_profile_snapshots_guard()` | trigger function (INVOKER) | insert: generation must be latest + 1, server sets state/timestamps; update: only `building → ready` (claim not expired; sets `ready_at`), `ready → superseded` (contents frozen), `building → building`; identity columns immutable. |
+| `public.synchrome_snapshot_object_ok(text)` | function (INVOKER) | Storage name check for `<uid>/profiles/<profile>/snapshots/<generation:10>/(manifest.json | <collection>-<nnnn>.jsonl)`, only while the caller's row of that generation is `building` and unexpired. |
+| `synchrome_stores_insert` / `synchrome_stores_update` | storage.objects policies (replaced) | `journal_ok(name) OR snapshot_ok(name)`; select/delete policies of 0004 unchanged. |
+| publication `supabase_realtime` | add table `public.store_events` | only if the publication exists (NOTICE otherwise). Realtime enforces `store_events_select` with the subscriber's JWT. |
+
+Nothing is deleted or rewritten by the migration itself; compaction deletes folded journals
+later through the DELETE policies 0004 already grants (own account only).
+
+### How Codex should apply it (on the Synchrome server) — after review
+
+```bash
+psql "$SYNCHROME_DATABASE_URL" -v ON_ERROR_STOP=1 -f 0005_compaction_realtime.sql
+# or: docker exec -i supabase-db psql -U postgres -d postgres -v ON_ERROR_STOP=1 < 0005_compaction_realtime.sql
+```
+
+Verification query:
+
+```sql
+select to_regclass('public.sync_cursors') is not null                                         as cursors_ok,
+       to_regclass('public.profile_snapshots') is not null                                    as snapshots_ok,
+       (select relforcerowsecurity from pg_class where relname = 'sync_cursors')              as cursors_forced,
+       (select relforcerowsecurity from pg_class where relname = 'profile_snapshots')         as snapshots_forced,
+       (select count(*) from pg_policies where tablename = 'sync_cursors')                    as cursors_policies,   -- 4
+       (select count(*) from pg_policies where tablename = 'profile_snapshots')               as snapshots_policies, -- 4
+       (select count(*) from pg_trigger where tgname in ('sync_cursors_touch', 'profile_snapshots_guard')) as triggers, -- 2
+       to_regprocedure('public.synchrome_snapshot_object_ok(text)') is not null               as snapshot_name_fn,
+       (select bool_or(prosecdef) from pg_proc where proname like 'synchrome_%')               as any_security_definer, -- false
+       (select count(*) from pg_policies where schemaname = 'storage' and tablename = 'objects'
+          and policyname like 'synchrome_stores_%')                                            as storage_policies,   -- 4
+       exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime'
+                 and schemaname = 'public' and tablename = 'store_events')                    as realtime_store_events;
+select table_name, privilege_type, column_name from information_schema.column_privileges
+ where table_name in ('sync_cursors', 'profile_snapshots') and grantee = 'authenticated' order by 1, 2, 3;
+```
+
+Then `NOTIFY pgrst, 'reload schema';` so PostgREST exposes the new tables. If the Realtime
+container caches publications, restart it (`docker restart supabase-realtime`) so it picks up
+`store_events`.
+
+**Rollback**: refuses while any `ready` snapshot exists (dropping the row would orphan
+compacted history). On an instance where compaction ran, the folded journals are gone; keep
+0005 or re-expand first. Snapshot objects in Storage are not removed by SQL: delete them with
+the Storage API (`<uid>/profiles/*/snapshots/`) before or after.
+
+### Validation Claude Code runs afterwards (URL + anon + two test users; no DB access)
+
+`tests/experiments/e2e_compaction.py <creds>` (slice 13): Realtime join with the user JWT
+receives A's `store_events` INSERTs and never B's; a snapshot claim / upload / ready cycle;
+upload outside a building claim → 403; ready snapshot cannot be overwritten (403) nor edited
+(trigger); generation skip / reuse refused; `sync_cursors` activity is server time and
+unchanged by a retirement; user B cannot read, claim, write or delete A's cursors, snapshots
+or snapshot objects; folded journals deleted only after `ready`; cleanup leaves both accounts
+at 0 rows / 0 objects.
