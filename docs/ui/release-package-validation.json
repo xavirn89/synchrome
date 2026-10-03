@@ -1,0 +1,62 @@
+{
+  "validationDate": "2026-10-03",
+  "applicationSourceCommit": "665054d",
+  "signatureValid": true,
+  "developerIdSigned": true,
+  "hardenedRuntime": true,
+  "version": "1.0.0",
+  "architecture": "arm64",
+  "previewFixtureChunkAbsent": true,
+  "dummyAccountAbsentFromProductionJs": true,
+  "fixtureGlobalAbsentFromProductionJs": true,
+  "bundleEnvAbsent": true,
+  "liveServiceHealth": [
+    {
+      "service": "authentication",
+      "status": 200,
+      "passed": true,
+      "latencyMs": 404,
+      "errorType": null
+    },
+    {
+      "service": "database",
+      "status": 200,
+      "passed": true,
+      "latencyMs": 520,
+      "errorType": null
+    },
+    {
+      "service": "storage",
+      "status": 200,
+      "passed": true,
+      "latencyMs": 316,
+      "errorType": null
+    }
+  ],
+  "liveLoginAttempted": false,
+  "desktopInstaller": "/Users/xavirn/Desktop/Synchrome-1.0.0-macOS-AppleSilicon.dmg",
+  "installerBytes": 6832175,
+  "installerSha256": "202349de333020a29296aad49659aa9b78b3c39bbde52ae5ad5a672b87d863a7",
+  "diskImageIntegrityVerified": true,
+  "firstLaunchFromDmg": {
+    "runtime": "macOS WKWebView",
+    "url": "tauri://localhost",
+    "emailAndPasswordEnabled": true,
+    "cloudConfigurationWarningAbsent": true,
+    "previewBannerAbsent": true,
+    "signedOut": true
+  },
+  "notarized": false,
+  "gatekeeperAssessment": "Unnotarized Developer ID",
+  "buildMode": "release, optimized; local-only packaging; no Apple notarization upload",
+  "handoffCleanup": {
+    "storedSessionAbsent": true,
+    "allStateTablesEmptyBeforeRemoval": true,
+    "appDataDirectoryRemoved": true,
+    "runtimeCachesRemoved": true,
+    "testProcessesClosed": true,
+    "previewServerStopped": true,
+    "isolatedTestDirectoriesRemoved": true,
+    "personalBrowserDataChanged": false
+  }
+}

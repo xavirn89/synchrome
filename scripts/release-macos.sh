@@ -17,9 +17,17 @@
 #      no .env, no developer paths, and prints the artefact hashes.
 #
 # Nothing here prints a secret. Run from the repository root:  scripts/release-macos.sh
+# Pass --local-only to sign and package locally without any notarization upload.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
+LOCAL_ONLY=0
+case "${1:-}" in
+  "") ;;
+  --local-only) LOCAL_ONLY=1 ;;
+  *) echo "usage: scripts/release-macos.sh [--local-only]"; exit 2 ;;
+esac
+if [[ $# -gt 1 ]]; then echo "usage: scripts/release-macos.sh [--local-only]"; exit 2; fi
 
 if [[ -f .env ]]; then
   # publishable values only; .env is git-ignored and never bundled
@@ -48,12 +56,18 @@ else
 fi
 
 NOTARIZE=0
-if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]]; then NOTARIZE=1; fi
-if [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then NOTARIZE=1; fi
+if [[ $LOCAL_ONLY == 0 ]]; then
+  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]]; then NOTARIZE=1; fi
+  if [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then NOTARIZE=1; fi
+fi
 if [[ $NOTARIZE == 1 ]]; then
   echo "notary credentials present: Tauri will notarize and staple"
 else
-  echo "no notary credentials in the environment: building a SIGNED, UN-NOTARIZED bundle"
+  if [[ $LOCAL_ONLY == 1 ]]; then
+    echo "local-only build: no notarization upload; building a SIGNED, UN-NOTARIZED bundle"
+  else
+    echo "no notary credentials in the environment: building a SIGNED, UN-NOTARIZED bundle"
+  fi
   # make sure Tauri does not pick up partial settings
   unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH || true
 fi

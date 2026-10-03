@@ -46,19 +46,24 @@ Data lives in Synchrome Cloud (the project's private Supabase). Other stores (Gi
 
 ## Install and run (macOS)
 
-1. Open the DMG and drag **Synchrome** to **Applications**; open it from there (the app refuses
-   to register its browser connector from a disk image or a translocated copy).
-2. Sign in or create an account (private Synchrome Cloud).
-3. **Full Disk Access** — only for Google Chrome, Brave and Edge: macOS protects their profile
-   folders and never asks on its own. Add Synchrome under *System Settings → Privacy & Security →
-   Full Disk Access* and press *Re-check*. Helium needs nothing.
-4. Next to a browser profile press *Create Synchrome profile* (or map it to an existing one),
-   press *Install connector* for that browser, then load the companion extension once:
-   in the browser open `chrome://extensions`, enable *Developer mode*, *Load unpacked*, and pick
-   the folder *Show extension folder* reveals (`Synchrome.app/Contents/Resources/extension`).
-   Open the extension's popup once; the profile shows **Extension confirmed**.
-5. Bookmarks and extension state sync live; extension settings and preferences sync whenever
-   the browser is closed. The *Getting started* card in the app tracks these steps.
+1. Open the DMG and drag **Synchrome** to **Applications**, replacing an earlier copy if
+   present. Open it from Applications: browser connector installation requires that stable location.
+2. Sign in or create a Synchrome Cloud account. Confirm your email if account creation asks you to.
+3. For **Google Chrome**, grant Synchrome **Full Disk Access** under *System Settings →
+   Privacy & Security → Full Disk Access*, then reopen Synchrome or refresh the workspace.
+   Helium does not need this permission. Chrome and Helium are the validated v1 browsers.
+4. Choose a browser during onboarding, or open **Profiles → New profile** and use a browser
+   profile as the initial source. *Start fresh* creates an unconnected Synchrome profile;
+   *Connect browser* links a browser to an existing one. Each Synchrome profile supports one
+   browser connection per Mac. Close the browser when the setup flow asks you to.
+5. In **Finish setup**, choose **Install connector**, then restart the browser. Open
+   `chrome://extensions`, enable *Developer mode*, choose *Load unpacked*, and select the folder
+   revealed by **Show companion folder** (`Synchrome.app/Contents/Resources/extension`).
+   Open the companion popup and choose **Check connection** in Synchrome. Wait for the first
+   sync to complete; a stored connection alone does not mean browser data has been imported.
+6. Bookmarks and extension state can then sync live. Extension settings and supported browser
+   preferences are optional: enable them for the connection when wanted. They are applied only
+   while the browser is closed. Passwords, cookies and sessions are never synchronized.
 
 **Notarization:** the 1.0 DMG is signed with Developer ID but not notarized yet (pending notary
 credentials). On another Mac, macOS blocks the first launch: open *System Settings → Privacy &
@@ -69,7 +74,8 @@ Security* and choose *Open Anyway* once (or wait for the notarized build).
 app ships only the public cloud URL and anon key (RLS protects the data), never an admin secret.
 
 Release build: `scripts/release-macos.sh` (embedded frontend, Developer ID signature, `.app` +
-`.dmg`, bundle audit; notarizes when notary credentials are in the environment).
+`.dmg`, bundle audit; notarizes when notary credentials are in the environment). Use
+`scripts/release-macos.sh --local-only` to sign and package without uploading to Apple.
 
 ## Development
 

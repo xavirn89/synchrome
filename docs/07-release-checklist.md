@@ -69,6 +69,40 @@ Evidence: slices 7–13 E2E on Helium; `e2e_chrome.py` (23/23 cloud + 7/7 local)
 
 | Step | Status |
 |---|---|
-| Final health check of the Supabase instance | ☐ (after server cleanup, by the user / Codex) |
+| Public service health check of the Supabase instance | ✅ 2026-10-03: authentication, database and storage returned HTTP 200; read-only anonymous probes |
 | Remove temporary Auth users (slice E2E) | ☐ |
 | Remove the pre-0005 backup and the temporary SQL files | ☐ |
+
+## UI overhaul delivery — 2026-10-03
+
+This delivery rebuilds application commit `665054d` with the current UI overhaul. Earlier
+live browser/cloud E2E results above are historical integration evidence; they were not rerun
+against this installer. No real cloud account was created during the UI acceptance work:
+its sample account existed only in the explicit, token-free development preview.
+
+| Gate | Current delivery evidence |
+|---|---|
+| Product and native safety checks | Formatting, workspace clippy and workspace tests passed, including seven deletion safety tests; [UI overhaul report](ui/OVERHAUL.md) |
+| Frontend checks | 37 Node tests and production build passed; 46 Playwright UI assertions passed |
+| Native UI acceptance | WKWebView: 63/63 assertions at each of 720 × 528 and 1512 × 917; additional native pointer, keyboard, dialog focus and resize checks passed |
+| Production packaging | `scripts/release-macos.sh --local-only` completed; optimized arm64 `.app` and DMG for macOS 12+ |
+| Production bundle audit | Embedded frontend and companion; no preview fixtures, development hooks, developer paths, administrative secrets or bundled `.env` |
+| Signature and DMG integrity | Developer ID Application signature verified deep/strict, hardened runtime and timestamp; `hdiutil verify` passed |
+| Production first launch | Actual app inside the mounted DMG opened in WKWebView at `tauri://localhost`, without configuration environment variables: enabled auth fields, signed out, no missing-cloud-configuration warning or preview UI |
+| Live service health | Authentication, database and storage each returned HTTP 200 with public anonymous probes; no login or cloud mutation attempted |
+| Cleanup | Preview processes and server stopped; sample accounts/data, isolated test folders and app runtime caches removed; no Keychain session; all 17 local state tables empty before removing the fresh app data directory; personal browser data unchanged |
+| Desktop handoff | `~/Desktop/Synchrome-1.0.0-macOS-AppleSilicon.dmg`, 6,832,175 bytes; hash matches the built DMG |
+| Notarization | Not performed. Automatic approval review rejected a script capable of uploading the package to Apple; the approved local-only build prevents that upload. Notary credentials are also absent. Gatekeeper reports `Unnotarized Developer ID`; successful local launch does not establish notarized distribution approval. |
+
+Installer SHA-256:
+
+```text
+202349de333020a29296aad49659aa9b78b3c39bbde52ae5ad5a672b87d863a7
+```
+
+Machine-readable delivery evidence: [release-package-validation.json](ui/release-package-validation.json).
+Native production first launch: [release-first-launch.jpg](ui/release-first-launch.jpg).
+Install by dragging the app into Applications and replacing the previous copy before configuring
+browser connectors. The delivery contains no signed-in account or personal browser data.
+The older server-maintenance tasks above require their original server/account context and
+remain separate from removal of this UI preview's fictitious account.
