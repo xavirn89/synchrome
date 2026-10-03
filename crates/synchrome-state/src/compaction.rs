@@ -49,7 +49,13 @@ pub struct SnapshotRow {
 /// `synchrome_compaction_status(profile)`: every time-based decision, database clock.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactionStatus {
+    /// Database clock when the status was read (RFC 3339), informational.
+    #[serde(default)]
+    pub server_now: Option<String>,
     pub current_generation: Option<u64>,
+    /// When the current generation became ready (database clock), informational.
+    #[serde(default)]
+    pub current_ready_at: Option<String>,
     pub previous_generation: Option<u64>,
     pub journal_gc_watermarks: Option<BTreeMap<String, u64>>,
     pub gc_blockers: u32,
@@ -479,6 +485,102 @@ pub async fn fetch_snapshot<S: JournalSink>(
 
 // ------------------------------------------------------------------ compaction
 
+/// Why a cloud fold could not be built.
+#[derive(Debug)]
+pub enum FoldError {
+    Sink(SinkError),
+    /// The cloud data is unusable (missing/rejected chunk, unusable base, limits).
+    Bad(String),
+}
+
+/// The shared state a generation with watermarks `wm` holds: the `base` ready snapshot (if
+/// any) plus every published op in `(W(base), wm]` per source device, from cloud journals only.
+pub async fn fold_cloud<S: JournalSink>(
+    sink: &S,
+    base: Option<&SnapshotRow>,
+    events: &[RemoteEvent],
+    wm: &BTreeMap<String, u64>,
+) -> Result<Fold, FoldError> {
+    let lo = base.map(|c| c.watermarks.clone()).unwrap_or_default();
+    let mut fold = Fold::new();
+    if let Some(c) = base {
+        let (_, cols) = fetch_snapshot(sink, c)
+            .await
+            .map_err(|e| FoldError::Bad(format!("base snapshot unusable: {e}")))?;
+        for (col, recs) in cols {
+            fold.load(&col, recs)
+                .map_err(|e| FoldError::Bad(e.to_string()))?;
+        }
+    }
+    for e in events {
+        let low = lo.get(&e.device_id).copied().unwrap_or(0);
+        let high = wm.get(&e.device_id).copied().unwrap_or(0);
+        if e.seq_to <= low || e.seq_to > high {
+            continue;
+        }
+        let bytes = sink
+            .get_chunk(&e.path)
+            .await
+            .map_err(FoldError::Sink)?
+            .ok_or_else(|| {
+                FoldError::Bad("a journal chunk below the watermark is missing".into())
+            })?;
+        let ops = crate::pull::verify_chunk(&bytes, e)
+            .map_err(|why| FoldError::Bad(format!("journal rejected: {why}")))?;
+        for op in &ops {
+            fold.apply(op)
+                .map_err(|err| FoldError::Bad(err.to_string()))?;
+        }
+    }
+    Ok(fold)
+}
+
+/// Rebuild generation `generation` of a profile independently (verification only, nothing is
+/// uploaded): from its previous ready generation + journals when `from_previous`, else from the
+/// journals alone. Equal parts prove the build is deterministic and independent of the path.
+pub async fn rebuild<S: CompactionSink>(
+    sink: &S,
+    profile_id: Uuid,
+    generation: u64,
+    from_previous: bool,
+) -> Result<sn::Built, String> {
+    let rows = sink
+        .list_snapshots(profile_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let target = rows
+        .iter()
+        .find(|r| r.generation == generation && r.state != "building")
+        .ok_or("no such ready generation")?;
+    let base = if from_previous {
+        rows.iter()
+            .filter(|r| r.state == "ready" && r.generation < generation)
+            .max_by_key(|r| r.generation)
+    } else {
+        None
+    };
+    let events = sink
+        .list_events(profile_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let fold = fold_cloud(sink, base, &events, &target.watermarks)
+        .await
+        .map_err(|e| match e {
+            FoldError::Sink(e) => e.to_string(),
+            FoldError::Bad(r) => r,
+        })?;
+    sn::build(
+        fold,
+        &profile_id.to_string(),
+        generation,
+        base.map(|b| b.generation),
+        "rebuild",
+        "rebuild",
+        target.watermarks.clone(),
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum CompactionOutcome {
@@ -573,39 +675,11 @@ pub async fn compact<S: CompactionSink>(
         Ok(CompactionOutcome::Failed { reason })
     };
     // fold: the current ready snapshot + every published op above it, up to the watermarks
-    let mut fold = Fold::new();
-    if let Some(c) = &current {
-        match fetch_snapshot(sink, c).await {
-            Ok((_, cols)) => {
-                for (col, recs) in cols {
-                    if let Err(e) = fold.load(&col, recs) {
-                        return fail(db, e.to_string());
-                    }
-                }
-            }
-            Err(e) => return fail(db, format!("base snapshot unusable: {e}")),
-        }
-    }
-    for e in &events {
-        let low = lo.get(&e.device_id).copied().unwrap_or(0);
-        let high = wm.get(&e.device_id).copied().unwrap_or(0);
-        if e.seq_to <= low || e.seq_to > high {
-            continue;
-        }
-        let bytes = match sink.get_chunk(&e.path).await? {
-            Some(b) => b,
-            None => return fail(db, "a journal chunk below the watermark is missing".into()),
-        };
-        let ops = match crate::pull::verify_chunk(&bytes, e) {
-            Ok(o) => o,
-            Err(why) => return fail(db, format!("journal rejected: {why}")),
-        };
-        for op in &ops {
-            if let Err(err) = fold.apply(op) {
-                return fail(db, err.to_string());
-            }
-        }
-    }
+    let fold = match fold_cloud(sink, current.as_ref(), &events, &wm).await {
+        Ok(f) => f,
+        Err(FoldError::Sink(e)) => return Err(e),
+        Err(FoldError::Bad(reason)) => return fail(db, reason),
+    };
     let created = format!("{now}");
     let built = match sn::build(
         fold,
@@ -978,6 +1052,11 @@ impl StateDb {
                     Ok(parts.join("\u{1f}"))
                 })?
                 .collect::<Result<_, _>>()?;
+            let rows = if col == "extensions" {
+                rows.into_iter().map(|r| modeled_ext_row(&r)).collect()
+            } else {
+                rows
+            };
             out.insert(col.to_string(), rows);
         }
         Ok(out)
@@ -1002,5 +1081,40 @@ impl StateDb {
                 )
             })
             .collect())
+    }
+}
+
+/// Extension ops also carry the constant `type` field, which no device models: the device that
+/// captured an extension keeps its HLC in `field_hlc`, receivers do not. The shared state of an
+/// extension is its modeled fields (`name`, `version`, `source`, `enabled`) and their HLCs.
+fn modeled_ext_row(row: &str) -> String {
+    const MODELED: [&str; 4] = ["enabled", "name", "source", "version"];
+    let mut parts: Vec<String> = row.split('\u{1f}').map(str::to_string).collect();
+    if let Some(fh) = parts.get_mut(6) {
+        if let Ok(m) = serde_json::from_str::<BTreeMap<String, String>>(fh) {
+            let kept: BTreeMap<String, String> = m
+                .into_iter()
+                .filter(|(k, _)| MODELED.contains(&k.as_str()))
+                .collect();
+            *fh = serde_json::to_string(&kept).unwrap_or_default();
+        }
+    }
+    parts.join("\u{1f}")
+}
+
+#[cfg(test)]
+mod shared_state_tests {
+    use super::modeled_ext_row;
+
+    #[test]
+    fn the_unmodeled_constant_type_field_does_not_split_the_extensions_digest() {
+        let row = |fh: &str| ["abc", "Dummy", "1.0", "webstore", "1", "0", fh, ""].join("\u{1f}");
+        let captured =
+            row(r#"{"enabled":"h1","name":"h1","source":"h1","type":"h1","version":"h1"}"#);
+        let received = row(r#"{"enabled":"h1","name":"h1","source":"h1","version":"h1"}"#);
+        assert_eq!(modeled_ext_row(&captured), modeled_ext_row(&received));
+        // a real difference in a modeled field still shows
+        let newer = row(r#"{"enabled":"h2","name":"h1","source":"h1","version":"h1"}"#);
+        assert_ne!(modeled_ext_row(&newer), modeled_ext_row(&received));
     }
 }

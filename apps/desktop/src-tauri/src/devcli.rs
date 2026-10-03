@@ -1250,7 +1250,7 @@ async fn run_async(args: &[String]) -> i32 {
                     serde_json::json!({ "rows": v.iter().map(|r| serde_json::json!({
                     "device_id": r.device_id, "applied": r.applied, "published_through": r.published_through,
                     "snapshot_generation": r.snapshot_generation, "snapshot_protocol": r.snapshot_protocol,
-                    "retired": r.retired_at.is_some(), "updated_at": r.updated_at,
+                    "retired": r.retired_at.is_some(), "retired_at": r.retired_at, "updated_at": r.updated_at,
                 })).collect::<Vec<_>>() }),
                 ),
                 Err(e) => fail(e),
@@ -1264,7 +1264,13 @@ async fn run_async(args: &[String]) -> i32 {
             let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
                 return fail("not signed in");
             };
-            match cloud.retire_device(&session, pid, dev).await {
+            // optional 3rd arg: the client time to SEND (the database must ignore it)
+            let r = if arg(3).is_empty() {
+                cloud.retire_device(&session, pid, dev).await
+            } else {
+                cloud.retire_device_at(&session, pid, dev, &arg(3)).await
+            };
+            match r {
                 Ok(()) => out(serde_json::json!({ "retired": true })),
                 Err(e) => fail(e),
             }
@@ -1337,8 +1343,56 @@ async fn run_async(args: &[String]) -> i32 {
                     b"{}".to_vec(),
                 )
                 .await;
+            // more writes against A's ids (all must change nothing)
+            let journal_delete = cloud
+                .delete_objects_by_full_name(
+                    &session,
+                    &[format!("{acct}/profiles/{pid}/journal/{dev}")],
+                )
+                .await;
+            let snap_delete = cloud.delete_snapshot_row(&session, pid, 1).await;
+            let supersede = cloud.mark_snapshot_superseded(&session, pid, 1).await;
+            let ready = cloud
+                .mark_snapshot_ready(
+                    &session,
+                    pid,
+                    1,
+                    &format!("profiles/{pid}/snapshots/0000000001/manifest.json"),
+                    &"0".repeat(64),
+                    &Default::default(),
+                    &Default::default(),
+                    0,
+                )
+                .await;
+            let cursor_write = cloud
+                .report_cursor_row(
+                    &session,
+                    &synchrome_cloud::compaction::CursorReportDto {
+                        profile_id: pid,
+                        device_id: dev,
+                        applied: Default::default(),
+                        published_through: 0,
+                        snapshot_generation: None,
+                        snapshot_protocol: 1,
+                    },
+                )
+                .await;
+            let events = cloud
+                .list_store_events(&session, pid)
+                .await
+                .map(|v| v.len());
+            let rename = cloud.rename_profile(&session, pid, "probe").await;
+            let delete = cloud.delete_profile(&session, pid).await;
             out(serde_json::json!({
                 "as_user": session.user_id,
+                "journal_delete_count": journal_delete.as_ref().ok().copied(),
+                "snapshot_row_delete": snap_delete.as_ref().ok().copied(),
+                "supersede_refused_or_noop": supersede.is_err() || snaps.as_ref().is_ok_and(|n| *n == 0),
+                "mark_ready_refused": ready.is_err(),
+                "cursor_write_refused": cursor_write.is_err(),
+                "store_events_visible": events.as_ref().ok().copied(),
+                "profile_rename_refused": rename.is_err(),
+                "profile_delete_refused": delete.is_err(),
                 "snapshot_rows_visible": snaps.ok(),
                 "status_sees_generation": status.as_ref().ok().map(|s| s.current_generation.is_some()),
                 "status_blockers": status.as_ref().ok().map(|s| s.gc_blockers),
@@ -1349,6 +1403,186 @@ async fn run_async(args: &[String]) -> i32 {
                 "snapshot_object_readable": read.map(|o| o.is_some()).unwrap_or(false),
                 "snapshot_write_refused": write.is_err(),
             }))
+        }
+        // A fixture device's sync_cursors row (old client = protocol 0, upgraded = 1); the
+        // fixture has applied nothing.
+        "--dev-fixture-cursor" => {
+            let (Ok(pid), Ok(dev), Ok(proto)) = (
+                Uuid::parse_str(&arg(1)),
+                Uuid::parse_str(&arg(2)),
+                arg(3).parse::<i32>(),
+            ) else {
+                return fail("usage: --dev-fixture-cursor <profile> <device> <protocol>");
+            };
+            let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
+                return fail("not signed in");
+            };
+            let row = synchrome_cloud::compaction::CursorReportDto {
+                profile_id: pid,
+                device_id: dev,
+                applied: Default::default(),
+                published_through: 0,
+                snapshot_generation: None,
+                snapshot_protocol: proto,
+            };
+            match cloud.report_cursor_row(&session, &row).await {
+                Ok(()) => out(serde_json::json!({ "written": true })),
+                Err(e) => fail(e),
+            }
+        }
+        // Snapshot rows of a profile (generation, state, bytes) — also after a deletion.
+        "--dev-snapshot-rows" => {
+            let Ok(pid) = Uuid::parse_str(&arg(1)) else {
+                return fail("usage: --dev-snapshot-rows <profile>");
+            };
+            let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
+                return fail("not signed in");
+            };
+            match cloud.list_snapshot_rows(&session, pid).await {
+                Ok(v) => out(
+                    serde_json::json!({ "rows": v.iter().map(|r| serde_json::json!({
+                    "generation": r.generation, "state": r.state, "bytes": r.bytes,
+                })).collect::<Vec<_>>() }),
+                ),
+                Err(e) => fail(e),
+            }
+        }
+        // Independent verification of a generation as stored in the cloud: manifest hash vs
+        // row, manifest fields, every part's hash/size/NDJSON/entity counts, record keys.
+        // Counts, hashes and key names only (no values).
+        "--dev-snapshot-verify" => {
+            let (Ok(mid), Ok(generation)) = (Uuid::parse_str(&arg(1)), arg(2).parse::<u64>())
+            else {
+                return fail("usage: --dev-snapshot-verify <mapping> <generation>");
+            };
+            let pid = match bookmarks::own_profile_pub(&state, mid) {
+                Ok((_, p)) => p,
+                Err(e) => return fail(e),
+            };
+            use synchrome_state::compaction::CompactionSink;
+            use synchrome_state::JournalSink;
+            use synchrome_sync::snapshot as sn;
+            let sink = bookmarks::CloudSink::new(&state);
+            let rows = sink.list_snapshots(pid).await.unwrap_or_default();
+            let Some(row) = rows.iter().find(|r| r.generation == generation) else {
+                return fail("no such generation");
+            };
+            let (Some(mpath), Some(msha)) = (&row.manifest_path, &row.manifest_sha256) else {
+                return fail("row not ready");
+            };
+            let Ok(Some(mbytes)) = sink.get_chunk(mpath).await else {
+                return fail("manifest missing");
+            };
+            let raw: serde_json::Value = serde_json::from_slice(&mbytes).unwrap_or_default();
+            let keys: Vec<String> = raw
+                .as_object()
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+            let Ok(m) = sn::Manifest::parse(&mbytes) else {
+                return fail("manifest does not parse");
+            };
+            let dir = mpath.rsplit_once('/').map(|(d, _)| d).unwrap_or_default();
+            let row_dto_counts = match (state.session().await, state.cloud()) {
+                (Ok(se), Ok(c)) => c
+                    .list_snapshot_rows(&se, pid)
+                    .await
+                    .ok()
+                    .and_then(|v| v.into_iter().find(|r| r.generation as u64 == generation))
+                    .map(|r| r.counts)
+                    .unwrap_or_default(),
+                _ => serde_json::Value::Null,
+            };
+            let mut cols = serde_json::Map::new();
+            let mut record_keys = std::collections::BTreeSet::new();
+            let (mut all_ok, mut total, mut max_part) = (true, 0u64, 0u64);
+            for (col, info) in &m.collections {
+                let (mut ents, mut tombs, mut bytes) = (0u64, 0u64, 0u64);
+                let mut parts = Vec::new();
+                for part in &info.parts {
+                    let b = sink
+                        .get_chunk(&format!("{dir}/{}", part.name))
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    let sha_ok = sn::sha256_hex(&b) == part.sha256 && b.len() as u64 == part.bytes;
+                    let mut n = 0u64;
+                    let mut ndjson_ok = !b.is_empty();
+                    for line in b.split(|c| *c == b'\n').filter(|l| !l.is_empty()) {
+                        match serde_json::from_slice::<serde_json::Value>(line) {
+                            Ok(serde_json::Value::Object(o)) => {
+                                n += 1;
+                                record_keys.extend(o.keys().cloned());
+                                if o.get("d") == Some(&serde_json::Value::Bool(true)) {
+                                    tombs += 1;
+                                }
+                            }
+                            _ => ndjson_ok = false,
+                        }
+                    }
+                    ents += n;
+                    bytes += b.len() as u64;
+                    max_part = max_part.max(b.len() as u64);
+                    all_ok &= sha_ok && ndjson_ok && n == part.entities;
+                    parts.push(serde_json::json!({
+                        "name": part.name, "sha256": part.sha256, "bytes": part.bytes,
+                        "entities": part.entities, "sha_ok": sha_ok, "ndjson_ok": ndjson_ok,
+                    }));
+                }
+                total += bytes;
+                let row_counts = row_counts(&row_dto_counts, col);
+                all_ok &= ents == info.entities && tombs == info.tombstones && bytes == info.bytes;
+                cols.insert(col.clone(), serde_json::json!({
+                    "entities": info.entities, "tombstones": info.tombstones, "bytes": info.bytes,
+                    "parts": parts, "counted_entities": ents, "counted_tombstones": tombs,
+                    "row_counts": row_counts,
+                }));
+            }
+            out(serde_json::json!({
+                "generation": generation,
+                "manifest_sha_ok": sn::sha256_hex(&mbytes) == *msha,
+                "manifest_keys": keys,
+                "format": m.format, "manifest_generation": m.generation,
+                "base_generation": m.base_generation,
+                "created_at_set": !m.created_at.is_empty(),
+                "created_by_is_device": Uuid::parse_str(&m.created_by).is_ok(),
+                "profile_matches": m.profile_id == pid.to_string(),
+                "watermarks_match_row": m.watermarks == row.watermarks,
+                "watermark_devices": m.watermarks.len(),
+                "total_bytes_ok": m.total_bytes == total,
+                "row_bytes_ok": row.bytes == total + mbytes.len() as u64,
+                "max_part_bytes": max_part, "max_allowed": sn::MAX_PART_BYTES,
+                "record_keys": record_keys,
+                "parts_ok": all_ok,
+                "collections": cols,
+            }))
+        }
+        // Rebuild a generation from the cloud without uploading (from its previous generation
+        // + journals, or from the journals alone) and print the parts' hashes.
+        "--dev-snapshot-rebuild" => {
+            let (Ok(mid), Ok(generation)) = (Uuid::parse_str(&arg(1)), arg(2).parse::<u64>())
+            else {
+                return fail("usage: --dev-snapshot-rebuild <mapping> <generation> <none|prev>");
+            };
+            let pid = match bookmarks::own_profile_pub(&state, mid) {
+                Ok((_, p)) => p,
+                Err(e) => return fail(e),
+            };
+            let sink = bookmarks::CloudSink::new(&state);
+            match synchrome_state::compaction::rebuild(&sink, pid, generation, arg(3) == "prev")
+                .await
+            {
+                Ok(b) => out(serde_json::json!({
+                    "base_generation": b.manifest.base_generation,
+                    "collections": b.manifest.collections.iter().map(|(c, i)| (c.clone(), serde_json::json!({
+                        "entities": i.entities, "tombstones": i.tombstones, "bytes": i.bytes,
+                        "parts": i.parts.iter().map(|p| serde_json::json!({
+                            "name": p.name, "sha256": p.sha256, "bytes": p.bytes, "entities": p.entities,
+                        })).collect::<Vec<_>>(),
+                    }))).collect::<serde_json::Map<_, _>>(),
+                })),
+                Err(e) => fail(e),
+            }
         }
         "--dev-delete-device-id" => {
             let Ok(dev) = Uuid::parse_str(&arg(1)) else {
@@ -1373,6 +1607,7 @@ async fn run_async(args: &[String]) -> i32 {
             match bookmarks::delete_profile_everywhere(&state, &session, id).await {
                 Ok(r) if r.deleted => out(serde_json::json!({
                     "deleted_profile": true, "purged_objects": r.objects_deleted, "leftovers": r.leftovers,
+                    "objects_before_row": r.objects_before_row, "objects_after_row": r.objects_after_row,
                 })),
                 Ok(r) => fail(r.error.unwrap_or_default()),
                 Err(e) => fail(e),
@@ -1551,4 +1786,9 @@ impl synchrome_state::JournalSink for DuplicateEvents<'_> {
     async fn get_chunk(&self, path: &str) -> Result<Option<Vec<u8>>, synchrome_state::SinkError> {
         self.inner.get_chunk(path).await
     }
+}
+
+/// `{"<collection>": {"entities": n, "tombstones": n}}` of a snapshot row, for one collection.
+fn row_counts(counts: &serde_json::Value, col: &str) -> serde_json::Value {
+    counts.get(col).cloned().unwrap_or(serde_json::Value::Null)
 }

@@ -838,3 +838,57 @@ async fn thresholds_restart_offline_reports_and_other_accounts() {
     ));
     let _ = &mut w;
 }
+
+// ------------------------------------------------------------------ determinism
+
+#[tokio::test]
+async fn a_generation_rebuilt_from_journals_alone_or_from_the_previous_one_is_identical() {
+    let (mut w, mut a, mut b, mut x, mut y) = history().await;
+    assert!(matches!(
+        compact_now(&w, &mut a).await,
+        CompactionOutcome::Ready { generation: 1, .. }
+    ));
+    let t = a.br.find("Folder B");
+    a.br.nodes.get_mut(&t).unwrap().title = "Folder B v2".into();
+    w.local(&mut a).await;
+    other_collections(&w, &mut x, &mut y, 1_790_000_001_000);
+    w.remote(&mut b, 512 * 1024).await;
+    assert!(matches!(
+        compact_now(&w, &mut a).await,
+        CompactionOutcome::Ready { generation: 2, .. }
+    ));
+    let sink = w.sink();
+    let rows = sink.list_snapshots(w.profile).await.unwrap();
+    for g in [1u64, 2] {
+        let row = rows.iter().find(|r| r.generation == g).unwrap();
+        let (m, _) = fetch_snapshot(&sink, row).await.unwrap();
+        let parts =
+            |c: &std::collections::BTreeMap<String, synchrome_sync::snapshot::CollectionInfo>| {
+                c.iter()
+                    .map(|(k, i)| (k.clone(), i.entities, i.tombstones, i.parts.clone()))
+                    .collect::<Vec<_>>()
+            };
+        let alone = rebuild(&sink, w.profile, g, false).await.unwrap();
+        assert_eq!(alone.manifest.base_generation, None);
+        assert_eq!(
+            parts(&alone.manifest.collections),
+            parts(&m.collections),
+            "G{g} from journals alone"
+        );
+        let again = rebuild(&sink, w.profile, g, false).await.unwrap();
+        assert_eq!(again.parts, alone.parts, "G{g} twice: same bytes");
+        let prev = rebuild(&sink, w.profile, g, true).await.unwrap();
+        assert_eq!(
+            prev.manifest.base_generation,
+            g.checked_sub(1).filter(|x| *x > 0)
+        );
+        assert_eq!(
+            parts(&prev.manifest.collections),
+            parts(&m.collections),
+            "G{g} from G{}",
+            g - 1
+        );
+    }
+    // nothing was uploaded or claimed by the rebuilds
+    assert_eq!(sink.list_snapshots(w.profile).await.unwrap().len(), 2);
+}

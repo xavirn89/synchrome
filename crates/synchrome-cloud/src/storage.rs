@@ -409,6 +409,27 @@ impl<T: RestTransport> CloudClient<T> {
         Ok(deleted)
     }
 
+    /// Delete objects by FULL bucket name (`<account>/…`): isolation probes only — the
+    /// product always goes through [`Self::delete_objects`] under its own prefix.
+    pub async fn delete_objects_by_full_name(
+        &self,
+        session: &Session,
+        names: &[String],
+    ) -> Result<usize, CloudError> {
+        let bytes = self
+            .storage(
+                session,
+                "DELETE",
+                &format!("/object/{STORE_BUCKET}"),
+                &[],
+                Body::Json(serde_json::json!({ "prefixes": names })),
+            )
+            .await?;
+        Ok(serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)
+            .map(|v| v.len())
+            .unwrap_or(0))
+    }
+
     /// Device ids that have journal objects for a profile (first level of `journal/`).
     pub async fn journal_devices(
         &self,

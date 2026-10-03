@@ -180,11 +180,14 @@ impl JournalSink for CloudSink<'_> {
         let mut got = with_session!(self, |s, c| c.get_object(&s, path))?;
         // debug builds only: simulate a corrupted snapshot generation (E2E fallback test)
         #[cfg(debug_assertions)]
-        if let (Ok(g), Some(b)) = (
+        if let (Ok(gens), Some(b)) = (
             std::env::var("SYNCHROME_DEV_CORRUPT_SNAPSHOT_GEN"),
             got.as_mut(),
         ) {
-            if path.contains(&format!("/snapshots/{:0>10}/", g))
+            // one generation or a comma-separated list
+            if gens
+                .split(',')
+                .any(|g| path.contains(&format!("/snapshots/{:0>10}/", g.trim())))
                 && path.ends_with(".jsonl")
                 && !b.is_empty()
             {
@@ -356,6 +359,10 @@ pub fn status_for_mapping(mapping_id: Uuid, profile_id: Uuid) -> Option<Bookmark
 pub struct ProfileDeletion {
     pub deleted: bool,
     pub objects_deleted: usize,
+    /// Phase 1 (before the row): objects the server allowed while the profile existed.
+    pub objects_before_row: usize,
+    /// Phase 3 (after the row and its cascades): the remaining objects.
+    pub objects_after_row: usize,
     /// Objects still under the profile's prefix afterwards (expected 0).
     pub leftovers: usize,
     pub error: Option<String>,
@@ -378,11 +385,13 @@ pub async fn delete_profile_everywhere(
         CloudError::SchemaMissing(_) | CloudError::NotFound => Ok(0),
         e => Err(e.to_string()),
     };
+    let first = cloud
+        .delete_profile_objects(session, profile_id)
+        .await
+        .or_else(tolerate)?;
     let mut rep = ProfileDeletion {
-        objects_deleted: cloud
-            .delete_profile_objects(session, profile_id)
-            .await
-            .or_else(tolerate)?,
+        objects_deleted: first,
+        objects_before_row: first,
         ..Default::default()
     };
     if let Ok(mut db) = open_db() {
@@ -395,10 +404,11 @@ pub async fn delete_profile_everywhere(
             return Ok(rep);
         }
     }
-    rep.objects_deleted += cloud
+    rep.objects_after_row = cloud
         .delete_profile_objects(session, profile_id)
         .await
         .or_else(tolerate)?;
+    rep.objects_deleted += rep.objects_after_row;
     rep.leftovers = cloud
         .list_tree(session, &format!("profiles/{profile_id}"))
         .await
@@ -691,11 +701,20 @@ impl synchrome_state::compaction::CompactionSink for CloudSink<'_> {
             &info.counts,
             info.bytes,
         );
-        let wm: std::collections::BTreeMap<String, i64> = info
+        #[allow(unused_mut)]
+        let mut wm: std::collections::BTreeMap<String, i64> = info
             .watermarks
             .iter()
             .map(|(k, v)| (k.clone(), *v as i64))
             .collect();
+        // debug builds only: claim a watermark beyond the published chain (E2E: the database
+        // must refuse it, the compactor must abort and leave the journals alone)
+        #[cfg(debug_assertions)]
+        if std::env::var("SYNCHROME_DEV_TAMPER_WATERMARK").is_ok_and(|v| v == "1") {
+            if let Some(w) = wm.values_mut().next() {
+                *w += 1_000_000;
+            }
+        }
         with_session_raw!(self, |s, c| c.mark_snapshot_ready(
             &s,
             profile_id,

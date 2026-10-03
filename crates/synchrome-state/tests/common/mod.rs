@@ -546,6 +546,7 @@ impl Cloud {
                 && blockers == 0,
             generation_cleanup_ok: cur.is_some_and(|c| self.now_ms >= c.ready_at.unwrap() + DAY),
             claim_allowed: !live && last.map_or(true, |l| self.now_ms >= l + 6 * 60 * MIN),
+            ..Default::default()
         }
     }
     fn gc_allowed(&self, a: &str, p: Uuid, d: &str, seq: u64) -> bool {

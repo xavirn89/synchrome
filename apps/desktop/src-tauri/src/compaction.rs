@@ -35,7 +35,9 @@ pub fn snapshot_row(r: synchrome_cloud::compaction::SnapshotRowDto, expired: boo
 
 pub fn status(r: synchrome_cloud::compaction::CompactionStatusRow) -> CompactionStatus {
     CompactionStatus {
+        server_now: Some(r.server_now),
         current_generation: r.current_generation.map(|g| g.max(0) as u64),
+        current_ready_at: r.current_ready_at,
         previous_generation: r.previous_generation.map(|g| g.max(0) as u64),
         journal_gc_watermarks: r
             .journal_gc_watermarks

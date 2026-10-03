@@ -37,6 +37,9 @@ pub struct SnapshotRowDto {
     pub claimed_at: Option<String>,
     pub expires_at: Option<String>,
     pub ready_at: Option<String>,
+    /// `{"<collection>": {"entities": n, "tombstones": n}}` (informational).
+    #[serde(default)]
+    pub counts: serde_json::Value,
 }
 
 /// A `sync_cursors` row.
@@ -151,7 +154,7 @@ impl<T: RestTransport> CloudClient<T> {
                 session,
                 "GET",
                 &format!(
-                    "/profile_snapshots?profile_id=eq.{profile_id}&select=generation,state,created_by,manifest_path,manifest_sha256,watermarks,bytes,claimed_at,expires_at,ready_at&order=generation.asc"
+                    "/profile_snapshots?profile_id=eq.{profile_id}&select=generation,state,created_by,manifest_path,manifest_sha256,watermarks,counts,bytes,claimed_at,expires_at,ready_at&order=generation.asc"
                 ),
                 &[],
                 None,
@@ -358,8 +361,25 @@ impl<T: RestTransport> CloudClient<T> {
         profile_id: Uuid,
         device_id: Uuid,
     ) -> Result<(), CloudError> {
-        // any non-null value: the database replaces it with its own clock
-        let body = serde_json::json!({ "retired_at": crate::client::now_rfc3339() });
+        self.retire_device_at(
+            session,
+            profile_id,
+            device_id,
+            &crate::client::now_rfc3339(),
+        )
+        .await
+    }
+
+    /// [`Self::retire_device`] sending `client_time`: any non-null value, the database replaces
+    /// it with its own clock (the harness sends a bogus one to prove it).
+    pub async fn retire_device_at(
+        &self,
+        session: &Session,
+        profile_id: Uuid,
+        device_id: Uuid,
+        client_time: &str,
+    ) -> Result<(), CloudError> {
+        let body = serde_json::json!({ "retired_at": client_time });
         self.cursor_patch_or_insert(session, profile_id, device_id, body)
             .await
     }

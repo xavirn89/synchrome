@@ -171,6 +171,8 @@
     try { diag = { ...diag, [m.id]: await invoke("sync_diagnostics", { mappingId: m.id }) }; }
     catch (e) { /* no local state for this mapping yet */ }
   }
+  // a server timestamp as local epoch seconds, corrected by the server/local clock offset
+  const serverSecs = (at, now) => { const a = Date.parse(at ?? ""), n = Date.parse(now ?? ""); return Number.isNaN(a) ? null : Math.round((a - (Number.isNaN(n) ? 0 : n - Date.now())) / 1000); };
   const ago = (t) => { if (!t) return "never"; const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 90 ? `${s} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
   let extOpen = $state({});
   let extList = $state({});
@@ -641,7 +643,7 @@
     <div class="bookmarks-row sync-health">
       <span class="small">Sync health</span>
       <span class="badge small {dg.realtime.connected ? 'ok' : 'muted'}">{dg.realtime.connected ? "Realtime connected" : dg.realtime.enabled ? "Realtime disconnected" : "Realtime off"}</span>
-      <span class="pdir">snapshot {dg.cloud?.current_generation ? `generation ${dg.cloud.current_generation}` : "none yet"} · {dg.snapshot_generations_kept} kept · last compacted {ago(dg.local.last_compaction_at)}{dg.local.last_gc_at ? ` · journals cleaned ${ago(dg.local.last_gc_at)}` : ""}</span>
+      <span class="pdir">snapshot {dg.cloud?.current_generation ? `generation ${dg.cloud.current_generation}` : "none yet"} · {dg.snapshot_generations_kept} kept · last compacted {ago(serverSecs(dg.cloud?.current_ready_at, dg.cloud?.server_now) ?? dg.local.last_compaction_at)}{dg.local.last_gc_at ? ` · journals cleaned ${ago(dg.local.last_gc_at)}` : ""}</span>
       {#if dg.gc_blocked}<span class="small warn">Journal cleanup paused: {dg.cloud.gc_blockers} device{dg.cloud.gc_blockers === 1 ? "" : "s"} mapped to this profile cannot read snapshots yet (update Synchrome there, or remove the device).</span>{/if}
       {#if dg.local.snapshot_generation}<span class="small">This device started from snapshot generation {dg.local.snapshot_generation}{dg.local.bootstrap_fallback ? " (previous generation, the current one failed verification)" : ""}.</span>{/if}
     </div>

@@ -40,6 +40,9 @@ pub struct RtStatus {
     pub last_event_ms: Option<u64>,
     pub last_pull_started_ms: Option<u64>,
     pub last_error: Option<String>,
+    /// Wake-up syncs running right now / the most ever running at once (all profiles).
+    pub inflight: u64,
+    pub max_inflight: u64,
 }
 
 static STATUS: OnceLock<Mutex<RtStatus>> = OnceLock::new();
@@ -97,6 +100,16 @@ fn fault() -> (bool, bool) {
     (false, false)
 }
 
+/// Debug harness only: while `<data dir>/realtime-disconnect` exists the connection is dropped
+/// and not re-established (a network loss), so the 30 s polling alone must keep up.
+fn dev_disconnected() -> bool {
+    #[cfg(debug_assertions)]
+    if let Ok(dir) = crate::local_token::app_data_dir() {
+        return dir.join("realtime-disconnect").exists();
+    }
+    false
+}
+
 /// The signed-in account changed (sign-in, sign-out, startup).
 pub fn set_account(account: Option<String>) {
     let tx = ACCOUNT.get_or_init(|| watch::channel(None).0);
@@ -132,6 +145,13 @@ async fn supervise(mut acct: watch::Receiver<Option<String>>) {
             }
             continue;
         };
+        if dev_disconnected() {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                r = acct.changed() => if r.is_err() { return },
+            }
+            continue;
+        }
         let (joined, ended) = run(&state, &account, &mut acct).await;
         update(|s| s.connected = false);
         if joined {
@@ -253,6 +273,7 @@ async fn run(
     tok.tick().await;
     let mut last_in = Instant::now();
     let (drop_all, duplicate) = fault();
+    let mut probe = tokio::time::interval(Duration::from_secs(1));
     loop {
         let wait = wake
             .next_deadline()
@@ -311,16 +332,28 @@ async fn run(
             },
             _ = tokio::time::sleep(wait) => {
                 for pid in wake.due(now()) {
-                    update(|s| { s.pulls += 1; s.last_pull_started_ms = Some(unix_ms()); });
+                    update(|s| {
+                        s.pulls += 1;
+                        s.last_pull_started_ms = Some(unix_ms());
+                        s.inflight += 1;
+                        s.max_inflight = s.max_inflight.max(s.inflight);
+                    });
                     let st = state.clone();
                     let done = done_tx.clone();
                     tauri::async_runtime::spawn(async move {
                         wake_sync(st, pid).await;
+                        update(|s| s.inflight = s.inflight.saturating_sub(1));
                         let _ = done.send(pid);
                     });
                 }
             },
             Some(pid) = done_rx.recv() => wake.finished(pid, now()),
+            _ = probe.tick() => {
+                if dev_disconnected() {
+                    let _ = tx.close().await;
+                    return (true, Ended::Failed("disconnected (debug)"));
+                }
+            },
             c = acct.changed() => {
                 let _ = c;
                 r += 1;
