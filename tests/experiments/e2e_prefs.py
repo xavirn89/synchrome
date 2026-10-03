@@ -158,7 +158,7 @@ def set_major(d, version):
 def ui_state(d):
     ui = cf.UI(d)
     J = cf.UI_JS + "const prow = () => all('div.prefs-row')[0];"
-    ok = bool(ui.ready) and bool(ui.until(J + "return !!prow();", 60))
+    ok = bool(ui.ready) and ui.open_profiles() and bool(ui.until(J + "return !!prow();", 60))
     row = ui.until(J + """const r = prow(); if (!r) return null;
         return {text: r.innerText, badge: (r.querySelector('.badge')?.textContent || '').trim(), mode: r.querySelector('select').value,
                 options: all('option', r).map(o => o.textContent), buttons: all('button', r).map(b => b.textContent.trim())};""", 30) or {}

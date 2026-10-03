@@ -1,6 +1,11 @@
 <script>
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, previewEnabled, previewScenario } from "./lib/api.js";
   import { onMount } from "svelte";
+  import AuthView from "./components/AuthView.svelte";
+  import Dialog from "./components/Dialog.svelte";
+  import Icon from "./components/Icon.svelte";
+  import { localKey, validateName, connectionState, profileState, groupConnections, disconnectAndDelete, sameDeviceConflict, connectionConflictCount, cloudState, attentionSummary } from "./lib/product.js";
+  import "./styles.css";
 
   // ---- state ----
   let version = $state("");
@@ -20,25 +25,15 @@
   let actionError = $state(null);
   let busyKey = $state(null); // which row/action is in flight
 
-  // sign-in form (values go straight to Rust; nothing is stored here)
-  let email = $state("");
-  let password = $state("");
+  // Authentication form values stay transient inside AuthView.
   let authBusy = $state(false);
   let authError = $state(null);
-  let creatingAccount = $state(false);
   // install location (the native messaging host needs a stable path) + bundled extension
   let location = $state(null);
   let extFolder = $state(null);
   let extFolderError = $state(null);
-  let showSteps = $state(true);
   let deviceConfirm = $state(null); // "<profile>:<device>" waiting for confirmation
 
-  // cloud profile editing
-  let newProfileName = $state("");
-  let renamingId = $state(null);
-  let renameValue = $state("");
-  // per local profile: chosen existing cloud profile for "Map to existing"
-  let mapChoice = $state({});
 
   const ACCESS = {
     accessible: { label: "Accessible", cls: "ok" },
@@ -120,14 +115,18 @@
   let setList = $state({});  // mapping id -> { ext_id -> SettingsView }
   let setMode = $state({});  // "<mapping>:<ext>" -> chosen mode (before confirming)
   async function loadSettings(m) {
+    const generation=accountGeneration;
     try {
       const l = await invoke("list_extension_settings", { mappingId: m.id });
+      if(generation!==accountGeneration)return;
       setList = { ...setList, [m.id]: Object.fromEntries(l.map((v) => [v.ext_id, v])) };
     } catch (e) { actionError = String(e); }
   }
   async function applyMode(m, x, mode) {
+    if(busyKey)return;
     busyKey = `set:${x.ext_id}`; actionError = null;
     try {
+      if(dataLoadPromise)await dataLoadPromise;
       await invoke("set_extension_settings_mode", { mappingId: m.id, extId: x.ext_id, mode });
       extMsg = { ...extMsg, [m.id]: `“${x.name}”: settings sync ${S_MODE[mode]}.` };
       await loadSettings(m);
@@ -135,8 +134,10 @@
     finally { busyKey = null; }
   }
   async function settingsNow(m, x) {
+    if(busyKey)return;
     busyKey = `set:${x.ext_id}`; actionError = null;
     try {
+      if(dataLoadPromise)await dataLoadPromise;
       const r = await invoke("extension_settings_sync_now", { mappingId: m.id });
       extMsg = { ...extMsg, [m.id]: r.browser_running ? "The browser is open: extension settings are read and written when it is closed." : `Settings synced (${r.captured_ops} changes sent, ${r.keys_written} keys written).` };
       await loadSettings(m);
@@ -150,12 +151,15 @@
   let prefMode = $state({});  // mapping id -> chosen mode (before confirming)
   let prefMsg = $state({});
   async function loadPrefs(m) {
-    try { prefList = { ...prefList, [m.id]: await invoke("list_browser_preferences", { mappingId: m.id }) }; }
+    const generation=accountGeneration;
+    try { const result=await invoke("list_browser_preferences", { mappingId: m.id });if(generation===accountGeneration)prefList = { ...prefList, [m.id]:result }; }
     catch (e) { /* no local profile state yet for this mapping */ }
   }
   async function applyPrefsMode(m, mode) {
+    if(busyKey)return;
     busyKey = `prefs:${m.id}`; actionError = null;
     try {
+      if(dataLoadPromise)await dataLoadPromise;
       await invoke("set_browser_preferences_mode", { mappingId: m.id, mode });
       prefMode = { ...prefMode, [m.id]: undefined };
       prefMsg = { ...prefMsg, [m.id]: `Browser preferences: ${P_MODE[mode]}.` };
@@ -164,8 +168,10 @@
     finally { busyKey = null; }
   }
   async function prefsNow(m) {
+    if(busyKey)return;
     busyKey = `prefs:${m.id}`; actionError = null;
     try {
+      if(dataLoadPromise)await dataLoadPromise;
       const r = await invoke("browser_preferences_sync_now", { mappingId: m.id });
       prefMsg = { ...prefMsg, [m.id]: r.browser_running ? "The browser is open: preferences are read and written when it is closed." : `Preferences synced (${r.captured_ops} changes sent, ${r.paths_written} written).` };
       await loadPrefs(m);
@@ -175,7 +181,8 @@
   // Realtime + compaction diagnostics (slice 13), per mapping of this device
   let diag = $state({});
   async function loadDiag(m) {
-    try { diag = { ...diag, [m.id]: await invoke("sync_diagnostics", { mappingId: m.id }) }; }
+    const generation=accountGeneration;
+    try { const result=await invoke("sync_diagnostics", { mappingId: m.id });if(generation===accountGeneration)diag = { ...diag, [m.id]:result }; }
     catch (e) { /* no local state for this mapping yet */ }
   }
   // a server timestamp as local epoch seconds, corrected by the server/local clock offset
@@ -186,7 +193,8 @@
   let extConfirm = $state(null);
   let extMsg = $state({});
   async function loadExtensions(m) {
-    try { extList = { ...extList, [m.id]: await invoke("list_extensions", { mappingId: m.id }) }; }
+    const generation=accountGeneration;
+    try { const result=await invoke("list_extensions", { mappingId: m.id });if(generation===accountGeneration)extList = { ...extList, [m.id]:result }; }
     catch (e) { actionError = String(e); }
   }
   async function toggleExtensions(m) {
@@ -195,10 +203,12 @@
     if (open) { await loadExtensions(m); await loadSettings(m); }
   }
   async function extAct(m, x, action) {
+    if(busyKey)return;
     const key = `${x.ext_id}:${action}`;
     if (action === "remove" && extConfirm !== key) { extConfirm = key; return; }
     extConfirm = null; busyKey = `ext:${x.ext_id}`; actionError = null;
     try {
+      if(dataLoadPromise)await dataLoadPromise;
       await invoke("extension_action", { mappingId: m.id, extId: x.ext_id, action });
       extMsg = { ...extMsg, [m.id]: `“${x.name}”: ${X_ACTION[action]} — ${action === "install" ? "the store page opens in the browser on the next sync" : "saved; the browser is updated on the next sync"}.` };
       await loadExtensions(m);
@@ -278,8 +288,10 @@
     return rows.map((x) => ({ ...x, diff: x.r !== "unchanged" && x.l !== x.r }));
   }
   async function loadConflicts(m) {
+    const generation=accountGeneration;
     try {
-      conflictList = { ...conflictList, [m.id]: await invoke("list_conflicts", { mappingId: m.id, includeClosed: true }) };
+      const result=await invoke("list_conflicts", { mappingId: m.id, includeClosed: true });
+      if(generation===accountGeneration)conflictList = { ...conflictList, [m.id]:result };
     } catch (e) { actionError = String(e); }
   }
   async function toggleConflicts(m) {
@@ -293,15 +305,17 @@
     return resolveOne(m, c, o.resolution);
   }
   async function resolveOne(m, c, resolution) {
+    if(busyKey)return;
     confirmKey = null; actionError = null; busyKey = `resolve:${c.conflict_id}`;
     try {
+      if(dataLoadPromise)await dataLoadPromise;
       const [r] = await invoke("resolve_conflicts", { mappingId: m.id, items: [{ conflict_id: c.conflict_id, resolution }] });
       const what = RES_DONE[resolution] ?? resolution;
       const msg = r.outcome === "resolved" ? `Resolved — ${what}.`
         : r.outcome === "resolving" ? `Decision saved — ${what}; the browser is updated on the next sync.`
         : r.outcome === "already_resolved" ? "Already resolved."
         : r.outcome === "closed" ? `No longer open (${r.status}).`
-        : `Could not resolve: ${r.error}`;
+        : `Could not resolve: ${humanize(r.error).text}`;
       resolvedMsg = { ...resolvedMsg, [c.conflict_id]: msg };
       lastResolved = { ...lastResolved, [m.id]: { ok: r.outcome !== "error", text: `“${c.name}”: ${msg}` } };
       await loadConflicts(m);
@@ -323,7 +337,8 @@
     finally { loadingCloud = false; }
   }
   async function loadAccount() {
-    try { account = await invoke("account_status"); } catch (e) { error = String(e); }
+    const generation=accountGeneration;
+    try { const result=await invoke("account_status");if(generation===accountGeneration)account = result; } catch (e) { if(generation===accountGeneration)error = String(e); }
   }
   async function loadDevice() {
     try { device = await invoke("device_identity"); } catch { device = null; }
@@ -339,36 +354,50 @@
     try { await invoke("open_full_disk_access_settings"); } catch (e) { actionError = String(e); }
   }
   async function deviceAction(m, d, action) {
+    if(busyKey)return;
     const key = `${m.profile_id}:${d.device_id}:${action}`;
     if (action === "retire" && deviceConfirm !== key) { deviceConfirm = key; return; }
     deviceConfirm = null; busyKey = `dev:${d.device_id}`; actionError = null;
     try {
+      if(dataLoadPromise)await dataLoadPromise;
       await invoke(action === "retire" ? "retire_device" : "reactivate_device", { profileId: m.profile_id, deviceId: d.device_id });
       await loadDiag(m);
     } catch (e) { actionError = String(e); }
     finally { busyKey = null; }
   }
   /// Register this device, then fetch devices, profiles and mappings. Only when signed in.
+  let dataLoadPromise = null;
+  let accountGeneration = 0;
   async function loadCloudData() {
     if (!account?.signed_in) { devices = []; profiles = []; mappings = []; return; }
+    if (dataLoadPromise) return dataLoadPromise;
+    const generation=accountGeneration;
+    const userId=account.user_id;
     cloudDataBusy = true;
     cloudDataError = null;
+    dataLoadPromise=(async()=>{
     try {
       await invoke("register_device");
-      [devices, profiles, mappings] = await Promise.all([
+      const result = await Promise.all([
         invoke("list_devices"), invoke("list_profiles"), invoke("list_mappings"),
       ]);
+      if(generation!==accountGeneration||account?.user_id!==userId||!account?.signed_in)return;
+      [devices,profiles,mappings]=result;
       // open panels show fresh data after every reload
       for (const m of mappings) {
         if (conflictsOpen[m.id]) await loadConflicts(m);
         if (extOpen[m.id]) { await loadExtensions(m); await loadSettings(m); }
-        if (m.display_status === "extension_confirmed") { await loadPrefs(m); await loadDiag(m); }
+        if (generation!==accountGeneration)break;
+        if (m.is_this_device && m.display_status === "extension_confirmed") { await loadPrefs(m); await loadDiag(m); }
       }
     } catch (e) {
-      cloudDataError = String(e);
+      if(generation===accountGeneration)cloudDataError = String(e);
     } finally {
       cloudDataBusy = false;
+      dataLoadPromise=null;
     }
+    })();
+    return dataLoadPromise;
   }
   async function loadAll() {
     error = null;
@@ -376,28 +405,9 @@
     await Promise.all([loadBrowsers(), loadCloud(), loadAccount(), loadDevice(), loadLocation()]);
     await loadCloudData();
   }
-  onMount(loadAll);
+
 
   // ---- auth ----
-  async function signIn(ev) {
-    ev.preventDefault();
-    authError = null; authBusy = true;
-    try {
-      account = await invoke("sign_in", { email, password });
-      password = "";
-      await loadCloudData();
-    } catch (e) { authError = String(e); }
-    finally { authBusy = false; }
-  }
-  async function signUp() {
-    authError = null; authBusy = true;
-    try {
-      account = await invoke("sign_up", { email, password });
-      password = "";
-      if (account?.signed_in) { creatingAccount = false; await loadCloudData(); }
-    } catch (e) { authError = String(e); }
-    finally { authBusy = false; }
-  }
   /// Plain-language version of an internal error; the raw text stays available as detail.
   function humanize(e) {
     const raw = String(e ?? "");
@@ -410,17 +420,20 @@
       if (FRIENDLY.some((f) => raw.includes(f))) return raw;
       if (l.includes("not signed in")) return "Sign in to continue.";
       if (l.includes("session expired") || l.includes("sessioninvalid") || l.includes("sign in again")) return "Your session expired. Sign in again.";
-      if (l.includes("invalid login") || l.includes("invalid credentials") || l.includes("invalidcredentials")) return "Wrong e-mail or password.";
+      if (l.includes("invalid email or password") || l.includes("invalid login") || l.includes("invalid credentials") || l.includes("invalidcredentials")) return "Wrong e-mail or password.";
       if (l.includes("operation not permitted") || l.includes("eperm") || l.includes("full disk access") || l.includes("permission denied"))
         return "macOS is blocking access to this browser's files. Grant Synchrome Full Disk Access (System Settings → Privacy & Security), then retry.";
       if (l.includes("browser is open") || l.includes("browser running") || l.includes("browser is running") || l.includes("singletonlock") || l.includes("waiting_for_browser_close"))
         return "The browser is open. Close it and retry; Synchrome writes these files only while the browser is closed.";
-      if (l.includes("token mismatch") || l.includes("mismatch")) return "This browser profile holds a link to a different Synchrome profile. Unmap it here, or reset the link in the browser's extension.";
+      if (l.includes("version mismatch") || l.includes("version_mismatch")) return "The browser versions differ. Update them to a compatible version, then open the browser and retry.";
+      if (l.includes("cleanup is incomplete")) return "The Synchrome profile was deleted, but some cloud data could not be cleaned up. Your local browser profiles and bookmarks are safe. See diagnostics before retrying cleanup.";
+      if (l.includes("the browsers are disconnected, but") || l.includes("the profile was not deleted")) return raw.replace(/^Error: /, "");
+      if (l.includes("disconnect")) return "Some connections could not be removed. Review the remaining connections and retry. Your local browser data is unchanged.";
+      if (l.includes("token mismatch")) return "This browser profile holds a link to a different Synchrome profile. Unmap it here, or reset the link in the browser's extension.";
       if (l.includes("no token") || l.includes("token missing") || l.includes("not confirmed") || l.includes("unknown token")) return "The browser has not confirmed the link yet. Load the companion extension and open it once, or use “Retry local write” with the browser closed.";
       if (l.includes("mapping deleted") || l.includes("mapping not found") || l.includes("no longer mapped")) return "This link was removed. Map the profile again if you want to keep syncing it.";
       if (l.includes("profile not found") || l.includes("profile was deleted") || l.includes("profileinuse")) return "The Synchrome profile no longer exists or is still in use on another device.";
       if (l.includes("another device") || l.includes("wrong device")) return "This link belongs to another of your devices.";
-      if (l.includes("version mismatch") || l.includes("version_mismatch")) return "The browser version changed. Open the browser once so Synchrome can re-read the preferences format.";
       if (l.includes("unsupported")) return "This browser build is not supported for this feature.";
       if (l.includes("user action required") || l.includes("user_action_required") || l.includes("gesture")) return "The browser needs you to confirm this change itself (open the extension's popup).";
       if (l.includes("snapshot integrity") || l.includes("snapshot_invalid")) return "A downloaded snapshot failed its integrity check; nothing was changed. Synchrome retries with the previous one.";
@@ -433,14 +446,17 @@
     return { text, detail: text && raw && !text.includes(raw) ? raw : null };
   }
   async function signOut() {
-    authBusy = true; authError = null;
+    if(busyKey)return;
+    authBusy = true; authError = null; accountGeneration++;
     try {
       account = await invoke("sign_out");
       devices = []; profiles = []; mappings = [];
+      extList={};setList={};prefList={};diag={};conflictList={};extOpen={};conflictsOpen={};detailsOpen={};toast="";
     } catch (e) { authError = String(e); }
     finally { authBusy = false; }
   }
   async function refresh() {
+    if(busyKey)return;
     authBusy = true; authError = null;
     try { account = await invoke("refresh_session"); } catch (e) { authError = String(e); }
     finally { authBusy = false; }
@@ -448,55 +464,31 @@
 
   // ---- generic mutation wrapper: run, then reload cloud data ----
   async function act(key, fn) {
+    if(busyKey)return false;
     actionError = null; busyKey = key;
-    try { await fn(); await loadCloudData(); }
-    catch (e) { actionError = String(e); }
+    try { if(dataLoadPromise)await dataLoadPromise; await fn(); await loadCloudData(); return true; }
+    catch (e) { actionError = String(e); await loadCloudData(); return false; }
     finally { busyKey = null; }
   }
 
-  // ---- cloud profiles ----
-  const createProfile = () => act("create", async () => {
-    await invoke("create_profile", { name: newProfileName });
-    newProfileName = "";
-  });
-  const startRename = (p) => { renamingId = p.id; renameValue = p.name; };
-  const saveRename = (p) => act(`rename:${p.id}`, async () => {
-    await invoke("rename_profile", { profileId: p.id, name: renameValue });
-    renamingId = null;
-  });
-  const deleteProfile = (p) => act(`delete:${p.id}`, () =>
-    invoke("delete_profile", { profileId: p.id }));
-
-  // ---- local <-> cloud mapping ----
-  const localKey = (b, p) => `${b.kind}/${p.dir_name}`;
+  // Browser connections reuse the existing native services.
   const mappingFor = (b, p) =>
     mappings.find((m) => m.is_this_device && m.browser_kind === b.kind && m.browser_profile_dir === p.dir_name);
   const mappingsOf = (profileId) => mappings.filter((m) => m.profile_id === profileId);
-  // A cloud profile may map to several local profiles (even on this device), so all are offered.
-  const mappableProfiles = $derived(profiles);
-
-  const createAndMap = (b, p) => act(`map:${localKey(b, p)}`, () =>
-    invoke("create_and_map_local_profile", {
-      name: p.display_name ?? p.dir_name, browserKind: b.kind, browserProfileDir: p.dir_name, userDataDir: b.user_data_dir,
-    }));
-  const mapExisting = (b, p) => {
-    const profileId = mapChoice[localKey(b, p)];
-    if (!profileId) return;
-    return act(`map:${localKey(b, p)}`, () =>
-      invoke("map_local_profile", { profileId, browserKind: b.kind, browserProfileDir: p.dir_name, userDataDir: b.user_data_dir }));
-  };
-  const unmap = (m) => act(`unmap:${m.id}`, () => invoke("unmap_local_profile", { mappingId: m.id }));
+  const unmap = (m) => requestDisconnect(m);
   const retryWrite = (m) => act(`write:${m.id}`, () => invoke("write_mapping_token_local", { mappingId: m.id }));
   const checkExtension = (m) => act(`check:${m.id}`, async () => {});
   const uploadNow = (m) => act(`upload:${m.id}`, () => invoke("publish_bookmarks", { mappingId: m.id }));
   async function installConnector(b) {
+    if(busyKey||!b)return;busyKey=`connector:${b.kind}`;
     connectorMsg = { ...connectorMsg, [b.kind]: "Installing…" };
     try {
       await invoke("install_native_host", { browserKind: b.kind, userDataDir: b.user_data_dir });
       connectorMsg = { ...connectorMsg, [b.kind]: "Connector installed. Restart the browser." };
     } catch (e) {
-      connectorMsg = { ...connectorMsg, [b.kind]: `Connector install failed: ${humanize(e).text} ${humanize(e).detail ? `(${humanize(e).detail})` : ""}` };
-    }
+      connectorMsg = { ...connectorMsg, [b.kind]: `Connector install failed: ${humanize(e).text}` };
+      actionError=String(e);
+    }finally{busyKey=null;}
   }
 
   // ---- derived ----
@@ -506,40 +498,119 @@
   // this device's mappings whose local profile is not among the detected ones
   const unmatched = $derived(mappings.filter((m) => m.is_this_device
     && !browsers.some((b) => b.kind === m.browser_kind && b.profiles.some((p) => p.dir_name === m.browser_profile_dir))));
-  const cloudReady = $derived(!!cloud && cloud.configured && cloud.auth_ok);
   const myMappings = $derived(mappings.filter((m) => m.is_this_device));
   const confirmedMappings = $derived(myMappings.filter((m) => m.display_status === "extension_confirmed"));
-  const firstSyncDone = $derived(confirmedMappings.some((m) => m.bookmarks && (m.bookmarks.last_upload_at || m.bookmarks.state === "up_to_date")));
-  /// Getting-started checklist, computed from the real state (no hidden developer steps).
-  const steps = $derived.by(() => {
-    const out = [];
-    out.push({ done: !!location?.stable, label: "Synchrome is installed in Applications", hint: location?.stable ? null : (location?.reason ?? "Checking…"), action: null });
-    out.push({ done: !!cloud?.configured && !!cloud?.reachable, label: "Synchrome Cloud is reachable", hint: !cloud ? "Checking…" : !cloud.configured ? "This build has no cloud configuration." : !cloud.reachable ? "Check your internet connection." : null });
-    out.push({ done: signedIn, label: "Signed in", hint: signedIn ? null : "Sign in or create an account below." });
-    out.push({ done: browsers.length > 0, label: "A Chromium-family browser was found", hint: browsers.length ? null : "Install Helium, Chrome, Brave, Edge or Chromium and open it once." });
-    if (needsFda) out.push({ done: false, optional: true, label: "Optional: Full Disk Access for Chrome, Brave or Edge", hint: "Only if you want to sync those browsers. macOS protects their files: add Synchrome in System Settings → Privacy & Security → Full Disk Access, then press Re-check. Helium needs nothing.", action: "fda" });
-    out.push({ done: myMappings.length > 0, label: "A browser profile is linked to a Synchrome profile", hint: myMappings.length ? null : "Below, press “Create Synchrome profile” next to a browser profile (or map it to an existing one)." });
-    out.push({ done: Object.values(connectorMsg).some((v) => v && v.startsWith("Connector installed")) || confirmedMappings.length > 0, label: "The connector is installed for that browser", hint: "Press “Install connector” on the browser entry below (once per browser), then restart the browser." });
-    out.push({ done: confirmedMappings.length > 0, label: "The companion extension is loaded and confirmed the link", hint: confirmedMappings.length ? null : `In the browser open chrome://extensions, enable Developer mode, press “Load unpacked” and choose the extension folder (button below). Then open the extension's popup once. The status next to the profile turns “Extension confirmed”.`, action: "ext" });
-    out.push({ done: firstSyncDone, label: "First sync completed — Connected", hint: firstSyncDone ? null : "The extension sends the bookmarks and the app uploads them. Close the browser once to sync extension settings and preferences." });
-    return out;
-  });
-  const required = $derived(steps.filter((x) => !x.optional));
-  const stepsDone = $derived(required.every((x) => x.done));
-
-  function cloudSummary(c) {
-    if (!c) return { label: "Checking…", cls: "muted" };
-    if (!c.configured) return { label: "Not configured", cls: "warn" };
-    if (!c.reachable) return { label: "Unreachable", cls: "bad" };
-    if (c.auth_ok && c.rest_ok && c.storage_ok) return { label: "Connected", cls: "ok" };
-    return { label: "Partially reachable", cls: "warn" };
-  }
   function probeBadge(p) {
     if (!p) return { label: "—", cls: "muted" };
     if (p.outcome === "unreachable") return { label: "unreachable", cls: "bad" };
     return { label: `${p.status ?? "?"} · ${p.latency_ms} ms`, cls: p.outcome === "ok" ? "ok" : "warn" };
   }
   const fmtExpiry = (ts) => (ts ? new Date(ts * 1000).toLocaleString() : "");
+  // Product shell: visible state comes from native data, never guessed browser activity.
+  let route = $state('overview');
+  let selectedId = $state(null);
+  let profileSearch = $state('');
+  let modal = $state(null);
+  let modalProfile = $state(null);
+  let modalMapping = $state(null);
+  let profileMethod = $state('choose');
+  let selectedLocal = $state('');
+  let selectedTarget = $state('');
+  let formName = $state('');
+  let formError = $state('');
+  let deleteName = $state('');
+  let toast = $state('');
+  let booting = $state(true);
+  let onboarding = $state(false);
+  let onboardingDismissed = $state(false);
+  let appearance = $state('system');
+  let systemDark = $state(false);
+  let detailsOpen = $state({});
+  const nav = [{id:'overview',name:'Overview',icon:'overview'},{id:'profiles',name:'Profiles',icon:'profiles'},{id:'devices',name:'Devices',icon:'devices'},{id:'activity',name:'Activity',icon:'activity'},{id:'settings',name:'Settings',icon:'settings'}];
+  const selectedProfile = $derived(profiles.find(p=>p.id===selectedId) ?? profiles[0] ?? null);
+  const selectedConnections = $derived(selectedProfile ? mappingsOf(selectedProfile.id) : []);
+  const visibleProfiles = $derived(profiles.filter(p=>p.name.toLocaleLowerCase().includes(profileSearch.toLocaleLowerCase())));
+  const attention = $derived(attentionSummary(myMappings.map(withDatasets),cloud?.reachable!==false));
+  const conflictCount = $derived(myMappings.reduce((n,m)=>n+connectionConflictCount(withDatasets(m)),0));
+  const localOptions = $derived(browsers.flatMap(b=>b.profiles.map(p=>({key:localKey(b,p),b,p,mapping:mappingFor(b,p)}))));
+  const pickedLocal = $derived(localOptions.find(o=>o.key===selectedLocal));
+  const setupMapping = $derived(modalMapping ? mappings.find(m=>m.id===modalMapping.id) : myMappings.find(m=>m.display_status!=='extension_confirmed'||!m.bookmarks?.last_upload_at));
+  const setupBrowser = $derived(setupMapping ? browsers.find(b=>b.kind===setupMapping.browser_kind) : null);
+  const setupComplete = $derived(!!setupMapping?.bookmarks && (!!setupMapping.bookmarks.last_upload_at || setupMapping.bookmarks.state==='up_to_date'));
+  const dark = $derived(appearance==='dark'||(appearance==='system'&&systemDark));
+  $effect(()=>{ document.documentElement.dataset.theme=dark?'dark':'light'; document.documentElement.style.colorScheme=dark?'dark':'light'; });
+
+  function setAppearance(value) { appearance=value; try{localStorage.setItem('synchrome.appearance',value);}catch{} }
+  function navigate(next) { route=next; actionError=null; if(next==='activity') for(const m of confirmedMappings){ conflictsOpen={...conflictsOpen,[m.id]:true}; loadConflicts(m); } }
+  function openProfile(p) { selectedId=p.id; navigate('profiles'); }
+  function openCreate(method='choose', option=null) { modal='profile'; modalProfile=null; modalMapping=null; profileMethod=method; selectedLocal=option?.key??''; selectedTarget=''; formName=option?.p.display_name??''; formError=''; }
+  function openConnect(p, option=null, existing=null) { modal='profile'; modalProfile=p; modalMapping=existing; profileMethod='connect'; selectedLocal=option?.key??''; selectedTarget=p?.id??''; formName=''; formError=''; }
+  function closeModal() { if(busyKey||authBusy)return; modal=null; formError=''; }
+  function pickLocal(value) { selectedLocal=value; if(profileMethod==='import'&&!formName) formName=localOptions.find(o=>o.key===value)?.p.display_name??''; formError=''; }
+  async function submitProfile(event) {
+    event.preventDefault(); if(busyKey)return;
+    const creates=['manual','import'].includes(profileMethod);
+    formError=creates?validateName(formName,profiles):'';
+    if(formError)return;
+    if(profileMethod!=='manual'&&!pickedLocal){formError='Choose a browser profile on this Mac.';return;}
+    const target=modalProfile?.id??selectedTarget;
+    if(profileMethod==='connect'&&!target){formError='Choose a Synchrome profile.';return;}
+    if(profileMethod==='connect'&&sameDeviceConflict(mappings,target,modalMapping?.id)){formError='This Synchrome profile already has a browser connected on this Mac. Choose a different profile, or change its existing connection.';return;}
+    busyKey='profile-form'; actionError=null;
+    try {
+      if(dataLoadPromise)await dataLoadPromise;
+      let result;
+      if(profileMethod==='manual') result=await invoke('create_profile',{name:formName.trim()});
+      else {
+        if(modalMapping){await invoke('unmap_local_profile',{mappingId:modalMapping.id});modalMapping=null;}
+        const args={browserKind:pickedLocal.b.kind,browserProfileDir:pickedLocal.p.dir_name,userDataDir:pickedLocal.b.user_data_dir};
+        result=await invoke(profileMethod==='import'?'create_and_map_local_profile':'map_local_profile', profileMethod==='import'?{...args,name:formName.trim()}:{...args,profileId:target});
+      }
+      await loadCloudData();
+      selectedId=result?.profile_id??result?.id??target; route='profiles';
+      if(profileMethod==='manual'){modal=null;toast='Profile created. Connect a browser to start syncing.';}
+      else {modalMapping=result;modal='setup';toast='Browser connected. Finish setup to start the first sync.';}
+    } catch(e) {formError=humanize(e).text;actionError=String(e);await loadCloudData();}
+    finally{busyKey=null;}
+  }
+  function requestDelete(p) { modal='delete';modalProfile=p;deleteName='';formError=''; }
+  async function confirmDelete() {
+    if(busyKey||deleteName!==modalProfile?.name)return;
+    busyKey='delete';actionError=null;
+    try {if(dataLoadPromise)await dataLoadPromise;await disconnectAndDelete(invoke,modalProfile.id,mappings);selectedId=null;modal=null;toast='Synchrome profile deleted. Your local browser profiles and bookmarks are still on each Mac.';}
+    catch(e){formError=humanize(e).text;actionError=String(e);if(e.profileDeleted){modal=null;selectedId=null;toast='Profile removed. Cloud cleanup needs attention; see the message above.';}}
+    finally{await loadCloudData();busyKey=null;}
+  }
+  async function submitAuth(values) {
+    authBusy=true;authError=null;
+    try{accountGeneration++;account=await invoke(values.mode==='signup'?'sign_up':'sign_in',{email:values.email,password:values.password});if(account?.signed_in){if(dataLoadPromise)await dataLoadPromise;await loadCloudData();onboarding=!myMappings.length;}return true;}
+    catch(e){authError=String(e);return false;}
+    finally{authBusy=false;}
+  }
+  function requestDisconnect(m) {modal='disconnect';modalMapping=m;formError='';}
+  async function confirmDisconnect() {
+    const ok=await act(`unmap:${modalMapping.id}`,()=>invoke('unmap_local_profile',{mappingId:modalMapping.id}));
+    if(ok){modal=null;toast='Browser disconnected. Its local data is unchanged.';}else formError=humanize(actionError).text;
+  }
+  function continueSetup(m) {modalMapping=m;modal='setup';formError='';}
+  async function saveProfileName(event) {event.preventDefault();formError=validateName(formName,profiles,modalProfile.id);if(formError)return;const ok=await act('rename',()=>invoke('rename_profile',{profileId:modalProfile.id,name:formName.trim()}));if(ok){modal=null;toast='Profile renamed.';}else formError=humanize(actionError).text;}
+  const withDatasets=m=>({...m,preferences:prefList[m.id],extension_settings:setList[m.id]});
+  const stateFor=m=>connectionState(withDatasets(m),cloud?.reachable!==false);
+  const profileView=p=>profileState(p,mappings.map(withDatasets),cloud?.reachable!==false);
+  function localName(m) { if(!m.is_this_device)return m.browser_profile_dir;const b=browsers.find(b=>b.kind===m.browser_kind);return b?.profiles.find(p=>p.dir_name===m.browser_profile_dir)?.display_name??m.browser_profile_dir; }
+  function browserName(kind) { return browsers.find(b=>b.kind===kind)?.display_name??({chrome:'Google Chrome',helium:'Helium'}[kind]??kind); }
+  async function openConnectionDetails(m) {detailsOpen={...detailsOpen,[m.id]:true};if(detailsOpen[m.id]){await Promise.all([loadPrefs(m),loadDiag(m)]);}}
+  async function refreshWorkspace(){await loadAll();toast=cloud?.reachable===false?'Still offline. Local changes are kept.':'Status refreshed.';}
+  onMount(()=>{
+    let alive=true; const media=window.matchMedia('(prefers-color-scheme: dark)');systemDark=media.matches;
+    try{const saved=localStorage.getItem('synchrome.appearance');if(['system','light','dark'].includes(saved))appearance=saved;}catch{}
+    const change=e=>systemDark=e.matches;media.addEventListener('change',change);
+    loadAll().finally(()=>{if(alive){booting=false;onboarding=signedIn&&!myMappings.length&&!onboardingDismissed;}});
+    let probeAt=Date.now();
+    const refreshVisible=()=>{if(!document.hidden&&signedIn&&!busyKey&&!authBusy&&!modal&&!cloudDataBusy){loadCloudData();if(Date.now()-probeAt>60000||cloud?.reachable===false){probeAt=Date.now();loadCloud();}}};
+    const timer=setInterval(refreshVisible,15000);window.addEventListener('focus',refreshVisible);
+    return()=>{alive=false;clearInterval(timer);window.removeEventListener('focus',refreshVisible);media.removeEventListener('change',change);};
+  });
 </script>
 
 {#snippet mappingBlock(m)}
@@ -548,12 +619,12 @@
   <span class="badge small {MAP_STATUS[m.display_status]?.cls ?? 'muted'}">{MAP_STATUS[m.display_status]?.label ?? m.display_status}</span>
   <span class="pdir">{m.device_name ?? "this device"}</span>
   {#if m.display_status !== "extension_confirmed"}
-    <button class="tiny-btn" onclick={() => retryWrite(m)} disabled={busyKey === `write:${m.id}`}
+    <button class="tiny-btn" onclick={() => retryWrite(m)} disabled={!!busyKey}
       title="Writes the link into this browser profile. The browser must be closed.">Retry local write</button>
   {/if}
-  <button class="tiny-btn" onclick={() => checkExtension(m)} disabled={busyKey === `check:${m.id}`}
+  <button class="tiny-btn" onclick={() => checkExtension(m)} disabled={!!busyKey}
     title="Re-reads the link status. The extension reconnects when the browser starts, or from its popup.">Check extension</button>
-  <button class="tiny-btn" onclick={() => unmap(m)} disabled={busyKey === `unmap:${m.id}`}>Unmap</button>
+  <button class="tiny-btn" onclick={() => unmap(m)} disabled={!!busyKey}>Unmap</button>
   {#if m.local_error}{@const h = humanize(m.local_error)}<span class="small bad">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span>{/if}
   {#if m.display_status === "extension_confirmed"}
     {@const bm = m.bookmarks ?? { state: "not_synced", bookmarks: 0, folders: 0, pending: 0 }}
@@ -564,7 +635,7 @@
       <span class="pdir">last upload {when(bm.last_upload_at)}</span>
       <span class="pdir">{bm.pending} pending</span>
       {#if bm.pending > 0}
-        <button class="tiny-btn" onclick={() => uploadNow(m)} disabled={busyKey === `upload:${m.id}`}
+        <button class="tiny-btn" onclick={() => uploadNow(m)} disabled={!!busyKey}
           title="Downloads remote changes and uploads the queued local ones now.">Sync now</button>
       {/if}
       {#if bm.error}{@const h = humanize(bm.error)}<span class="small bad">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span>{/if}
@@ -587,7 +658,129 @@
         {#if bm.download.error}{@const h = humanize(bm.download.error)}<span class="small bad">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span>{/if}
       </div>
     {/if}
-    {#if conflictsOpen[m.id]}
+    {#if conflictsOpen[m.id]}{@render conflictPanel(m)}{/if}
+
+  {/if}
+  {#if m.display_status === "extension_confirmed" && m.extensions}
+    {@const xs = m.extensions}
+    <div class="bookmarks-row">
+      <span class="small">Extensions</span>
+      <span class="badge small {xs.conflicts ? 'bad' : xs.differences || xs.missing || xs.user_action ? 'info' : 'ok'}">{xs.conflicts ? `Conflict · ${xs.conflicts}` : xs.differences || xs.missing || xs.user_action ? "Differences" : "Synced"}</span>
+      <span class="pdir">{xs.installed} installed · {xs.synced} synced · {xs.missing} missing · {xs.differences} differences · {xs.conflicts} conflicts{xs.user_action ? ` · ${xs.user_action} need you` : ""}</span>
+      <button class="tiny-btn" onclick={() => toggleExtensions(m)}>{extOpen[m.id] ? "Hide extensions" : "Extensions"}</button>
+    </div>
+    {#if extOpen[m.id]}
+      {@const xl = extList[m.id] ?? []}
+      <div class="conflicts">
+        {#if extMsg[m.id]}<p class="ok small" role="status">{extMsg[m.id]}</p>{/if}
+        {#if xl.length === 0}<p class="muted small">No extensions yet (the Synchrome extension itself is never listed).</p>{/if}
+        <table class="cmp">
+          <thead><tr><th>Extension</th><th>This device</th><th>Synchrome</th><th></th></tr></thead>
+          <tbody>
+            {#each xl as x (x.ext_id)}
+              <tr class={x.state === "synced" ? "" : "diff"}>
+                <td>{x.name}{#if x.version}<span class="pdir"> · v{x.version}</span>{/if}</td>
+                <td>{x.installed_here ? onOff(x.enabled_here) : "Missing"}</td>
+                <td>{x.installed_synced ? onOff(x.enabled_synced) : "Removed"}
+                  <br /><span class="badge small {X_STATE[x.state]?.cls ?? 'muted'}">{X_STATE[x.state]?.label ?? x.state}</span>
+                  {#if x.state === "missing"}<span class="pdir"> {X_AVAIL[x.availability] ?? x.availability}</span>{/if}
+                  {#if x.error}<span class="small bad"> {humanize(x.error).text}</span>{/if}
+                </td>
+                <td>
+                  {#each x.actions as a}
+                    {@const key = `${x.ext_id}:${a}`}
+                    <button class="tiny-btn {a === 'remove' ? 'danger' : ''}" disabled={!!busyKey} onclick={() => extAct(m, x, a)}>
+                      {extConfirm === key ? "Confirm: remove from this browser" : X_ACTION[a] ?? a}
+                    </button>
+                  {/each}
+                  {#if x.state === "conflict"}
+                    <button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Resolve conflict</button>
+                  {/if}
+                  {#if extConfirm?.startsWith(x.ext_id)}<button class="tiny-btn" onclick={() => (extConfirm = null)}>Cancel</button>{/if}
+                </td>
+              </tr>
+              {#if x.installed_here && x.state !== "protected"}
+                {@const sv = setList[m.id]?.[x.ext_id]}
+                {@const key = `${m.id}:${x.ext_id}`}
+                <tr class="settings-row"><td colspan="4">
+                  <span class="small">Settings sync</span>
+                  {#if sv}<span class="badge small {S_STATE[sv.state]?.cls ?? 'muted'}">{S_STATE[sv.state]?.label ?? sv.state}</span>{/if}
+                  <select aria-label={`Settings sync for ${x.name}`} value={setMode[key] ?? sv?.mode ?? "off"} onchange={(e) => (setMode = { ...setMode, [key]: e.currentTarget.value })} disabled={!!busyKey}>
+                    <option value="off">Off</option><option value="local">Local only</option><option value="local_sync">Local + Sync</option>
+                  </select>
+                  {#if (setMode[key] ?? sv?.mode ?? "off") !== (sv?.mode ?? "off")}
+                    <button class="tiny-btn" onclick={() => applyMode(m, x, setMode[key])}>{(setMode[key] ?? "off") === "off" ? "Disable" : "Enable settings sync"}</button>
+                  {/if}
+                  {#if sv && sv.mode !== "off"}
+                    <span class="pdir">{sv.keys_local} keys local · {sv.keys_sync} keys sync · {sv.pending} pending · {sv.conflicts} conflicts · {sv.excluded_sensitive} excluded sensitive</span>
+                    {#if sv.state === "error" || sv.state === "waiting_for_browser_close" || sv.state === "version_mismatch"}
+                      <button class="tiny-btn" onclick={() => settingsNow(m, x)} disabled={!!busyKey}>Retry</button>
+                    {/if}
+                    {#if sv.conflicts > 0}<button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Review conflicts</button>{/if}
+                    {#if sv.error}<span class="small bad">{humanize(sv.error).text}</span>{/if}
+                  {/if}
+                  {#if (setMode[key] ?? sv?.mode ?? "off") !== "off"}
+                    <span class="small warn">Extension settings may contain private data. Synchrome excludes keys that look sensitive (token, password, secret…), but cannot recognise every secret. Values are read and written only while this browser is closed.</span>
+                  {/if}
+                </td></tr>
+              {/if}
+            {/each}
+          </tbody>
+        </table>
+        <p class="hint tiny">Installing opens the official store page; removing asks for confirmation. Nothing is installed or uninstalled automatically.</p>
+      </div>
+    {/if}
+  {/if}
+  {#if m.display_status === "extension_confirmed" && diag[m.id]}
+    {@const dg = diag[m.id]}
+    <div class="bookmarks-row sync-health">
+      <span class="small">Sync health</span>
+      <span class="badge small {dg.realtime.connected ? 'ok' : 'muted'}">{dg.realtime.connected ? "Realtime connected" : dg.realtime.enabled ? "Realtime disconnected" : "Realtime off"}</span>
+      <span class="pdir">snapshot {dg.cloud?.current_generation ? `generation ${dg.cloud.current_generation}` : "none yet"} · {dg.snapshot_generations_kept} kept · last compacted {ago(serverSecs(dg.cloud?.current_ready_at, dg.cloud?.server_now) ?? dg.local.last_compaction_at)}{dg.local.last_gc_at ? ` · journals cleaned ${ago(dg.local.last_gc_at)}` : ""}</span>
+      {#if dg.gc_blocked}<span class="small warn">Journal cleanup paused: {(dg.cloud?.gc_blockers ?? dg.local?.gc_blockers ?? 0)} device{(dg.cloud?.gc_blockers ?? dg.local?.gc_blockers ?? 0) === 1 ? "" : "s"} mapped to this profile cannot read snapshots yet (update Synchrome there, or remove the device).</span>{/if}
+      {#if dg.local.snapshot_generation}<span class="small">This device started from snapshot generation {dg.local.snapshot_generation}{dg.local.bootstrap_fallback ? " (previous generation, the current one failed verification)" : ""}.</span>{/if}
+      {#if dg.this_device_retired}<span class="small warn">You removed this device from this profile's compaction: it still syncs, but it no longer holds journals for others. <button class="tiny-btn" onclick={() => deviceAction(m, dg.devices.find((d) => d.is_current), "reactivate")} disabled={!!busyKey}>Reactivate</button></span>{/if}
+      {#if dg.devices?.some((d) => (d.blocks_gc && !d.is_current) || (d.retired && !d.is_current))}
+        <span class="small">Devices on this profile:</span>
+        {#each dg.devices.filter((d) => !d.is_current && (d.blocks_gc || d.retired)) as d (d.device_id)}
+          {@const key = `${m.profile_id}:${d.device_id}:retire`}
+          <span class="pdir">{d.name} — {d.retired ? "removed from compaction" : "cannot read snapshots yet"}
+            {#if d.retired}<button class="tiny-btn" onclick={() => deviceAction(m, d, "reactivate")} disabled={!!busyKey}>Reactivate</button>
+            {:else}<button class="tiny-btn {deviceConfirm === key ? 'danger' : ''}" onclick={() => deviceAction(m, d, "retire")} disabled={!!busyKey}>{deviceConfirm === key ? "Confirm: remove from this profile's compaction" : "Remove from compaction"}</button>{/if}
+          </span>
+        {/each}
+      {/if}
+    </div>
+  {/if}
+  {#if m.display_status === "extension_confirmed"}
+    {@const pv = prefList[m.id]}
+    {@const chosen = prefMode[m.id] ?? pv?.mode ?? "off"}
+    <div class="bookmarks-row prefs-row">
+      <span class="small">Browser preferences</span>
+      {#if pv}<span class="badge small {P_STATE[pv.state]?.cls ?? 'muted'}">{P_STATE[pv.state]?.label ?? pv.state}</span>{/if}
+      <select aria-label="Browser preferences sync" value={chosen} onchange={(e) => (prefMode = { ...prefMode, [m.id]: e.currentTarget.value })} disabled={!!busyKey}>
+        <option value="off">Off</option><option value="recommended">Sync recommended preferences</option>
+      </select>
+      {#if chosen !== (pv?.mode ?? "off")}
+        <button class="tiny-btn" onclick={() => applyPrefsMode(m, chosen)} disabled={!!busyKey}>{chosen === "off" ? "Disable" : "Enable"}</button>
+      {/if}
+      {#if pv && pv.mode !== "off"}
+        <span class="pdir">{pv.synced} preferences synced · {pv.unsupported} unsupported · {pv.pending} pending · {pv.conflicts} conflicts{pv.invalid ? ` · ${pv.invalid} invalid` : ""}</span>
+        {#if ["error", "waiting_for_browser_close", "version_mismatch", "unsupported"].includes(pv.state)}
+          <button class="tiny-btn" onclick={() => prefsNow(m)} disabled={!!busyKey}>Retry</button>
+        {/if}
+        {#if pv.conflicts > 0}<button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Review conflicts</button>{/if}
+        {#if pv.error}{@const h = humanize(pv.error)}<span class="small bad">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span>{/if}
+      {/if}
+      {#if chosen !== "off"}
+        <span class="small warn">Browser preferences may affect how your browser behaves on this device.</span>
+      {/if}
+      {#if prefMsg[m.id]}<span class="ok small" role="status">{prefMsg[m.id]}</span>{/if}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet conflictPanel(m)}
       {@const list = conflictList[m.id] ?? []}
       {@const openList = list.filter((c) => c.status === "unresolved" || c.status === "resolving")}
       {@const closed = list.filter((c) => c.status === "resolved" || c.status === "superseded")}
@@ -602,7 +795,7 @@
           <div class="conflict">
             <div class="conflict-head">
               <span class="badge small {C_STATUS[c.status].cls}">{C_STATUS[c.status].label}</span>
-              <strong>{c.item_kind === "folder" ? "Folder" : "Bookmark"} “{c.name}”</strong>
+              <strong>{c.item_kind === "folder" ? "Folder" : c.item_kind === "extension" ? "Extension" : c.item_kind === "setting" ? "Extension setting" : c.item_kind === "preference" ? "Browser preference" : "Bookmark"} “{c.name}”</strong>
               <span class="pdir">{C_SUBTYPE[c.subtype] ?? c.subtype}</span>
             </div>
             <div class="pdir">Since {when(c.created_at)} · other device: {deviceName(c.remote_device)}{c.held > 1 ? ` · ${c.held} remote changes held` : ""}{c.attempts > 1 ? ` · ${c.attempts} failed attempts` : ""}{c.detail && c.kind === "apply_failed" ? ` · browser: ${c.detail}` : ""}</div>
@@ -623,7 +816,7 @@
               <div class="conflict-actions">
                 {#each c.options as o}
                   {@const key = `${c.conflict_id}:${o.resolution}`}
-                  <button class="tiny-btn {o.destructive ? 'danger' : ''}" onclick={() => choose(m, c, o)} disabled={busyKey === `resolve:${c.conflict_id}`}>
+                  <button class="tiny-btn {o.destructive ? 'danger' : ''}" onclick={() => choose(m, c, o)} disabled={!!busyKey}>
                     {confirmKey === key ? `Confirm: ${optLabel(c, o.resolution)}` : optLabel(c, o.resolution)}
                   </button>
                 {/each}
@@ -655,462 +848,149 @@
           {/if}
         {/if}
       </div>
-    {/if}
-  {/if}
-  {#if m.display_status === "extension_confirmed" && m.extensions}
-    {@const xs = m.extensions}
-    <div class="bookmarks-row">
-      <span class="small">Extensions</span>
-      <span class="badge small {xs.conflicts ? 'bad' : xs.differences || xs.missing || xs.user_action ? 'info' : 'ok'}">{xs.conflicts ? `Conflict · ${xs.conflicts}` : xs.differences || xs.missing || xs.user_action ? "Differences" : "Synced"}</span>
-      <span class="pdir">{xs.installed} installed · {xs.synced} synced · {xs.missing} missing · {xs.differences} differences · {xs.conflicts} conflicts{xs.user_action ? ` · ${xs.user_action} need you` : ""}</span>
-      <button class="tiny-btn" onclick={() => toggleExtensions(m)}>{extOpen[m.id] ? "Hide extensions" : "Extensions"}</button>
-    </div>
-    {#if extOpen[m.id]}
-      {@const xl = extList[m.id] ?? []}
-      <div class="conflicts">
-        {#if extMsg[m.id]}<p class="ok small" role="status">{extMsg[m.id]}</p>{/if}
-        {#if xl.length === 0}<p class="muted small">No extensions yet (the Synchrome extension itself is never listed).</p>{/if}
-        <table class="cmp">
-          <thead><tr><th>Extension</th><th>This device</th><th>Synchrome</th><th></th></tr></thead>
-          <tbody>
-            {#each xl as x (x.ext_id)}
-              <tr class={x.state === "synced" ? "" : "diff"}>
-                <td>{x.name}{#if x.version}<span class="pdir"> · v{x.version}</span>{/if}</td>
-                <td>{x.installed_here ? onOff(x.enabled_here) : "Missing"}</td>
-                <td>{x.installed_synced ? onOff(x.enabled_synced) : "Removed"}
-                  <br /><span class="badge small {X_STATE[x.state]?.cls ?? 'muted'}">{X_STATE[x.state]?.label ?? x.state}</span>
-                  {#if x.state === "missing"}<span class="pdir"> {X_AVAIL[x.availability] ?? x.availability}</span>{/if}
-                  {#if x.error}<span class="small bad"> {x.error}</span>{/if}
-                </td>
-                <td>
-                  {#each x.actions as a}
-                    {@const key = `${x.ext_id}:${a}`}
-                    <button class="tiny-btn {a === 'remove' ? 'danger' : ''}" disabled={busyKey === `ext:${x.ext_id}`} onclick={() => extAct(m, x, a)}>
-                      {extConfirm === key ? "Confirm: remove from this browser" : X_ACTION[a] ?? a}
-                    </button>
-                  {/each}
-                  {#if x.state === "conflict"}
-                    <button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Resolve conflict</button>
-                  {/if}
-                  {#if extConfirm?.startsWith(x.ext_id)}<button class="tiny-btn" onclick={() => (extConfirm = null)}>Cancel</button>{/if}
-                </td>
-              </tr>
-              {#if x.installed_here && x.state !== "protected"}
-                {@const sv = setList[m.id]?.[x.ext_id]}
-                {@const key = `${m.id}:${x.ext_id}`}
-                <tr class="settings-row"><td colspan="4">
-                  <span class="small">Settings sync</span>
-                  {#if sv}<span class="badge small {S_STATE[sv.state]?.cls ?? 'muted'}">{S_STATE[sv.state]?.label ?? sv.state}</span>{/if}
-                  <select value={setMode[key] ?? sv?.mode ?? "off"} onchange={(e) => (setMode = { ...setMode, [key]: e.currentTarget.value })} disabled={busyKey === `set:${x.ext_id}`}>
-                    <option value="off">Off</option><option value="local">Local only</option><option value="local_sync">Local + Sync</option>
-                  </select>
-                  {#if (setMode[key] ?? sv?.mode ?? "off") !== (sv?.mode ?? "off")}
-                    <button class="tiny-btn" onclick={() => applyMode(m, x, setMode[key])}>{(setMode[key] ?? "off") === "off" ? "Disable" : "Enable settings sync"}</button>
-                  {/if}
-                  {#if sv && sv.mode !== "off"}
-                    <span class="pdir">{sv.keys_local} keys local · {sv.keys_sync} keys sync · {sv.pending} pending · {sv.conflicts} conflicts · {sv.excluded_sensitive} excluded sensitive</span>
-                    {#if sv.state === "error" || sv.state === "waiting_for_browser_close" || sv.state === "version_mismatch"}
-                      <button class="tiny-btn" onclick={() => settingsNow(m, x)} disabled={busyKey === `set:${x.ext_id}`}>Retry</button>
-                    {/if}
-                    {#if sv.conflicts > 0}<button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Review conflicts</button>{/if}
-                    {#if sv.error}<span class="small bad">{sv.error}</span>{/if}
-                  {/if}
-                  {#if (setMode[key] ?? sv?.mode ?? "off") !== "off"}
-                    <span class="small warn">Extension settings may contain private data. Synchrome excludes keys that look sensitive (token, password, secret…), but cannot recognise every secret. Values are read and written only while this browser is closed.</span>
-                  {/if}
-                </td></tr>
-              {/if}
-            {/each}
-          </tbody>
-        </table>
-        <p class="hint tiny">Installing opens the official store page; removing asks for confirmation. Nothing is installed or uninstalled automatically.</p>
-      </div>
-    {/if}
-  {/if}
-  {#if m.display_status === "extension_confirmed" && diag[m.id]}
-    {@const dg = diag[m.id]}
-    <div class="bookmarks-row sync-health">
-      <span class="small">Sync health</span>
-      <span class="badge small {dg.realtime.connected ? 'ok' : 'muted'}">{dg.realtime.connected ? "Realtime connected" : dg.realtime.enabled ? "Realtime disconnected" : "Realtime off"}</span>
-      <span class="pdir">snapshot {dg.cloud?.current_generation ? `generation ${dg.cloud.current_generation}` : "none yet"} · {dg.snapshot_generations_kept} kept · last compacted {ago(serverSecs(dg.cloud?.current_ready_at, dg.cloud?.server_now) ?? dg.local.last_compaction_at)}{dg.local.last_gc_at ? ` · journals cleaned ${ago(dg.local.last_gc_at)}` : ""}</span>
-      {#if dg.gc_blocked}<span class="small warn">Journal cleanup paused: {dg.cloud.gc_blockers} device{dg.cloud.gc_blockers === 1 ? "" : "s"} mapped to this profile cannot read snapshots yet (update Synchrome there, or remove the device).</span>{/if}
-      {#if dg.local.snapshot_generation}<span class="small">This device started from snapshot generation {dg.local.snapshot_generation}{dg.local.bootstrap_fallback ? " (previous generation, the current one failed verification)" : ""}.</span>{/if}
-      {#if dg.this_device_retired}<span class="small warn">You removed this device from this profile's compaction: it still syncs, but it no longer holds journals for others. <button class="tiny-btn" onclick={() => deviceAction(m, dg.devices.find((d) => d.is_current), "reactivate")} disabled={!!busyKey}>Reactivate</button></span>{/if}
-      {#if dg.devices?.some((d) => (d.blocks_gc && !d.is_current) || (d.retired && !d.is_current))}
-        <span class="small">Devices on this profile:</span>
-        {#each dg.devices.filter((d) => !d.is_current && (d.blocks_gc || d.retired)) as d (d.device_id)}
-          {@const key = `${m.profile_id}:${d.device_id}:retire`}
-          <span class="pdir">{d.name} — {d.retired ? "removed from compaction" : "cannot read snapshots yet"}
-            {#if d.retired}<button class="tiny-btn" onclick={() => deviceAction(m, d, "reactivate")} disabled={!!busyKey}>Reactivate</button>
-            {:else}<button class="tiny-btn {deviceConfirm === key ? 'danger' : ''}" onclick={() => deviceAction(m, d, "retire")} disabled={!!busyKey}>{deviceConfirm === key ? "Confirm: remove from this profile's compaction" : "Remove from compaction"}</button>{/if}
-          </span>
-        {/each}
-      {/if}
-    </div>
-  {/if}
-  {#if m.display_status === "extension_confirmed"}
-    {@const pv = prefList[m.id]}
-    {@const chosen = prefMode[m.id] ?? pv?.mode ?? "off"}
-    <div class="bookmarks-row prefs-row">
-      <span class="small">Browser preferences</span>
-      {#if pv}<span class="badge small {P_STATE[pv.state]?.cls ?? 'muted'}">{P_STATE[pv.state]?.label ?? pv.state}</span>{/if}
-      <select value={chosen} onchange={(e) => (prefMode = { ...prefMode, [m.id]: e.currentTarget.value })} disabled={busyKey === `prefs:${m.id}`}>
-        <option value="off">Off</option><option value="recommended">Sync recommended preferences</option>
-      </select>
-      {#if chosen !== (pv?.mode ?? "off")}
-        <button class="tiny-btn" onclick={() => applyPrefsMode(m, chosen)} disabled={busyKey === `prefs:${m.id}`}>{chosen === "off" ? "Disable" : "Enable"}</button>
-      {/if}
-      {#if pv && pv.mode !== "off"}
-        <span class="pdir">{pv.synced} preferences synced · {pv.unsupported} unsupported · {pv.pending} pending · {pv.conflicts} conflicts{pv.invalid ? ` · ${pv.invalid} invalid` : ""}</span>
-        {#if ["error", "waiting_for_browser_close", "version_mismatch", "unsupported"].includes(pv.state)}
-          <button class="tiny-btn" onclick={() => prefsNow(m)} disabled={busyKey === `prefs:${m.id}`}>Retry</button>
-        {/if}
-        {#if pv.conflicts > 0}<button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Review conflicts</button>{/if}
-        {#if pv.error}{@const h = humanize(pv.error)}<span class="small bad">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span>{/if}
-      {/if}
-      {#if chosen !== "off"}
-        <span class="small warn">Browser preferences may affect how your browser behaves on this device.</span>
-      {/if}
-      {#if prefMsg[m.id]}<span class="ok small" role="status">{prefMsg[m.id]}</span>{/if}
-    </div>
-  {/if}
+
 {/snippet}
 
-<main>
-  <header>
-    <h1>Synchrome</h1>
-    <span class="ua">{version}</span>
-    <button class="right" onclick={loadAll} disabled={loadingBrowsers || loadingCloud || cloudDataBusy}>
-      {loadingBrowsers || loadingCloud || cloudDataBusy ? "Refreshing…" : "Refresh"}
-    </button>
-  </header>
-
-  {#if error}{@const h = humanize(error)}<div class="error"><span>{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span></div>{/if}
-  {#if actionError}{@const h = humanize(actionError)}<div class="error"><span>{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span> <button class="tiny-btn" onclick={() => (actionError = null)}>Dismiss</button></div>{/if}
-  {#if location && !location.stable}<div class="notice warn">{location.reason}</div>{/if}
-
-  <!-- ===== Getting started ===== -->
-  <section class="card">
-    <div class="card-head">
-      <h2>Getting started</h2>
-      <span class="badge {stepsDone ? 'ok' : 'info'}">{stepsDone ? "Connected" : `${required.filter((x) => x.done).length} / ${required.length}`}</span>
-      <button class="tiny-btn right" onclick={() => (showSteps = !showSteps)}>{showSteps ? "Hide" : "Show"}</button>
-    </div>
-    {#if showSteps}
-      <ol class="steps">
-        {#each steps as st}
-          <li class={st.done ? "done" : st.optional ? "optional" : ""}>
-            <span class="tick">{st.done ? "✓" : st.optional ? "·" : "○"}</span>
-            <span class="grow">{st.label}{#if st.hint}<span class="hint small"> — {st.hint}</span>{/if}
-              {#if st.action === "fda"}
-                <span class="row-actions"><button class="tiny-btn" onclick={openFdaSettings}>Open System Settings</button><button class="tiny-btn" onclick={loadBrowsers} disabled={loadingBrowsers}>Re-check</button></span>
-              {:else if st.action === "ext" && !st.done}
-                <span class="row-actions"><button class="tiny-btn" onclick={revealExtension} disabled={!extFolder}>Show extension folder</button>{#if extFolder}<code>{extFolder}</code>{:else if extFolderError}<span class="small bad">{extFolderError}</span>{/if}</span>
-              {/if}
-            </span>
-          </li>
-        {/each}
-      </ol>
-    {/if}
-  </section>
-
-  <!-- ===== Account ===== -->
-  <section class="card">
-    <div class="card-head">
-      <h2>Account</h2>
-      <span class="badge {signedIn ? 'ok' : 'muted'}">{signedIn ? "Signed in" : "Signed out"}</span>
-    </div>
-
-    {#if signedIn}
-      <div class="kv"><span>Signed in as</span><strong>{account.email ?? account.user_id}</strong></div>
-      <div class="kv"><span>Session expires</span><span>{fmtExpiry(account.expires_at)}{account.needs_refresh ? " · needs refresh" : ""}</span></div>
-      <div class="actions row">
-        <button onclick={refresh} disabled={authBusy}>Refresh session</button>
-        <button class="danger" onclick={signOut} disabled={authBusy}>{authBusy ? "…" : "Sign out"}</button>
+{#snippet profileMark(p, large=false)}
+  <span class:large class="profile-mark" style={`--profile-hue: ${[164,217,33,282,8][profiles.findIndex(x=>x.id===p.id)%5]??164}`} aria-hidden="true">{(Array.from(p.name)[0]??'P').toLocaleUpperCase()}</span>
+{/snippet}
+{#snippet status(state)}<span class={`status ${state.tone}`}><span class="status-dot"></span>{state.label}</span>{/snippet}
+{#snippet errorNotice(value, retry=false)}
+  {@const friendly=humanize(value)}
+  <div class="notice danger" role="alert"><Icon name="warning" size={19}/><div><strong>{friendly.text}</strong>{#if friendly.detail}<details class="tech"><summary>Technical details</summary><code>{friendly.detail}</code></details>{/if}</div>{#if retry}<button class="button secondary" onclick={refreshWorkspace} disabled={cloudDataBusy}>Retry</button>{/if}</div>
+{/snippet}
+{#snippet emptyProfiles()}
+  <div class="empty-state"><span class="empty-symbol"><Icon name="profiles" size={30}/></span><h2>A place for every part of your browsing.</h2><p>Create Personal, Work, or any profile you need. Connect a browser on this Mac, then bring it to your other Macs.</p><div class="actions"><button class="button primary" onclick={()=>openCreate('import')}><Icon name="download" size={17}/>Use a browser profile</button><button class="button secondary" onclick={()=>openCreate('manual')}>Start fresh</button></div></div>
+{/snippet}
+{#snippet connection(m)}
+  {@const state=stateFor(m)}
+  <div class="connection" data-mapping-id={m.id}>
+    <div class="connection-main"><span class="browser-symbol"><Icon name="browser" size={22}/></span><div class="grow"><strong>{browserName(m.browser_kind)} <span class="separator">/</span> {localName(m)}</strong><p>{state.description}</p></div>{@render status(state)}</div>
+    {#if m.is_this_device}
+      <div class="connection-actions">
+        {#if state.action==='conflicts'}<button class="button primary small-button" onclick={()=>navigate('activity')}>Review conflicts</button>
+        {:else if state.action==='setup'}<button class="button primary small-button" onclick={()=>continueSetup(m)}>Finish setup</button>
+        {:else if state.action==='extensions'}<button class="button secondary small-button" onclick={async()=>{await openConnectionDetails(m);if(!extOpen[m.id])await toggleExtensions(m);}}>Review extensions</button>
+        {:else if state.action==='details'}<button class="button secondary small-button" onclick={()=>openConnectionDetails(m)}>View details</button>
+        {:else if state.action==='retry'}<button class="button secondary small-button" onclick={()=>retryWrite(m)} disabled={!!busyKey}>Retry link</button>
+        {:else}<button class="button secondary small-button" onclick={()=>uploadNow(m)} disabled={!!busyKey}>Sync now</button>{/if}
+        <button class="button quiet small-button" onclick={()=>openConnect(profiles.find(p=>p.id===m.profile_id),null,m)} disabled={!!busyKey}>Change browser</button><button class="button quiet small-button" onclick={()=>requestDisconnect(m)} disabled={!!busyKey}>Disconnect</button>
       </div>
-      {#if account.error}<p class="warn small">{account.error}</p>{/if}
+      <details class="connection-details" open={detailsOpen[m.id]} ontoggle={(event)=>{const opened=event.currentTarget.open;const changed=opened!==!!detailsOpen[m.id];detailsOpen={...detailsOpen,[m.id]:opened};if(opened&&changed){loadPrefs(m);loadDiag(m);}}}><summary>Connection details &amp; diagnostics</summary><div class="advanced-content">{@render mappingBlock(m)}</div></details>
+    {:else}<div class="remote-note"><Icon name="info" size={15}/><span>Manage sync in Synchrome on {m.device_name??'that Mac'}. This connection does not show its live status.</span><button class="button quiet small-button" onclick={()=>requestDisconnect(m)} disabled={!!busyKey}>Disconnect</button></div>{/if}
+  </div>
+{/snippet}
 
-      <!-- Devices -->
-      <div class="sub">
-        <div class="sub-head"><h3>Devices</h3>
-          <button class="tiny-btn" onclick={loadCloudData} disabled={cloudDataBusy}>{cloudDataBusy ? "…" : "Reload"}</button>
-        </div>
-        {#if cloudDataError}
-          {@const h = humanize(cloudDataError)}<p class="warn small">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</p>
-        {:else if devices.length === 0}
-          <p class="muted small">{cloudDataBusy ? "Registering this device…" : "No devices registered yet."}</p>
-        {:else}
-          <ul class="plain">
-            {#each devices as d (d.device_id)}
-              <li class="row-item">
-                <span class="pname">{d.name}</span>
-                <span class="pdir">{d.platform}{d.os_version ? ` · ${d.os_version}` : ""} · v{d.app_version}</span>
-                {#if d.is_current}<span class="badge small ok">This device</span>{/if}
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-
-      <!-- Cloud profiles -->
-      <div class="sub">
-        <div class="sub-head"><h3>Synchrome profiles</h3><span class="badge muted small">{profiles.length}</span></div>
-        <form class="inline" onsubmit={(e) => { e.preventDefault(); createProfile(); }}>
-          <input placeholder="New profile name" bind:value={newProfileName} maxlength="200" disabled={busyKey === "create"} />
-          <button type="submit" disabled={!newProfileName.trim() || busyKey === "create"}>{busyKey === "create" ? "Creating…" : "Create profile"}</button>
-        </form>
-        {#if profiles.length === 0}
-          <p class="muted small">No Synchrome profiles yet. Create one here or from a browser profile below.</p>
-        {:else}
-          <ul class="plain">
-            {#each profiles as p (p.id)}
-              {@const used = mappingsOf(p.id)}
-              <li class="row-item">
-                {#if renamingId === p.id}
-                  <input class="grow" bind:value={renameValue} maxlength="200" />
-                  <button class="tiny-btn" onclick={() => saveRename(p)} disabled={!renameValue.trim() || busyKey === `rename:${p.id}`}>Save</button>
-                  <button class="tiny-btn" onclick={() => (renamingId = null)}>Cancel</button>
-                {:else}
-                  <span class="pname">{p.name}</span>
-                  <span class="pdir">{used.length === 0 ? "not mapped" : `mapped on ${used.length} device${used.length > 1 ? "s" : ""}`}</span>
-                  <button class="tiny-btn" onclick={() => startRename(p)}>Rename</button>
-                  <button class="tiny-btn danger" onclick={() => deleteProfile(p)}
-                    disabled={used.length > 0 || busyKey === `delete:${p.id}`}
-                    title={used.length > 0 ? "Unmap it on every device first" : "Delete this Synchrome profile"}>Delete</button>
-                {/if}
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    {:else}
-      <form class="login" onsubmit={(e) => { e.preventDefault(); return creatingAccount ? signUp() : signIn(e); }}>
-        <label>Email
-          <input type="email" bind:value={email} autocomplete="username" required disabled={authBusy || !cloudReady} />
-        </label>
-        <label>Password
-          <input type="password" bind:value={password} autocomplete={creatingAccount ? "new-password" : "current-password"} required minlength={creatingAccount ? 8 : undefined} disabled={authBusy || !cloudReady} />
-        </label>
-        <div class="row-actions">
-          <button type="submit" disabled={authBusy || !cloudReady || !email || !password}>{authBusy ? (creatingAccount ? "Creating…" : "Signing in…") : (creatingAccount ? "Create account" : "Sign in")}</button>
-          <button type="button" class="tiny-btn" onclick={() => (creatingAccount = !creatingAccount)} disabled={authBusy}>{creatingAccount ? "I already have an account" : "Create an account"}</button>
-        </div>
-      </form>
-      {#if !cloudReady}<p class="hint">Sign-in is enabled once Synchrome Cloud is configured and its Auth service is reachable.</p>{/if}
-      {#if account?.error}<p class="warn small">{account.error}</p>{/if}
-    {/if}
-    {#if authError}{@const h = humanize(authError)}<p class="bad small">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</p>{/if}
-    {#if device}
-      <p class="hint tiny">This device: <strong>{device.device_name}</strong> · {device.platform}{device.os_version ? ` · ${device.os_version}` : ""} · id {device.device_id.slice(0, 8)}…</p>
-    {/if}
-    <p class="hint tiny">Your session is stored only in the macOS Keychain. Tokens never reach this window.</p>
-    <p class="hint tiny">Updates: Synchrome {version.replace(/^Synchrome\//, "")} is updated manually — download the new version and replace the app in Applications. Your account, links and data stay.</p>
-  </section>
-
-  <!-- ===== Cloud ===== -->
-  <section class="card">
-    <div class="card-head">
-      <h2>Synchrome Cloud</h2>
-      {#if cloud}
-        {@const s = cloudSummary(cloud)}
-        <span class="badge {s.cls}">{s.label}</span>
-      {:else}
-        <span class="badge muted">Checking…</span>
-      {/if}
-    </div>
-    {#if loadingCloud && !cloud}
-      <div class="muted">Probing endpoint…</div>
-    {:else if cloud && !cloud.configured}
-      <p class="warn">{cloud.error}</p>
-      <p class="hint">Add <code>SUPABASE_URL</code> and <code>SUPABASE_ANON_KEY</code> to a <code>.env</code> file (see <code>.env.example</code>). Only publishable values.</p>
-    {:else if cloud}
-      {@const a = probeBadge(cloud.auth)}
-      {@const r = probeBadge(cloud.rest)}
-      {@const st = probeBadge(cloud.storage)}
-      <div class="kv"><span>Endpoint</span><code>{cloud.endpoint}</code></div>
-      <div class="services">
-        <div class="svc"><span>Auth</span><span class="badge small {a.cls}">{a.label}</span></div>
-        <div class="svc"><span>PostgREST</span><span class="badge small {r.cls}">{r.label}</span></div>
-        <div class="svc"><span>Storage</span><span class="badge small {st.cls}">{st.label}</span></div>
-      </div>
-      {#if cloud.error}<p class="bad">{cloud.error}</p>{/if}
-    {/if}
-  </section>
-
-  <!-- ===== Browsers ===== -->
-  <section class="card">
-    <div class="card-head">
-      <h2>Browsers on this device</h2>
-      <span class="badge muted">{browsers.length} browsers · {totalProfiles} profiles</span>
-    </div>
-    <p class="lead">Mapping only links profiles in your account. Nothing is written into the browser yet.</p>
-    {#if needsFda}
-      <div class="notice warn">Chrome, Brave and Edge keep their profiles in folders macOS protects. To sync them, add Synchrome under <strong>System Settings → Privacy &amp; Security → Full Disk Access</strong> (macOS never asks for this on its own), then press Re-check. Helium needs nothing.
-        <span class="row-actions"><button class="tiny-btn" onclick={openFdaSettings}>Open System Settings</button><button class="tiny-btn" onclick={loadBrowsers} disabled={loadingBrowsers}>Re-check</button></span></div>
-    {/if}
-    {#if loadingBrowsers}
-      <div class="muted">Scanning…</div>
-    {:else if browsers.length === 0}
-      <div class="muted">No Chromium-family browsers found.</div>
-    {:else}
-      <ul class="browsers">
-        {#each browsers as b (b.user_data_dir)}
-          <li class="browser">
-            <div class="browser-head">
-              <span class="name">{b.display_name}</span>
-              {#if b.version}<span class="ver">v{b.version}</span>{/if}
-              <span class="badge {ACCESS[b.access]?.cls ?? 'muted'}">{ACCESS[b.access]?.label ?? b.access}</span>
-            </div>
-            <div class="path">{b.user_data_dir}</div>
-            <div class="connector">
-              <button class="tiny-btn" onclick={() => installConnector(b)}
-                title="Registers Synchrome's native messaging connector for this browser (not a profile write).">Install connector</button>
-              {#if connectorMsg[b.kind]}<span class="pdir">{connectorMsg[b.kind]}</span>{/if}
-            </div>
-            {#if b.profiles.length > 0}
-              <ul class="profiles">
-                {#each b.profiles as p (p.dir_name)}
-                  {@const m = mappingFor(b, p)}
-                  {@const key = localKey(b, p)}
-                  <li class="profile">
-                    <div class="profile-main">
-                      <span class="pname">{p.display_name ?? p.dir_name}</span>
-                      <span class="pdir">{p.dir_name}</span>
-                      <span class="badge small {ACCESS[p.access]?.cls ?? 'muted'}">{ACCESS[p.access]?.label ?? p.access}</span>
-                    </div>
-                    {#if signedIn}
-                      <div class="profile-map">
-                        {#if m}
-                          {@render mappingBlock(m)}
-                        {:else}
-                          <button class="tiny-btn" onclick={() => createAndMap(b, p)} disabled={busyKey === `map:${key}`}>
-                            {busyKey === `map:${key}` ? "…" : "Create Synchrome profile"}
-                          </button>
-                          {#if mappableProfiles.length > 0}
-                            <select bind:value={mapChoice[key]} disabled={busyKey === `map:${key}`}>
-                              <option value={undefined}>Map to existing…</option>
-                              {#each mappableProfiles as cp (cp.id)}<option value={cp.id}>{cp.name}</option>{/each}
-                            </select>
-                            <button class="tiny-btn" onclick={() => mapExisting(b, p)} disabled={!mapChoice[key] || busyKey === `map:${key}`}>Map</button>
-                          {/if}
-                        {/if}
-                      </div>
-                    {/if}
-                  </li>
-                {/each}
-              </ul>
-            {:else if b.access === "requires_full_disk_access"}
-              <div class="profiles-note warn">Profiles are hidden until Full Disk Access is granted.</div>
-            {:else}
-              <div class="profiles-note muted">No profiles found.</div>
+<svelte:head><title>Synchrome — {signedIn?nav.find(n=>n.id===route)?.name??'Profiles':'Welcome'}</title></svelte:head>
+{#if previewEnabled}<div class="preview-banner" role="note">Development preview · {previewScenario} · sample data</div>{/if}
+{#if booting}
+  <main class="boot" aria-busy="true"><span class="brand-logo"><Icon name="logo" size={31}/></span><h1>Synchrome</h1><p>Opening your workspace…</p><span class="loading-line"></span></main>
+{:else if !signedIn}
+  <AuthView busy={authBusy} error={authError?humanize(authError):error?humanize(error):account?.error?humanize(account.error):null} {cloud} {account} onsubmit={submitAuth} onretry={loadAll}/>
+{:else}
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="workspace">
+    <aside class="sidebar">
+      <a href="#main-content" class="brand" onclick={(event)=>{event.preventDefault();navigate('overview');}} aria-label="Synchrome overview"><span class="brand-logo"><Icon name="logo" size={25}/></span><span>Synchrome</span></a>
+      <nav aria-label="Main navigation">{#each nav as item}<button class:active={route===item.id} class="nav-item" aria-current={route===item.id?'page':undefined} aria-label={item.name} title={item.name} data-testid={`nav-${item.id}`} onclick={()=>navigate(item.id)}><Icon name={item.icon} size={20}/><span>{item.name}</span>{#if item.id==='activity'&&conflictCount}<span class="nav-count">{conflictCount}</span>{/if}</button>{/each}</nav>
+      <div class="sidebar-bottom"><div class="service-status">{@render status(cloudState(cloud))}</div><button class="account-button" onclick={()=>navigate('settings')} title={account.email}><span class="avatar">{(account.email??'S').slice(0,1).toUpperCase()}</span><span class="account-text"><strong>{account.email?.split('@')[0]??'Your account'}</strong><span>{device?.device_name??'This Mac'}</span></span><Icon name="settings" size={16}/></button></div>
+    </aside>
+    <div class="work-area">
+      <header class="topbar"><span>{device?.device_name??'This Mac'}<span class="topbar-divider">/</span>{nav.find(n=>n.id===route)?.name}</span><div class="topbar-actions">{#if cloudDataBusy}<span class="refresh-label" role="status">Updating…</span>{/if}<button class="icon-button" aria-label="Refresh workspace" title="Refresh workspace" onclick={refreshWorkspace} disabled={cloudDataBusy||!!busyKey}><Icon name="refresh" size={18}/></button><button class="icon-button" aria-label={dark?'Switch to light mode':'Switch to dark mode'} title={dark?'Switch to light mode':'Switch to dark mode'} onclick={()=>setAppearance(dark?'light':'dark')}><Icon name={dark?'sun':'moon'} size={18}/></button></div></header>
+      <main id="main-content" class="main-content" tabindex="-1">
+        {#if cloud?.reachable===false}<div class="notice warning"><Icon name="cloud" size={19}/><div><strong>You’re offline. Your local changes are kept.</strong><p>Sync resumes when Synchrome Cloud is available.</p></div><button class="button secondary" onclick={refreshWorkspace} disabled={cloudDataBusy}>Try again</button></div>{/if}
+        {#if account?.needs_refresh}<div class="notice warning"><Icon name="shield" size={19}/><div><strong>Your session needs to be refreshed.</strong><p>Reconnect your account to continue syncing.</p></div><button class="button secondary" onclick={refresh} disabled={authBusy||!!busyKey}>Refresh session</button></div>{/if}
+        {#if error}{@render errorNotice(error,true)}{/if}
+        {#if cloudDataError}{@render errorNotice(cloudDataError,true)}{/if}
+        {#if actionError&&modal===null}{@render errorNotice(actionError)}{/if}
+        {#if route==='overview'}
+          <div class="page-heading"><div><h1>Your browsing, together.</h1><p>One home for the profiles you use across your Macs.</p></div><button class="button primary" onclick={()=>openCreate()} disabled={cloudDataBusy||!!busyKey}><Icon name="plus" size={18}/>New profile</button></div>
+          {#if profiles.length===0}{@render emptyProfiles()}
+          {:else}
+            {#if attention}
+              <section class="attention-strip" aria-label="Needs attention"><span class="attention-icon"><Icon name="warning" size={21}/></span><div class="grow"><h2>{attention.count} connection{attention.count===1?'':'s'} need{attention.count===1?'s':''} your attention</h2><p>{attention.description}</p></div><button class="button secondary" onclick={()=>{if(attention.action==='conflicts')navigate('activity');else openProfile(profiles.find(p=>p.id===attention.profileId));}}>{attention.action==='conflicts'?'Review conflicts':'Review connection'}<Icon name="arrow-right" size={16}/></button></section>
             {/if}
-          </li>
-        {/each}
-      </ul>
+            <section class="profile-overview"><div class="section-heading"><h2>Your profiles <span class="count">{profiles.length}</span></h2><button class="text-button" onclick={()=>navigate('profiles')}>Manage profiles<Icon name="arrow-right" size={16}/></button></div><div class="profile-table">{#each profiles as p}{@const connections=mappingsOf(p.id)}{@const state=profileView(p)}<button class="profile-overview-row" onclick={()=>openProfile(p)} aria-label={`Open profile ${p.name}`}>{@render profileMark(p)}<span class="profile-row-title"><strong>{p.name}</strong><span>{connections.length?`${new Set(connections.map(m=>m.device_id)).size} Mac${new Set(connections.map(m=>m.device_id)).size===1?'':'s'} · ${connections.length} browser connection${connections.length===1?'':'s'}`:'Ready for its first browser'}</span></span><span class="connection-trail">{#each groupConnections(connections).slice(0,2) as group}<span><Icon name="laptop" size={15}/>{group.name}</span>{/each}</span>{@render status(state)}<Icon name="chevron-right" size={18}/></button>{/each}</div></section>
+            <div class="overview-bottom"><section><h2>On this Mac</h2><p>{confirmedMappings.length} connected browser{confirmedMappings.length===1?'':'s'} · {browsers.length} detected</p><button class="text-button" onclick={()=>navigate('devices')}>Manage browsers<Icon name="arrow-right" size={16}/></button></section><section><h2>What travels with you</h2><p>Bookmarks and extensions. Settings and supported preferences sync when you choose to enable them.</p><span class="privacy-note"><Icon name="shield" size={15}/>Passwords, cookies and sessions stay out of Synchrome.</span></section></div>
+          {/if}
+        {:else if route==='profiles'}
+          <div class="page-heading"><div><h1>Profiles</h1><p>A shared profile. Your browsers, across devices.</p></div><button class="button primary" onclick={()=>openCreate()} disabled={cloudDataBusy||!!busyKey}><Icon name="plus" size={18}/>New profile</button></div>
+          {#if profiles.length===0}{@render emptyProfiles()}{:else}
+            <div class="profiles-layout"><aside class="profile-list" aria-label="Synchrome profiles"><div class="search-field"><Icon name="search" size={16}/><input aria-label="Find a profile" placeholder="Find a profile" bind:value={profileSearch}/></div>{#each visibleProfiles as p}<button data-testid="profile-row" data-profile-name={p.name} data-has-local={mappingsOf(p.id).some(m=>m.is_this_device)} aria-label={`Open profile ${p.name}`} aria-pressed={selectedProfile?.id===p.id} class:chosen={selectedProfile?.id===p.id} class="profile-list-item" onclick={()=>selectedId=p.id}>{@render profileMark(p)}<span><strong>{p.name}</strong><small>{new Set(mappingsOf(p.id).map(m=>m.device_id)).size} Mac{new Set(mappingsOf(p.id).map(m=>m.device_id)).size===1?'':'s'}</small></span>{#if ['warning','danger'].includes(profileView(p).tone)}<span class="attention-dot" aria-label="Needs attention"></span>{/if}</button>{/each}{#if !visibleProfiles.length}<p class="muted padded">No profiles match “{profileSearch}”.</p>{/if}</aside>
+              {#if selectedProfile}<section class="profile-detail" aria-label={`${selectedProfile.name} profile`}><div class="profile-detail-heading">{@render profileMark(selectedProfile,true)}<div class="grow"><h2>{selectedProfile.name}</h2>{@render status(profileView(selectedProfile))}</div><button class="icon-button" aria-label={`Rename ${selectedProfile.name}`} title="Rename profile" onclick={()=>{modal='rename';modalProfile=selectedProfile;formName=selectedProfile.name;formError='';}} disabled={!!busyKey}><Icon name="edit" size={18}/></button><button class="icon-button destructive" aria-label={`Delete ${selectedProfile.name}`} title="Delete profile" onclick={()=>requestDelete(selectedProfile)} disabled={!!busyKey}><Icon name="trash" size={18}/></button></div>
+                <div class="section-heading"><h3>Connected browsers</h3><button class="button secondary small-button" onclick={()=>openConnect(selectedProfile)} disabled={!!busyKey||cloudDataBusy||sameDeviceConflict(mappings,selectedProfile.id)} title={sameDeviceConflict(mappings,selectedProfile.id)?'This profile already has a browser on this Mac. Use Change browser below.':undefined}><Icon name="plus" size={15}/>Connect browser</button></div>
+                {#if !selectedConnections.length}<div class="empty-connection"><Icon name="link" size={27}/><h3>Connect its first browser.</h3><p>Choose a local Chrome or Helium profile. Its data stays on this Mac when you disconnect.</p><button class="button primary" onclick={()=>openConnect(selectedProfile)}>Connect browser</button></div>{/if}
+                {#each groupConnections(selectedConnections) as group}<section class="device-group"><h3><Icon name="laptop" size={17}/>{group.name}{#if group.isCurrent}<span class="tag">This Mac</span>{/if}</h3>{#each group.connections as m}{@render connection(m)}{/each}</section>{/each}
+                <p class="footnote"><Icon name="info" size={15}/>Each Synchrome profile supports one browser connection per Mac. To use another browser here, change the existing connection.</p>
+              </section>{/if}
+            </div>
+          {/if}
+        {:else if route==='devices'}
+          <div class="page-heading"><div><h1>Devices &amp; browsers</h1><p>See where your profiles live. Connect a browser on this Mac.</p></div><button class="button secondary" onclick={loadBrowsers} disabled={loadingBrowsers}><Icon name="refresh" size={16}/>Find browsers</button></div>
+          <section class="devices-section"><h2>Your Macs <span class="count">{devices.length}</span></h2><div class="device-list">{#each devices as d}<div class="device-row"><span class="device-symbol"><Icon name="laptop" size={25}/></span><div class="grow"><strong>{d.name}</strong><p>{new Set(mappings.filter(m=>m.device_id===d.device_id).map(m=>m.profile_id)).size} shared profiles · {d.is_current?'macOS on this Mac':`Last seen ${d.last_seen_at?new Date(d.last_seen_at).toLocaleDateString():'unknown'}`}</p></div>{#if d.is_current}<span class="tag">This Mac</span>{:else}<span class="muted small">Remote device</span>{/if}</div>{/each}</div></section>
+          <section class="browsers-section"><div class="section-heading"><h2>Browsers on {device?.device_name??'this Mac'}</h2><span class="muted small">{totalProfiles} local profiles</span></div>
+            {#if !browsers.length}<div class="empty-connection"><Icon name="browser" size={28}/><h3>No browsers found yet.</h3><p>Install Chrome stable or Helium, open it once, then choose Find browsers.</p></div>{/if}
+            {#each browsers as b}<div class="browser-section"><div class="browser-heading"><Icon name="browser" size={24}/><div class="grow"><h3>{b.display_name}</h3><p>{b.access==='browser_running'?'Open · some changes wait until it closes':b.access==='requires_full_disk_access'?'macOS permission needed':'Available on this Mac'}</p></div>{#if b.access==='requires_full_disk_access'}<button class="button secondary small-button" onclick={openFdaSettings}>Grant access</button>{/if}</div>{#if b.access==='requires_full_disk_access'}<p class="permission-note">To connect {b.display_name}, allow Synchrome in System Settings → Privacy &amp; Security → Full Disk Access. Reopen Synchrome after granting access. Helium does not require this permission.</p>{/if}
+              {#each b.profiles as p}{@const m=mappingFor(b,p)}<div class="local-profile-row"><Icon name="folder" size={18}/><div class="grow"><strong>{p.display_name??p.dir_name}</strong><p>{m?`Connected to ${m.profile_name}`:'Not connected to Synchrome'}</p></div>{#if m}<button class="button secondary small-button" onclick={()=>openProfile(profiles.find(p=>p.id===m.profile_id))}>View profile</button>{:else}<button class="button secondary small-button" onclick={()=>openCreate('import',{key:localKey(b,p),b,p})} disabled={!!busyKey}>Import profile</button><button class="button quiet small-button" onclick={()=>openConnect(null,{key:localKey(b,p),b,p})} disabled={!profiles.length||!!busyKey}>Connect</button>{/if}</div>{/each}
+              <details class="browser-advanced"><summary>Browser setup &amp; location</summary><p class="muted small">{b.user_data_dir}</p><button class="button secondary small-button" onclick={()=>installConnector(b)} disabled={!!busyKey}>Install connector</button>{#if connectorMsg[b.kind]}<p class="small" role="status">{connectorMsg[b.kind]}</p>{/if}<button class="button quiet small-button" onclick={revealExtension}>Show companion folder</button></details>
+            </div>{/each}
+            {#if unmatched.length}<div class="notice warning"><Icon name="warning" size={19}/><div><strong>{unmatched.length} connected browser profile{unmatched.length===1?' is':'s are'} missing on this Mac.</strong><p>It may have been moved or removed. Open the Synchrome profile to change or disconnect its browser.</p></div></div>{/if}
+          </section>
+        {:else if route==='activity'}
+          <div class="page-heading"><div><h1>Activity</h1><p>Review conflicts and the latest sync observed on this Mac.</p></div><button class="button secondary" onclick={refreshWorkspace} disabled={cloudDataBusy}><Icon name="refresh" size={16}/>Refresh</button></div>
+          <section class="activity-conflicts"><div class="section-heading"><h2>Needs your decision</h2>{#if conflictCount}<span class="count danger">{conflictCount}</span>{/if}</div>{#if !confirmedMappings.length}<div class="empty-connection"><Icon name="check" size={27}/><h3>No conflicts to review.</h3><p>Connect a browser and finish its first sync to see activity here.</p></div>{:else}{#each confirmedMappings as m}<div class="activity-profile"><div class="section-heading"><h3>{m.profile_name} <span class="muted small">· {browserName(m.browser_kind)}</span></h3><button class="text-button" onclick={()=>openProfile(profiles.find(p=>p.id===m.profile_id))}>View connection<Icon name="arrow-right" size={15}/></button></div>{#if conflictsOpen[m.id]}{@render conflictPanel(m)}{:else}<button class="button secondary" onclick={()=>toggleConflicts(m)}>Load conflicts</button>{/if}</div>{/each}{/if}</section>
+          <section class="recent-sync"><h2>Latest sync</h2><p class="muted">Last known results, rather than a complete event history.</p>{#each confirmedMappings as m}<div class="sync-event"><Icon name="refresh" size={18}/><div class="grow"><strong>{m.profile_name}</strong><p>{browserName(m.browser_kind)} · {m.bookmarks?.bookmarks??0} bookmarks</p></div><span class="muted small">{m.bookmarks?.last_upload_at?when(m.bookmarks.last_upload_at):'First sync pending'}</span>{@render status(stateFor(m))}</div>{/each}</section>
+        {:else if route==='settings'}
+          <div class="page-heading"><div><h1>Settings</h1><p>Make Synchrome yours. Keep control of your account and sync.</p></div></div>
+          <section class="settings-section"><h2>Appearance</h2><p>Choose how Synchrome looks on this Mac.</p><div class="appearance-options" role="group" aria-label="Appearance">{#each [{id:'system',name:'System',icon:'system'},{id:'light',name:'Light',icon:'sun'},{id:'dark',name:'Dark',icon:'moon'}] as option}<button class:chosen={appearance===option.id} aria-pressed={appearance===option.id} onclick={()=>setAppearance(option.id)}><Icon name={option.icon} size={22}/><strong>{option.name}</strong>{#if appearance===option.id}<Icon name="check" size={17}/>{/if}</button>{/each}</div></section>
+          <section class="settings-section"><div class="section-heading"><h2>Account</h2><span class="status positive"><Icon name="check" size={14}/>Signed in</span></div><div class="setting-row"><div><strong>{account.email}</strong><p>Session stored securely in macOS Keychain.</p></div><div class="actions"><button class="button secondary" onclick={refresh} disabled={authBusy||!!busyKey}>Refresh session</button><button class="button secondary" onclick={()=>{modal='signout';formError='';}} disabled={authBusy||!!busyKey}>Sign out</button></div></div><p class="footnote">Signing out pauses sync on this Mac. Your browser data and cloud profiles are kept.</p></section>
+          <section class="settings-section"><h2>About Synchrome</h2><div class="setting-row"><div><strong>{version||'Synchrome 1.0.0'}</strong><p>Chrome stable &amp; Helium · macOS</p></div><span class="tag">Manual updates</span></div><p class="muted">To update, download the next release and replace the app in Applications. Your account, connections and data stay.</p><details class="privacy-details"><summary>What Synchrome synchronizes</summary><p>Bookmarks and extension inventory and enabled state. Extension settings and supported browser preferences are optional for each connection, and are read and written with the browser closed.</p><p>Passwords, cookies, sessions, browsing history, IndexedDB and local storage are outside this version’s sync scope. Extension settings can contain private values; review their disclosure before enabling sync.</p></details></section>
+          <section class="settings-section"><details class="diagnostics"><summary>Advanced diagnostics</summary><div class="diagnostic-grid"><strong>Cloud service</strong>{@render status(cloudState(cloud))}<span>Endpoint</span><code>{cloud?.endpoint??'Unavailable'}</code>{#each [['Authentication',cloud?.auth],['Database',cloud?.rest],['Storage',cloud?.storage]] as [label,probe]}<span>{label}</span><span>{probeBadge(probe).label}</span>{/each}<span>App location</span><code>{location?.path??'Unknown'}</code><span>Companion folder</span><code>{extFolder??extFolderError??'Unavailable'}</code><span>Session expires</span><span>{fmtExpiry(account.expires_at)}</span></div>{#if !location?.stable}<div class="notice warning"><Icon name="info" size={18}/><p>{location?.reason??'Install Synchrome in Applications before setting up the connector.'}</p></div>{/if}<p class="muted small">Realtime, snapshot and cleanup diagnostics are available inside each local profile connection.</p><button class="button secondary" onclick={loadCloud} disabled={loadingCloud}>Check cloud service</button></details></section>
+        {/if}
+      </main>
+    </div>
+  </div>
+{/if}
+<div class="toast-region" aria-live="polite" aria-atomic="true">{#if toast}<div class="toast"><Icon name="check" size={18}/><span>{toast}</span><button class="icon-button" aria-label="Dismiss notification" onclick={()=>toast=''}><Icon name="close" size={16}/></button></div>{/if}</div>
+
+<Dialog open={modal==='profile'} title={profileMethod==='choose'?'Create a Synchrome profile':profileMethod==='manual'?'Start a new profile':profileMethod==='import'?'Use a browser profile':modalMapping?'Change connected browser':'Connect a browser'} description={profileMethod==='choose'?'Choose a starting point. You can connect more Macs later.':profileMethod==='import'?'Bring an existing browser profile into Synchrome. Its first sync supplies the initial data.':profileMethod==='manual'?'Create a shared space, then choose a browser to connect.':'Connect one local browser profile to a Synchrome profile.'} onclose={closeModal} dismissible={!busyKey}>
+  {#if profileMethod==='choose'}<div class="method-options"><button onclick={()=>profileMethod='import'}><span class="method-icon"><Icon name="download" size={23}/></span><span><strong>Use a browser profile</strong><small>Start with the bookmarks and extensions you already have.</small></span><Icon name="chevron-right" size={18}/></button><button onclick={()=>profileMethod='manual'}><span class="method-icon"><Icon name="plus" size={23}/></span><span><strong>Start fresh</strong><small>Create a profile and connect its first browser when you’re ready.</small></span><Icon name="chevron-right" size={18}/></button></div>
+  {:else}<form class="profile-form" onsubmit={submitProfile}>
+    {#if profileMethod==='connect'&&!modalProfile}<div class="field"><label for="target-profile">Synchrome profile</label><select id="target-profile" bind:value={selectedTarget}><option value="">Choose a profile</option>{#each profiles as p}<option value={p.id} disabled={sameDeviceConflict(mappings,p.id,modalMapping?.id)}>{p.name}{sameDeviceConflict(mappings,p.id,modalMapping?.id)?' — already connected on this Mac':''}</option>{/each}</select></div>{/if}
+    {#if profileMethod!=='manual'}<div class="field"><label for="local-profile">Browser profile</label><select id="local-profile" value={selectedLocal} onchange={event=>pickLocal(event.currentTarget.value)}><option value="">Choose a browser profile</option>{#each localOptions as option}<option value={option.key} disabled={!!option.mapping&&option.mapping.id!==modalMapping?.id}>{option.b.display_name} — {option.p.display_name??option.p.dir_name}{option.mapping?' (connected)':''}</option>{/each}</select><span class="field-hint">Choose from the browser profiles detected on this Mac.</span></div>
+      {#if !localOptions.length}<div class="notice info"><Icon name="browser" size={18}/><div><strong>No available browser profiles.</strong><p>Open Chrome stable or Helium once, then find browsers again.</p></div></div>{/if}
+      {#if needsFda}<div class="notice info"><Icon name="shield" size={18}/><div><strong>Chrome may need macOS permission.</strong><p>Helium can be used without Full Disk Access.</p><button type="button" class="text-button" onclick={openFdaSettings}>Open Full Disk Access settings<Icon name="external" size={15}/></button></div></div>{/if}
+      {#if pickedLocal?.b.access==='browser_running'}<div class="notice warning"><Icon name="info" size={18}/><p>Close {pickedLocal.b.display_name} before connecting. If it remains open, the link will wait until you retry.</p></div>{/if}
+      {#if modalMapping}<div class="notice warning"><Icon name="info" size={18}/><p>The existing browser is disconnected first. If the new connection fails, reconnect it from this profile. Both browsers keep their local data.</p></div>{/if}
     {/if}
-  </section>
-
-  {#if signedIn && unmatched.length > 0}
-    <section class="card">
-      <div class="card-head">
-        <h2>Mapped profiles not detected here</h2>
-        <span class="badge muted">{unmatched.length}</span>
-      </div>
-      <p class="lead">Mappings of this device whose browser profile is not in the list above (e.g. a separate user-data directory). Their sync state and conflicts are still shown.</p>
-      <ul class="plain">
-        {#each unmatched as m (m.id)}
-          <li class="profile">
-            <div class="profile-main"><span class="pname">{m.browser_kind} · {m.browser_profile_dir}</span></div>
-            <div class="profile-map">{@render mappingBlock(m)}</div>
-          </li>
-        {/each}
-      </ul>
-    </section>
-  {/if}
-</main>
-
-<style>
-  :global(body) { margin: 0; background: #0f1720; color: #e6edf3;
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  main { max-width: 900px; margin: 0 auto; padding: 22px 20px 48px; }
-  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
-  h1 { font-size: 22px; margin: 0; color: #5ac8be; }
-  h2 { font-size: 15px; margin: 0; }
-  h3 { font-size: 12px; margin: 0; color: #9aa7b4; text-transform: uppercase; letter-spacing: .04em; }
-  .ua { color: #6b7988; font-size: 12px; }
-  .right { margin-left: auto; }
-  .lead { color: #9aa7b4; margin: 6px 0 12px; font-size: 13px; }
-  .hint { color: #9aa7b4; font-size: 13px; margin: 8px 0 0; }
-  .tiny { font-size: 11px; color: #6b7988; }
-  .small { font-size: 13px; margin: 6px 0 0; }
-  code { background: #1b2733; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
-  button, select, input { font: inherit; }
-  button { background: #1b2733; color: #e6edf3; border: 1px solid #2b3a49; border-radius: 7px; padding: 7px 14px; cursor: pointer; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  button.danger { border-color: #8a2a2a; color: #f08a8a; }
-  .tiny-btn { padding: 2px 9px; font-size: 12px; }
-  input, select { background: #0f1720; color: #e6edf3; border: 1px solid #2b3a49; border-radius: 7px; padding: 6px 9px; font-size: 13px; }
-  .card { background: #141f2a; border: 1px solid #22303d; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
-  .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-  .kv { display: flex; gap: 12px; font-size: 13px; padding: 3px 0; align-items: baseline; }
-  .kv > span:first-child { color: #6b7988; min-width: 110px; }
-  .login { display: grid; gap: 10px; max-width: 360px; margin-top: 6px; }
-  .login label { display: grid; gap: 4px; font-size: 12px; color: #9aa7b4; }
-  .inline { display: flex; gap: 8px; margin: 6px 0 8px; }
-  .inline input { flex: 1; }
-  .grow { flex: 1; }
-  .services { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 0; }
-  .svc { display: flex; justify-content: space-between; align-items: center; background: #0f1720; border: 1px solid #22303d; border-radius: 8px; padding: 6px 10px; font-size: 13px; }
-  .actions { margin-top: 10px; } .actions.row { display: flex; gap: 8px; }
-  .notice { font-size: 13px; padding: 8px 10px; border-radius: 8px; margin-bottom: 10px; background: #3a2a10; border: 1px solid #8a6320; }
-  .sub { margin-top: 12px; padding-top: 10px; border-top: 1px solid #22303d; }
-  .sub-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
-  .sub-head .tiny-btn { margin-left: auto; }
-  .plain, .browsers, .profiles { list-style: none; padding: 0; margin: 0; }
-  .row-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #1b2733; font-size: 13px; }
-  .browser { background: #0f1720; border: 1px solid #22303d; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
-  .browser-head { display: flex; align-items: center; gap: 10px; }
-  .name { font-weight: 600; font-size: 15px; }
-  .ver { color: #6b7988; font-size: 12px; }
-  .path { color: #6b7988; font-size: 12px; margin: 4px 0 8px; word-break: break-all; }
-  .profiles { border-top: 1px solid #22303d; }
-  .profile { padding: 7px 0; border-bottom: 1px solid #1b2733; }
-  .profile-main { display: flex; align-items: center; gap: 10px; }
-  .profile-map { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; padding-left: 12px; font-size: 13px; }
-  .arrow { color: #5ac8be; }
-  .connector { display: flex; gap: 8px; align-items: center; margin: -2px 0 8px; }
-  .pname { flex: 1; }
-  .pdir { color: #6b7988; font-size: 12px; }
-  .profiles-note { font-size: 12px; padding-top: 8px; }
-  .badge { margin-left: auto; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap; }
-  .badge.small { font-size: 10px; margin-left: 0; }
-  .badge.ok, .ok { color: #5fd08a; } .badge.ok { background: #10301f; border-color: #1c7a44; }
-  .badge.warn, .warn { color: #e0a94a; } .badge.warn { background: #3a2a10; border-color: #8a6320; }
-  .badge.info { background: #10263a; color: #5aa6e0; border-color: #1c5a8a; }
-  .badge.bad, .bad { color: #f08a8a; } .badge.bad { background: #3a1414; border-color: #8a2a2a; }
-  .badge.muted, .muted { color: #8a97a4; } .badge.muted { background: #1b2733; border-color: #2b3a49; }
-  .error { background: #3a1414; color: #f0a0a0; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; display: flex; gap: 10px; align-items: center; }
-  .bookmarks-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%; margin-top: 4px; }
-  .conflicts { width: 100%; margin-top: 6px; display: grid; gap: 8px; }
-  .conflict { background: #141f2a; border: 1px solid #3a2a2a; border-radius: 8px; padding: 10px 12px; }
-  .conflict-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .conflict-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
-  .cmp { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; table-layout: fixed; }
-  .cmp th { text-align: left; color: #9aa7b4; font-weight: 600; padding: 3px 6px; border-bottom: 1px solid #22303d; }
-  .cmp td { padding: 3px 6px; border-bottom: 1px solid #1b2733; word-break: break-all; vertical-align: top; }
-  .cmp td:first-child { color: #6b7988; width: 70px; }
-  .cmp tr.diff td:not(:first-child) { color: #e0a94a; }
-  .info { color: #5aa6e0; }
-  .settings-row td { padding-left: 18px; font-size: 12px; }
-  .settings-row select { font-size: 12px; padding: 2px 6px; margin: 0 6px; }
-  .steps { margin: 4px 0 0; padding: 0 0 0 4px; list-style: none; display: grid; gap: 6px; font-size: 13px; }
-  .steps li { display: flex; gap: 10px; align-items: baseline; }
-  .steps li.done { color: #9aa7b4; }
-  .tick { width: 18px; color: #5fd08a; }
-  .steps li:not(.done) .tick { color: #e0a94a; }
-  .steps li.optional .tick { color: #8a97a4; }
-  .row-actions { display: inline-flex; gap: 6px; align-items: center; margin-left: 8px; flex-wrap: wrap; }
-  .tech { display: inline-block; margin-left: 6px; font-size: 11px; color: #8a97a4; }
-  .tech summary { cursor: pointer; }
-  .tech code { word-break: break-all; }
-</style>
+    {#if profileMethod!=='connect'}<div class="field"><label for="profile-name">Profile name</label><input id="profile-name" bind:value={formName} placeholder="e.g. Work" maxlength="80" autocomplete="off" aria-invalid={!!formError} aria-describedby={formError?'profile-error':undefined}/><span class="field-hint">A name you’ll recognize on every Mac.</span></div>{/if}
+    {#if formError}<p id="profile-error" class="form-error" role="alert">{formError}</p>{/if}
+    <div class="dialog-footer"><button type="button" class="button secondary" onclick={closeModal} disabled={!!busyKey}>Cancel</button><button type="submit" class="button primary" disabled={!!busyKey||cloudDataBusy}>{busyKey==='profile-form'?(profileMethod==='manual'?'Creating…':'Connecting…'):profileMethod==='manual'?'Create profile':profileMethod==='import'?'Import profile':'Connect browser'}<Icon name="arrow-right" size={17}/></button></div>
+  </form>{/if}
+</Dialog>
+<Dialog open={modal==='delete'} title={`Delete ${modalProfile?.name??'profile'}?`} description="This removes the shared Synchrome profile and its cloud sync data." onclose={closeModal} dismissible={!busyKey}>
+  <div class="delete-scope"><div><Icon name="cloud" size={19}/><div><strong>Removed from Synchrome</strong><p>The shared profile, its {modalProfile?mappingsOf(modalProfile.id).length:0} connections, and associated cloud snapshots and journals.</p></div></div><div><Icon name="shield" size={19}/><div><strong>Your browser data stays</strong><p>Local Chrome and Helium profiles, bookmarks and files stay on every Mac.</p></div></div></div>
+  <div class="field"><label for="delete-name">Type <strong>{modalProfile?.name}</strong> to confirm</label><input id="delete-name" bind:value={deleteName} autocomplete="off" spellcheck="false"/></div>{#if formError}<p class="form-error" role="alert">{formError}</p>{/if}
+  <div class="dialog-footer"><button class="button secondary" onclick={closeModal} disabled={!!busyKey}>Cancel</button><button class="button danger-button" onclick={confirmDelete} disabled={deleteName!==modalProfile?.name||!!busyKey}>{busyKey==='delete'?'Deleting…':'Delete profile'}</button></div>
+</Dialog>
+<Dialog open={modal==='disconnect'} title="Disconnect this browser?" description={`${modalMapping?.profile_name??'This profile'} will stop syncing with ${browserName(modalMapping?.browser_kind)} on ${modalMapping?.device_name??'this Mac'}.`} onclose={closeModal} dismissible={!busyKey}>
+  <p class="muted">The shared Synchrome profile and its other connections stay. This browser’s local profile, bookmarks and files are kept.</p>{#if formError}<p class="form-error" role="alert">{formError}</p>{/if}<div class="dialog-footer"><button class="button secondary" onclick={closeModal} disabled={!!busyKey}>Cancel</button><button class="button primary" onclick={confirmDisconnect} disabled={!!busyKey}>{busyKey?'Disconnecting…':'Disconnect browser'}</button></div>
+</Dialog>
+<Dialog open={modal==='rename'} title="Rename profile" onclose={closeModal} dismissible={!busyKey}><form onsubmit={saveProfileName}><div class="field"><label for="rename-profile">Profile name</label><input id="rename-profile" bind:value={formName} maxlength="80"/></div>{#if formError}<p class="form-error" role="alert">{formError}</p>{/if}<div class="dialog-footer"><button type="button" class="button secondary" onclick={closeModal} disabled={!!busyKey}>Cancel</button><button class="button primary" disabled={!!busyKey}>{busyKey?'Saving…':'Save name'}</button></div></form></Dialog>
+<Dialog open={modal==='signout'} title="Sign out of Synchrome?" description="Sync pauses on this Mac until you sign in again." onclose={closeModal} dismissible={!authBusy}><p class="muted">Your browser data and shared profiles are kept.</p>{#if authError}{@render errorNotice(authError)}{/if}<div class="dialog-footer"><button class="button secondary" onclick={closeModal} disabled={authBusy}>Cancel</button><button class="button primary" disabled={authBusy} onclick={async()=>{await signOut();if(!authError){modal=null;route='overview';}}}>{authBusy?'Signing out…':'Sign out'}</button></div></Dialog>
+<Dialog open={onboarding&&signedIn&&!modal} title={profiles.length?"Bring your profiles to this Mac.":"Bring your browsing together."} description={profiles.length?"Your shared profiles are already here. Choose one and connect a browser on this Mac.":"Start with one browser profile. We’ll guide you through connecting it, then confirm its first sync."} onclose={()=>{onboarding=false;onboardingDismissed=true;}}>
+  <div class="welcome-flow"><span><Icon name="browser" size={25}/><strong>Your browser</strong></span><Icon name="arrow-right" size={20}/><span class="welcome-brand"><Icon name="logo" size={27}/><strong>Synchrome profile</strong></span><Icon name="arrow-right" size={20}/><span><Icon name="laptop" size={26}/><strong>Other Macs</strong></span></div><p class="muted">Synchrome keeps bookmarks and extensions together. Optional settings stay off until you choose them.</p><div class="dialog-footer"><button class="button quiet" onclick={()=>{onboarding=false;onboardingDismissed=true;}}>Explore workspace</button><button class="button primary" onclick={()=>{onboarding=false;onboardingDismissed=true;if(profiles.length)openConnect(null);else openCreate('import');}}>{profiles.length?'Connect a profile':'Choose a browser'}<Icon name="arrow-right" size={16}/></button></div>
+</Dialog>
+<Dialog open={modal==='setup'} title={setupComplete?'Your first sync is complete.':'Finish connecting your browser'} description={setupComplete?`${setupMapping?.profile_name??'Your profile'} is ready on this Mac.`:'A connection becomes active when the companion confirms it and sends its first data.'} onclose={closeModal} dismissible={!busyKey}>
+  {#if setupComplete}<div class="setup-success"><span><Icon name="check" size={29}/></span><h3>Your browsing has a new home.</h3><p>{setupMapping?.bookmarks?.bookmarks??0} bookmarks in {setupMapping?.profile_name}. Sign in on another Mac and connect a browser to the same profile.</p></div><button class="button primary full-width" onclick={closeModal}>View profile<Icon name="arrow-right" size={17}/></button>
+  {:else if setupMapping}
+    <div class="setup-context"><Icon name="browser" size={22}/><strong>{browserName(setupMapping.browser_kind)} / {localName(setupMapping)}</strong><Icon name="arrow-right" size={17}/><span>{setupMapping.profile_name}</span></div>
+    {#if setupMapping.display_status==='pending_local_write'||setupMapping.display_status==='error'}<div class="setup-step"><span class="step-number">1</span><div><h3>Close the browser and write its connection.</h3><p>The link is stored only in the Synchrome companion’s own browser storage.</p><button class="button primary" onclick={()=>retryWrite(setupMapping)} disabled={!!busyKey}>Retry link</button></div></div>
+    {:else if setupMapping.display_status!=='extension_confirmed'}
+      <div class="setup-step"><span class="step-number">1</span><div><h3>Install the browser connector.</h3><p>Do this once for {browserName(setupMapping.browser_kind)}, then restart the browser.</p>{#if !location?.stable}<p class="form-error">{location?.reason??'Move Synchrome to Applications first.'}</p>{/if}<button class="button secondary" onclick={()=>installConnector(setupBrowser)} disabled={!setupBrowser||!!busyKey||!location?.stable}>Install connector</button>{#if connectorMsg[setupMapping.browser_kind]}<p class="small" role="status">{connectorMsg[setupMapping.browser_kind]}</p>{/if}</div></div>
+      <div class="setup-step"><span class="step-number">2</span><div><h3>Load the Synchrome companion.</h3><p>In this browser, open <code>chrome://extensions</code>, turn on Developer mode, then choose Load unpacked and select the companion folder. Open its popup once to confirm the connection.</p><button class="button secondary" onclick={revealExtension} disabled={!extFolder}>Show companion folder<Icon name="external" size={15}/></button></div></div>
+      <div class="setup-step"><span class="step-number">3</span><div><h3>Confirm your first sync.</h3><p>After the companion connects, Synchrome receives your browser data. This step stays pending until an actual sync completes.</p><button class="button primary" onclick={()=>checkExtension(setupMapping)} disabled={!!busyKey}>Check connection<Icon name="refresh" size={16}/></button></div></div>
+    {:else}<div class="setup-step"><span class="step-number"><Icon name="check" size={18}/></span><div><h3>Companion connected. Waiting for first sync.</h3><p>Open the browser and its companion to send the first bookmarks. You can check again or sync now.</p><button class="button primary" onclick={()=>uploadNow(setupMapping)} disabled={!!busyKey}>Sync now</button><button class="button quiet" onclick={()=>checkExtension(setupMapping)} disabled={!!busyKey}>Check connection</button></div></div>{/if}
+    {#if actionError}{@render errorNotice(actionError)}{/if}<div class="dialog-footer"><button class="button quiet" onclick={closeModal} disabled={!!busyKey}>Continue later</button></div>
+  {:else}<p class="muted">This connection is no longer available. Refresh your profiles to see its current state.</p><button class="button secondary" onclick={closeModal}>Close</button>{/if}
+</Dialog>

@@ -225,7 +225,7 @@ class AppUI:
     def __init__(self, dev):
         self.ui = cf.UI(dev)
         M["ui_sessions"] += 1
-        self.ok = bool(self.ui.ready) and bool(self.ui.until(self.J + "return !!btn(document, 'Extensions');", 40))
+        self.ok = bool(self.ui.ready) and self.ui.open_profiles() and bool(self.ui.until(self.J + "return !!btn(document, 'Extensions');", 40))
         self.ui.js(self.J + "btn(document, 'Extensions').click(); return true;")
         self.ui.until(self.J + "return !!all('tr').find(r => r.cells.length === 4 && r.cells[0].tagName === 'TD');", 20)
 

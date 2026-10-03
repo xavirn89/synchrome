@@ -198,6 +198,47 @@ class UI:
     def until(self, body, timeout=30):
         return ra.wait(lambda: self.js(body, 5), timeout, 0.5)
 
+    def navigate(self, page, timeout=30):
+        """Use the shell's real navigation before inspecting a contextual screen."""
+        return self.until("""
+            const page = %s;
+            const nav = document.querySelector('[data-testid="nav-' + page.toLowerCase() + '"]')
+              || [...document.querySelectorAll('nav button, [role="navigation"] button')]
+                .find(b => b.getAttribute('aria-label') === page || b.textContent.trim() === page);
+            if (!nav || nav.disabled) return false;
+            nav.click(); return true;
+        """ % json.dumps(page), timeout) is True
+
+    def open_profiles(self, profile_name=None, timeout=40):
+        """Open a central profile and every connection's diagnostic disclosure.
+
+        Fixtures normally contain one central profile. A caller with multiple profiles must
+        supply its fixture's name; matching is exact and never depends on a browser row's
+        position. The helper only opens disclosures, preserving all dataset/conflict tests.
+        """
+        if not self.navigate("Profiles", timeout):
+            return False
+        selected = self.until("""
+            const name = %s;
+            const rows = [...document.querySelectorAll('[data-testid="profile-row"]')];
+            const row = name === null
+              ? (rows.find(r => r.dataset.hasLocal === 'true') || rows[0])
+              : rows.find(r => r.dataset.profileName === name);
+            if (!row || row.disabled) return false;
+            row.click(); return true;
+        """ % json.dumps(profile_name), timeout)
+        if selected is not True:
+            return False
+        return self.until("""
+            const summaries = [...document.querySelectorAll('details > summary')]
+              .filter(s => s.textContent.trim() === 'Connection details & diagnostics');
+            if (!summaries.length) return false;
+            for (const summary of summaries) {
+              if (!summary.parentElement.open) summary.click();
+            }
+            return true;
+        """, timeout) is True
+
     def stop(self):
         if self.p.poll() is None:
             self.p.terminate()
@@ -210,7 +251,7 @@ class UI:
 
 UI_JS = r"""
 const all = (sel, root = document) => [...root.querySelectorAll(sel)];
-const btn = (root, prefix) => all('button', root).find(b => b.textContent.trim().startsWith(prefix));
+const btn = (root, prefix) => all('button', root).find(b => b.textContent.trim().startsWith(prefix) || (b.getAttribute('aria-label') || '').startsWith(prefix));
 const card = (name) => all('.conflict').find(c => (c.querySelector('strong')?.textContent || '').includes('“' + name + '”'));
 const badge = () => (all('.badge').find(b => b.textContent.trim().startsWith('Conflict ·'))?.textContent || '').trim();
 """
@@ -570,10 +611,10 @@ def main(creds):
     t15 = time.time()
     note(b)
     ui = UI(b)
-    check("98 Synchrome app (embedded frontend, B's installation) opened and signed in", bool(ui.ready) and bool(ui.until(UI_JS + "return document.body.innerText.includes('Signed in')")), "")
+    check("98 Synchrome app (embedded frontend, B's installation) opened and the central profile's connections are visible", bool(ui.ready) and ui.open_profiles(), "")
     badge = lambda: ui.js(UI_JS + "return badge();")
     check("99 Conflict counter visible: 'Conflict · 4'", ui.until(UI_JS + "return badge() === 'Conflict · 4';", 40), str(badge()))
-    ui.js(UI_JS + "btn(document, 'Review conflicts').click(); return true;")
+    ui.js(UI_JS + "btn(document.querySelector('.connection-details'), 'Review conflicts').click(); return true;")
     shown = ui.until(UI_JS + "return all('.conflict').length === 4;")
     check("100 Review conflicts opens the panel with the 4 conflicts", bool(shown), "")
     info = ui.js(UI_JS + """

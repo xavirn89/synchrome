@@ -143,7 +143,7 @@ def ui_state(d):
     """The real window (embedded frontend): the dummy's Settings sync row."""
     ui = cf.UI(d)
     J = cf.UI_JS + "const srow = () => all('tr.settings-row').find(r => r.previousElementSibling && r.previousElementSibling.innerText.includes('Synchrome Test Dummy'));"
-    ok = bool(ui.ready) and bool(ui.until(J + "return !!btn(document, 'Extensions');", 40))
+    ok = bool(ui.ready) and ui.open_profiles() and bool(ui.until(J + "return !!btn(document, 'Extensions');", 40))
     ui.js(J + "btn(document, 'Extensions').click(); return true;")
     row = ui.until(J + """const r = srow(); if (!r) return null;
         return {text: r.innerText, badge: (r.querySelector('.badge')?.textContent || '').trim(), mode: r.querySelector('select').value,

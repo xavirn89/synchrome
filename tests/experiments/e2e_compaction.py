@@ -79,6 +79,8 @@ class AppUI(cf.UI):
         self.js("setTimeout(() => location.reload(), 50); return true;", 5)
         time.sleep(2)
         ra.wait(lambda: self.js("return document.readyState === 'complete' && !!document.querySelector('main')", 3), 30, 0.5)
+        if not self.open_profiles():
+            return []
         if not self.until("return document.querySelectorAll('.sync-health').length > 0", 40):
             return []
         return self.js("return [...document.querySelectorAll('.sync-health')].map(e => e.innerText)") or []
@@ -109,8 +111,15 @@ def ui_sign_in(ui, creds, who):
 
 
 def ui_sign_out(ui):
-    return ui.js("""const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Sign out');
-                    if (!b) return false; b.click(); return true;""")
+    if not ui.navigate("Settings"):
+        return False
+    opened = ui.js("""const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Sign out');
+                        if (!b) return false; b.click(); return true;""")
+    if opened is not True:
+        return False
+    return ui.until("""const dialog = document.querySelector('dialog[open]');
+                       const b = dialog && [...dialog.querySelectorAll('button')].find(b => b.textContent.trim() === 'Sign out');
+                       if (!b || b.disabled) return false; b.click(); return true;""", 10) is True
 
 
 def bm_round(d, r, n=10):

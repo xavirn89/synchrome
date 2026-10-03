@@ -10,7 +10,9 @@ use crate::{local_token, AppState};
 use std::path::PathBuf;
 use synchrome_auth::{AuthError, Session};
 use synchrome_cloud::TokenState;
-use synchrome_cloud::{CloudClient, CloudError, ReqwestRest, StoreEvent, JOURNAL_CONTENT_TYPE};
+use synchrome_cloud::{
+    CloudClient, CloudError, ReqwestRest, RestTransport, StoreEvent, JOURNAL_CONTENT_TYPE,
+};
 use synchrome_state::{
     BookmarkSyncStatus, JournalSink, MappingCheck, PublishOutcome, PublishedEvent, PullOutcome,
     RemoteEvent, SinkError, StateDb,
@@ -373,14 +375,29 @@ pub struct ProfileDeletion {
 /// now (journal chunks already garbage-collectable, non-ready snapshot objects), (2) the
 /// profile row — its `store_events`, snapshot generations and cursors go by FK cascade (it is
 /// refused while the profile is still mapped somewhere), (3) every remaining object under the
-/// profile's prefix (allowed once the row is gone), (4) verify nothing is left. Local state of
-/// the profile is forgotten in every case.
+/// profile's prefix (allowed once the row is gone), (4) verify nothing is left. Local sync
+/// state is forgotten only after the cloud row was deleted. Browser profiles are untouched.
 pub async fn delete_profile_everywhere(
     state: &AppState,
     session: &Session,
     profile_id: Uuid,
 ) -> Result<ProfileDeletion, String> {
     let cloud = state.cloud()?;
+    delete_profile_with(cloud, session, profile_id, |id| {
+        open_db()?.forget_profile(id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// The deletion ordering is shared by production and tests with an injected cloud store and
+/// local cleanup. A failure before cloud row deletion must preserve the local outbox; after
+/// row deletion, cleanup failures must report that the profile is already gone.
+async fn delete_profile_with<T: RestTransport>(
+    cloud: &CloudClient<T>,
+    session: &Session,
+    profile_id: Uuid,
+    forget_local: impl FnOnce(Uuid) -> Result<(), String>,
+) -> Result<ProfileDeletion, String> {
     let tolerate = |e: CloudError| match e {
         // bucket not there yet = nothing to delete
         CloudError::SchemaMissing(_) | CloudError::NotFound => Ok(0),
@@ -395,9 +412,6 @@ pub async fn delete_profile_everywhere(
         objects_before_row: first,
         ..Default::default()
     };
-    if let Ok(mut db) = open_db() {
-        let _ = db.forget_profile(profile_id);
-    }
     match cloud.delete_profile(session, profile_id).await {
         Ok(()) => rep.deleted = true,
         Err(e) => {
@@ -405,17 +419,334 @@ pub async fn delete_profile_everywhere(
             return Ok(rep);
         }
     }
-    rep.objects_after_row = cloud
+    let mut problems = Vec::new();
+    if let Err(e) = forget_local(profile_id) {
+        problems.push(format!("The local sync cache could not be cleared: {e}"));
+    }
+    match cloud
         .delete_profile_objects(session, profile_id)
         .await
-        .or_else(tolerate)?;
+        .or_else(tolerate)
+    {
+        Ok(n) => rep.objects_after_row = n,
+        Err(e) => problems.push(format!("Cloud files could not be fully cleaned up: {e}")),
+    }
     rep.objects_deleted += rep.objects_after_row;
-    rep.leftovers = cloud
+    match cloud
         .list_tree(session, &format!("profiles/{profile_id}"))
         .await
         .map(|v| v.len())
-        .or_else(tolerate)?;
+        .or_else(tolerate)
+    {
+        Ok(n) => {
+            rep.leftovers = n;
+            if n > 0 {
+                problems.push(format!("{n} cloud file(s) still need cleanup."));
+            }
+        }
+        Err(e) => problems.push(format!("Cloud file cleanup could not be verified: {e}")),
+    }
+    if !problems.is_empty() {
+        rep.error = Some(format!(
+            "The Synchrome profile was deleted, but cleanup is incomplete. Your local browser profiles and data were not deleted. {}",
+            problems.join(" ")
+        ));
+    }
     Ok(rep)
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use synchrome_auth::Secret;
+    use synchrome_cloud::RestFuture;
+    use synchrome_config::SupabaseConfig;
+    use synchrome_state::Source;
+    use synchrome_sync::bookmarks::ChromiumNode;
+
+    type Trace = Arc<StdMutex<Vec<&'static str>>>;
+    type Reply = (&'static str, u16, &'static str);
+
+    struct MockStore {
+        replies: StdMutex<VecDeque<Reply>>,
+        trace: Trace,
+    }
+
+    impl RestTransport for MockStore {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            url: &'a str,
+            _headers: &'a [(&'a str, &'a str)],
+            _body: Option<&'a serde_json::Value>,
+        ) -> RestFuture<'a> {
+            let step = if method == "POST" && url.ends_with("/object/list/stores") {
+                "list files"
+            } else if method == "DELETE" && url.contains("/rest/v1/profiles?") {
+                "delete row"
+            } else if method == "DELETE" && url.ends_with("/object/stores") {
+                "delete files"
+            } else {
+                panic!("unexpected deletion request: {method} {url}");
+            };
+            let (expected, status, body) = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected extra deletion request");
+            assert_eq!(step, expected);
+            self.trace.lock().unwrap().push(step);
+            Box::pin(async move { Ok((status, body.as_bytes().to_vec())) })
+        }
+    }
+
+    fn session() -> Session {
+        Session {
+            user_id: "11111111-1111-4111-8111-111111111111".into(),
+            email: None,
+            access_token: Secret::new("mock-token"),
+            refresh_token: Secret::new("mock-refresh"),
+            expires_at: i64::MAX,
+            token_type: "bearer".into(),
+        }
+    }
+
+    fn store(replies: Vec<Reply>) -> (CloudClient<MockStore>, Trace) {
+        let trace = Trace::default();
+        let cloud = CloudClient::with_transport(
+            SupabaseConfig {
+                url: "https://cloud.example.invalid".into(),
+                anon_key: "mock-publishable-key".into(),
+            },
+            MockStore {
+                replies: StdMutex::new(replies.into()),
+                trace: trace.clone(),
+            },
+        );
+        (cloud, trace)
+    }
+
+    /// Real in-memory sync state with an unpublished bookmark, so a rejected deletion must
+    /// preserve actual user changes rather than just avoid calling a mock method.
+    fn local_state(profile_id: Uuid) -> StateDb {
+        let mut db = StateDb::open_in_memory().unwrap();
+        let src = Source {
+            mapping_id: Uuid::new_v4(),
+            account_id: session().user_id,
+            device_id: Uuid::new_v4(),
+            profile_id,
+            identity: "helium|/mock/browser|Default".into(),
+        };
+        let nodes: Vec<ChromiumNode> = serde_json::from_value(serde_json::json!([
+            {"id": "1", "parent_id": "0", "title": "Bookmarks bar"},
+            {"id": "2", "parent_id": "0", "title": "Other bookmarks"},
+            {"id": "3", "parent_id": "0", "title": "Mobile bookmarks"},
+            {"id": "4", "parent_id": "1", "title": "Pending bookmark", "url": "https://example.invalid"}
+        ]))
+        .unwrap();
+        db.capture_snapshot(&src, "test-epoch", 0, &nodes, 1_790_900_000_000)
+            .unwrap();
+        assert_eq!(db.pending(profile_id).unwrap(), 1);
+        db
+    }
+
+    #[tokio::test]
+    async fn cloud_row_rejection_preserves_unpublished_local_changes() {
+        for response in [
+            (409, r#"{"code":"23503","message":"still mapped"}"#),
+            (503, r#"{"message":"unavailable"}"#),
+        ] {
+            let profile = Uuid::new_v4();
+            let mut db = local_state(profile);
+            let (cloud, trace) = store(vec![
+                ("list files", 200, "[]"),
+                ("delete row", response.0, response.1),
+            ]);
+            let report = delete_profile_with(&cloud, &session(), profile, |id| {
+                trace.lock().unwrap().push("forget local");
+                db.forget_profile(id).map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+            assert!(!report.deleted);
+            assert!(report.error.is_some());
+            assert_eq!(db.pending(profile).unwrap(), 1);
+            assert!(db.profile_account(profile).unwrap().is_some());
+            assert_eq!(*trace.lock().unwrap(), ["list files", "delete row"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_failure_before_row_preserves_profile_and_local_changes() {
+        let profile = Uuid::new_v4();
+        let mut db = local_state(profile);
+        let (cloud, trace) = store(vec![("list files", 503, "{}")]);
+        let result = delete_profile_with(&cloud, &session(), profile, |id| {
+            trace.lock().unwrap().push("forget local");
+            db.forget_profile(id).map_err(|e| e.to_string())
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(db.pending(profile).unwrap(), 1);
+        assert!(db.profile_account(profile).unwrap().is_some());
+        assert_eq!(*trace.lock().unwrap(), ["list files"]);
+    }
+
+    #[tokio::test]
+    async fn success_forgets_local_only_after_row_and_verifies_cloud_cleanup() {
+        let profile = Uuid::new_v4();
+        let mut db = local_state(profile);
+        let (cloud, trace) = store(vec![
+            ("list files", 200, "[]"),
+            ("delete row", 200, r#"[{"id":"deleted"}]"#),
+            (
+                "list files",
+                200,
+                r#"[{"name":"journal.jsonl","id":"object"}]"#,
+            ),
+            ("delete files", 200, r#"[{"name":"journal.jsonl"}]"#),
+            ("list files", 200, "[]"),
+        ]);
+        let report = delete_profile_with(&cloud, &session(), profile, |id| {
+            trace.lock().unwrap().push("forget local");
+            db.forget_profile(id).map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+        assert!(report.deleted);
+        assert!(report.error.is_none());
+        assert_eq!(report.objects_deleted, 1);
+        assert_eq!(report.objects_after_row, 1);
+        assert_eq!(report.leftovers, 0);
+        assert!(db.profile_account(profile).unwrap().is_none());
+        assert_eq!(
+            *trace.lock().unwrap(),
+            [
+                "list files",
+                "delete row",
+                "forget local",
+                "list files",
+                "delete files",
+                "list files"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_cloud_cleanup_reports_profile_already_deleted() {
+        let profile = Uuid::new_v4();
+        let mut db = local_state(profile);
+        let (cloud, trace) = store(vec![
+            ("list files", 200, "[]"),
+            ("delete row", 200, r#"[{"id":"deleted"}]"#),
+            (
+                "list files",
+                200,
+                r#"[{"name":"journal.jsonl","id":"object"}]"#,
+            ),
+            ("delete files", 503, "{}"),
+            (
+                "list files",
+                200,
+                r#"[{"name":"journal.jsonl","id":"object"}]"#,
+            ),
+        ]);
+        let report = delete_profile_with(&cloud, &session(), profile, |id| {
+            trace.lock().unwrap().push("forget local");
+            db.forget_profile(id).map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap();
+        assert!(report.deleted);
+        assert_eq!(report.leftovers, 1);
+        let error = report.error.unwrap();
+        assert!(error.contains("profile was deleted, but cleanup is incomplete"));
+        assert!(error.contains("Cloud files could not be fully cleaned up"));
+        assert!(db.profile_account(profile).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn leftover_files_are_not_reported_as_complete_success() {
+        let profile = Uuid::new_v4();
+        let (cloud, _) = store(vec![
+            ("list files", 200, "[]"),
+            ("delete row", 200, r#"[{"id":"deleted"}]"#),
+            ("list files", 200, "[]"),
+            (
+                "list files",
+                200,
+                r#"[{"name":"leftover.jsonl","id":"object"}]"#,
+            ),
+        ]);
+        let report = delete_profile_with(&cloud, &session(), profile, |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(report.deleted);
+        assert_eq!(report.leftovers, 1);
+        assert!(report
+            .error
+            .unwrap()
+            .contains("1 cloud file(s) still need cleanup"));
+    }
+
+    #[tokio::test]
+    async fn failed_verification_does_not_claim_cloud_files_are_gone() {
+        let profile = Uuid::new_v4();
+        let (cloud, _) = store(vec![
+            ("list files", 200, "[]"),
+            ("delete row", 200, r#"[{"id":"deleted"}]"#),
+            ("list files", 200, "[]"),
+            ("list files", 503, "{}"),
+        ]);
+        let report = delete_profile_with(&cloud, &session(), profile, |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(report.deleted);
+        assert!(report
+            .error
+            .unwrap()
+            .contains("cleanup could not be verified"));
+    }
+
+    #[tokio::test]
+    async fn local_cleanup_failure_is_reported_while_cloud_cleanup_still_finishes() {
+        let profile = Uuid::new_v4();
+        let mut db = local_state(profile);
+        let (cloud, trace) = store(vec![
+            ("list files", 200, "[]"),
+            ("delete row", 200, r#"[{"id":"deleted"}]"#),
+            ("list files", 200, "[]"),
+            ("list files", 200, "[]"),
+        ]);
+        let report = delete_profile_with(&cloud, &session(), profile, |_| {
+            trace.lock().unwrap().push("forget local");
+            Err("local database unavailable".into())
+        })
+        .await
+        .unwrap();
+        assert!(report.deleted);
+        assert!(report
+            .error
+            .unwrap()
+            .contains("local sync cache could not be cleared"));
+        assert_eq!(report.leftovers, 0);
+        assert_eq!(db.pending(profile).unwrap(), 1);
+        assert_eq!(
+            *trace.lock().unwrap(),
+            [
+                "list files",
+                "delete row",
+                "forget local",
+                "list files",
+                "list files"
+            ]
+        );
+        // The fixture is deliberately retained on failure; cleanup is still safe to retry.
+        db.forget_profile(profile).unwrap();
+    }
 }
 
 // ------------------------------------------------------------------ conflicts (slice 9)

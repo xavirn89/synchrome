@@ -97,7 +97,7 @@ def click_after(anchor, name):
     repeat with e in els
       try
         set r to role of e
-        if (not seen) and r is "AXStaticText" and (name of e) is {q(anchor)} then set seen to true
+        if (not seen) and r is in {{"AXStaticText", "AXHeading"}} and (name of e) is {q(anchor)} then set seen to true
         if seen and r is "AXButton" and (name of e) starts with {q(name)} then
           click e
           return "clicked"
@@ -106,6 +106,51 @@ def click_after(anchor, name):
     end repeat
     return "not found"
     ''')
+
+
+def popup_value(label):
+    """Read the selected option of a labelled browser/profile selector."""
+    return osa(f'''
+    repeat with e in els
+      try
+        if role of e is "AXPopUpButton" and (name of e) is {q(label)} then return value of e as text
+      end try
+    end repeat
+    return "not found"
+    ''')
+
+
+def open_disclosure(label):
+    """Open a native HTML details disclosure without closing an expanded one."""
+    return osa(f'''
+    repeat with e in els
+      try
+        if role of e is in {{"AXDisclosureTriangle", "AXButton"}} and (name of e) starts with {q(label)} then
+          try
+            if (value of attribute "AXExpanded" of e) is true then return "open"
+          end try
+          try
+            set expandedValue to value of e as text
+            if expandedValue is "1" or expandedValue is "true" then return "open"
+          end try
+          click e
+          return "clicked"
+        end if
+      end try
+    end repeat
+    return "not found"
+    ''')
+
+
+def open_profile(name):
+    """Select a central profile through the redesigned navigation, then show diagnostics."""
+    if click("Profiles") != "clicked":
+        return False
+    time.sleep(0.5)
+    if click("Open profile " + name) != "clicked":
+        return False
+    time.sleep(0.5)
+    return open_disclosure("Connection details & diagnostics") in ("open", "clicked")
 
 
 def count_buttons(name):
