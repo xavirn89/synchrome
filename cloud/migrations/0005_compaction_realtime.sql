@@ -1,55 +1,53 @@
 -- ============================================================================
--- Synchrome — 0005: journal compaction metadata + Realtime wake-up
+-- Synchrome — 0005: journal compaction metadata + guarded journal GC + Realtime wake-up
 -- ----------------------------------------------------------------------------
--- M1 slice 13 (docs/03 §3.7). Adds, without changing anything 0004 created except the
--- storage.objects INSERT / UPDATE policies (widened to snapshot names) and one new
--- RESTRICTIVE delete policy:
+-- M1 slice 13 (docs/03 §3.7). Changes relative to 0004:
 --
---   public.sync_cursors       one row per (profile, reader device): what the device has
---                             applied of every other device's journal (`applied`), its own
---                             contiguous published seq, the snapshot generation it is based on,
---                             `updated_at` (= last report, SERVER time) and `retired_at`
---                             (SERVER time, set only through an explicit user action in the app;
---                             nothing in the database sets it by age).
+--   public.sync_cursors       NEW. One row per (profile, reader device): applied cursors,
+--                             own published seq, snapshot generation in use, the snapshot
+--                             protocol the device supports (`snapshot_protocol`, 0 = none),
+--                             `updated_at` (last report, SERVER time) and `retired_at` (SERVER
+--                             time, set only through an explicit user action in the app).
 --
---   public.profile_snapshots  one row per snapshot generation of a profile: claimed as
---                             `building` (unique (profile_id, generation) = the compaction
---                             lock), switched to `ready` with the manifest path + SHA-256,
---                             watermarks and counts after the objects were verified, later
---                             `superseded`. Server-enforced state machine; readers only ever
---                             use `ready` rows; the current and previous ready generations
---                             cannot be superseded early nor deleted.
+--   public.profile_snapshots  NEW. Snapshot generations (building -> ready -> superseded); the
+--                             unique (profile_id, generation) is the compaction lock. On
+--                             building -> ready the SERVER validates the watermarks: integers,
+--                             monotonic w.r.t. the previous ready generation, each one on a
+--                             store_events boundary with a contiguous chain of events since the
+--                             previous watermark, and already applied by every active reader
+--                             that supports snapshots. Current + previous ready generations are
+--                             always kept.
 --
---   public.synchrome_compaction_status(profile)
---                             every time-based compaction decision computed with the
---                             DATABASE clock: journal GC allowed (ready_at + 10 min), the GC
---                             watermarks (previous generation, i.e. one generation behind),
---                             generation cleanup allowed (current ready for 24 h), next claim
---                             allowed (6 h after the last claim). Clients never use their own
---                             clock or client-supplied timestamps for these.
+--   journal GC                The generic DELETE on public.store_events from 0004 is REPLACED:
+--                             a row may be deleted only if synchrome_journal_gc_allowed() says
+--                             so (own account; seq_to <= the PREVIOUS ready generation's
+--                             watermark for that source device; 10 min after the current
+--                             generation's server ready_at; no blocking device). Clients use
+--                             the RPC synchrome_gc_journal_events(); a raw DELETE can only ever
+--                             remove the same eligible rows. FK cascades (profile / device
+--                             deletion) are unaffected (referential actions bypass RLS).
 --
---   storage.objects policies  INSERT / UPDATE additionally accept snapshot objects
---                             <uid>/profiles/<profile>/snapshots/<generation:10>/manifest.json
---                             <uid>/profiles/<profile>/snapshots/<generation:10>/<collection>-<nnnn>.jsonl
---                             only while the caller's row for that generation is `building` and
---                             unexpired; a RESTRICTIVE DELETE policy forbids deleting objects of
---                             a `ready` generation.
+--   GC blockers               Every device mapped to the profile (profile_mappings) must have a
+--                             sync_cursors row with snapshot_protocol >= 1, or be explicitly
+--                             retired; otherwise journal GC is refused (clients that cannot read
+--                             snapshots never lose history they still need).
 --
---   Realtime                  public.store_events is added to the `supabase_realtime`
---                             publication (postgres_changes, wake-up hint only). Realtime
---                             applies store_events_select (account_id = auth.uid()) with the
---                             subscriber's JWT.
+--   storage.objects           INSERT / UPDATE also accept snapshot objects of the caller's own
+--                             unexpired `building` claim. A RESTRICTIVE DELETE policy forbids
+--                             deleting objects of a `ready` generation and journal chunks that
+--                             journal GC does not allow (unless their profile no longer exists).
 --
--- Constants (docs/03 §3.7): claim TTL 30 min; journal GC grace 10 min after ready_at;
--- generation stability 24 h; at most one claim per 6 h per profile; dormancy (30 days) and
--- the informational 180 days are app-side policy over sync_cursors.updated_at.
+--   Realtime                  public.store_events joins the `supabase_realtime` publication
+--                             (wake-up hint only), idempotently.
 --
--- Owner-scoped like everything else: account_id = auth.uid(), RLS enabled + forced,
--- composite FKs (account_id, profile_id) / (account_id, device_id) because FK checks bypass
--- RLS. Column-level grants. SECURITY INVOKER functions only. Nothing for anon; the service
--- role is never used by the app. Nothing here deletes data.
+-- Constants (docs/03 §3.7): claim TTL 30 min; journal GC 10 min after ready_at; generation
+-- stability 24 h; one claim per 6 h per profile; active reader = report within 30 days;
+-- required snapshot protocol = 1. All time comparisons use the database clock.
 --
--- Requires 0002 + 0003 + 0004. Idempotent, explicit, reversible
+-- Owner-scoped (account_id = auth.uid(), RLS enabled + forced), composite FKs, column grants,
+-- SECURITY INVOKER functions only, nothing for anon, no service role. Nothing here deletes data.
+--
+-- Requires 0002 + 0003 + 0004. Idempotent (safe to run again), explicit, reversible
 -- (0005_compaction_realtime.rollback.sql), Supabase-guarded. NOT YET APPLIED.
 -- ============================================================================
 
@@ -68,9 +66,10 @@ begin
      or to_regprocedure('public.synchrome_journal_object_ok(text)') is null then
     raise exception 'objects from 0004 missing: apply 0004 first. Aborting 0005.';
   end if;
-  if not exists (select 1 from pg_constraint where conname = 'profiles_account_id_id_key')
+  if to_regclass('public.profile_mappings') is null
+     or not exists (select 1 from pg_constraint where conname = 'profiles_account_id_id_key')
      or not exists (select 1 from pg_constraint where conname = 'devices_account_id_device_id_key') then
-    raise exception 'composite keys from 0003 missing. Aborting 0005.';
+    raise exception 'objects from 0003 missing. Aborting 0005.';
   end if;
 end $$;
 
@@ -82,6 +81,7 @@ create table if not exists public.sync_cursors (
   applied              jsonb       not null default '{}'::jsonb,  -- {"<source device>": applied_through}
   published_through    bigint      not null default 0,
   snapshot_generation  bigint,
+  snapshot_protocol    integer     not null default 0,  -- 0 = cannot read snapshots; 1 = synchrome-snapshot/1
   updated_at           timestamptz not null default now(),   -- last report, server time (trigger)
   retired_at           timestamptz,                         -- explicit user action, server time (trigger)
 
@@ -95,15 +95,18 @@ create table if not exists public.sync_cursors (
   constraint sync_cursors_published_chk
     check (published_through >= 0),
   constraint sync_cursors_generation_chk
-    check (snapshot_generation is null or snapshot_generation >= 1)
+    check (snapshot_generation is null or snapshot_generation >= 1),
+  constraint sync_cursors_protocol_chk
+    check (snapshot_protocol between 0 and 1000)
 );
 
 comment on table public.sync_cursors is
-  'Synchrome: per (profile, reader device) applied cursors, last report (server time) and explicit retirement; input of the compaction watermark (docs/03 §3.7).';
+  'Synchrome: per (profile, reader device) applied cursors, snapshot protocol support, last report (server time) and explicit retirement; input of compaction (docs/03 §3.7).';
 comment on column public.sync_cursors.retired_at is
   'Set only by an explicit user action in the app ("remove this device"); stamped with server time; never set by age.';
+comment on column public.sync_cursors.snapshot_protocol is
+  'Highest snapshot protocol the device can bootstrap from (0 = none). Journal GC requires >= 1 for every mapped, non-retired device.';
 
--- server time for activity and retirement; retiring/unretiring is not activity
 create or replace function public.synchrome_sync_cursors_touch()
 returns trigger
 language plpgsql
@@ -114,16 +117,16 @@ begin
   if tg_op = 'INSERT'
      or new.applied is distinct from old.applied
      or new.published_through is distinct from old.published_through
-     or new.snapshot_generation is distinct from old.snapshot_generation then
+     or new.snapshot_generation is distinct from old.snapshot_generation
+     or new.snapshot_protocol is distinct from old.snapshot_protocol then
     new.updated_at := now();
   else
-    new.updated_at := old.updated_at;
+    new.updated_at := old.updated_at;          -- retiring / un-retiring is not activity
   end if;
-  if new.retired_at is not null
-     and (tg_op = 'INSERT' or old.retired_at is null) then
-    new.retired_at := now();                 -- whatever the client sent
+  if new.retired_at is not null and (tg_op = 'INSERT' or old.retired_at is null) then
+    new.retired_at := now();                   -- whatever the client sent
   elsif tg_op = 'UPDATE' and new.retired_at is not null then
-    new.retired_at := old.retired_at;        -- an existing retirement keeps its time
+    new.retired_at := old.retired_at;          -- an existing retirement keeps its time
   end if;
   return new;
 end;
@@ -153,9 +156,9 @@ create policy sync_cursors_delete on public.sync_cursors
 
 revoke all on public.sync_cursors from anon, authenticated;
 grant select, delete on public.sync_cursors to authenticated;
-grant insert (profile_id, device_id, applied, published_through, snapshot_generation, retired_at)
+grant insert (profile_id, device_id, applied, published_through, snapshot_generation, snapshot_protocol, retired_at)
   on public.sync_cursors to authenticated;
-grant update (applied, published_through, snapshot_generation, retired_at)
+grant update (applied, published_through, snapshot_generation, snapshot_protocol, retired_at)
   on public.sync_cursors to authenticated;
 
 -- 2. profile_snapshots ------------------------------------------------------------
@@ -200,12 +203,12 @@ create table if not exists public.profile_snapshots (
 );
 
 comment on table public.profile_snapshots is
-  'Synchrome: compacted snapshot generations of a profile (building -> ready -> superseded); the unique generation is the compaction lock; current + previous ready generations are always kept (docs/03 §3.7).';
+  'Synchrome: compacted snapshot generations of a profile (building -> ready -> superseded); unique generation = compaction lock; current + previous ready generations always kept (docs/03 §3.7).';
 
 create index if not exists profile_snapshots_ready_idx
   on public.profile_snapshots (account_id, profile_id, generation desc) where state = 'ready';
 
--- the server owns timestamps and the state machine
+-- the server owns timestamps, the state machine and the validity of watermarks
 create or replace function public.synchrome_profile_snapshots_guard()
 returns trigger
 language plpgsql
@@ -213,9 +216,17 @@ security invoker
 set search_path = ''
 as $$
 declare
-  latest     bigint;
-  newer      bigint;
-  current_at timestamptz;
+  latest      bigint;
+  newer       bigint;
+  current_at  timestamptz;
+  prev_wm     jsonb;
+  rec         record;
+  w           bigint;
+  lo          bigint;
+  at_w        integer;
+  breaks      integer;
+  straddle    integer;
+  min_applied bigint;
 begin
   if tg_op = 'INSERT' then
     select coalesce(max(s.generation), 0) into latest
@@ -233,42 +244,105 @@ begin
     new.expires_at := now() + interval '30 minutes';
     return new;
   end if;
+
   -- UPDATE
   if new.profile_id <> old.profile_id or new.generation <> old.generation
      or new.account_id <> old.account_id or new.created_by <> old.created_by
      or new.claimed_at <> old.claimed_at or new.expires_at <> old.expires_at then
     raise exception 'immutable snapshot columns' using errcode = '23514';
   end if;
+
+  if old.state = 'building' and new.state = 'building' then
+    new.ready_at := null;                     -- builder progress (counts/bytes)
+    return new;
+  end if;
+
   if old.state = 'building' and new.state = 'ready' then
     if old.expires_at <= now() then
       raise exception 'snapshot claim expired' using errcode = '23514';
     end if;
+    select s.watermarks into prev_wm
+      from public.profile_snapshots s
+     where s.profile_id = old.profile_id and s.state = 'ready' and s.generation < old.generation
+     order by s.generation desc limit 1;
+    prev_wm := coalesce(prev_wm, '{}'::jsonb);
+    -- shape: {"<uuid>": non-negative integer}
+    for rec in select key, value from jsonb_each(new.watermarks) loop
+      if rec.key !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+         or jsonb_typeof(rec.value) <> 'number' or rec.value::text !~ '^[0-9]{1,15}$' then
+        raise exception 'invalid watermark entry' using errcode = '23514';
+      end if;
+    end loop;
+    -- monotonic: no device of the previous generation dropped or lowered
+    for rec in select key, value from jsonb_each(prev_wm) loop
+      if not (new.watermarks ? rec.key)
+         or (new.watermarks ->> rec.key)::bigint < (rec.value::text)::bigint then
+        raise exception 'watermark of % lower than in the previous generation', rec.key using errcode = '23514';
+      end if;
+    end loop;
+    for rec in select key, value from jsonb_each(new.watermarks) loop
+      w := (rec.value::text)::bigint;
+      lo := coalesce((prev_wm ->> rec.key)::bigint, 0);
+      if w > lo then
+        -- a contiguous chain of publications (lo, w], ending exactly at w, none crossing lo or w
+        select count(*) filter (where e.seq_to = w) into at_w
+          from public.store_events e
+         where e.profile_id = old.profile_id and e.device_id::text = rec.key
+           and e.seq_from > lo and e.seq_to <= w;
+        select count(*) into breaks
+          from (select e.seq_from, lag(e.seq_to) over (order by e.seq_to) as prev_to
+                  from public.store_events e
+                 where e.profile_id = old.profile_id and e.device_id::text = rec.key
+                   and e.seq_from > lo and e.seq_to <= w) t
+         where t.seq_from <> coalesce(t.prev_to, lo) + 1;
+        select count(*) into straddle
+          from public.store_events e
+         where e.profile_id = old.profile_id and e.device_id::text = rec.key
+           and ((e.seq_from <= lo and e.seq_to > lo) or (e.seq_from <= w and e.seq_to > w));
+        if at_w <> 1 or breaks <> 0 or straddle <> 0 then
+          raise exception 'watermark % of % is not the end of a contiguous chain of publications', w, rec.key
+            using errcode = '23514';
+        end if;
+        -- already applied by every active reader that supports snapshots
+        select min(coalesce((c.applied ->> rec.key)::bigint, 0)) into min_applied
+          from public.sync_cursors c
+         where c.profile_id = old.profile_id and c.device_id::text <> rec.key
+           and c.retired_at is null and c.snapshot_protocol >= 1
+           and c.updated_at >= now() - interval '30 days';
+        if min_applied is not null and w > min_applied then
+          raise exception 'watermark % of % not yet applied by every active reader', w, rec.key
+            using errcode = '23514';
+        end if;
+      end if;
+    end loop;
     new.ready_at := now();
-  elsif old.state = 'building' and new.state = 'building' then
-    new.ready_at := null;   -- progress updates of the builder (counts/bytes) are allowed
-  elsif old.state = 'ready' and new.state = 'superseded' then
+    return new;
+  end if;
+
+  if old.state = 'ready' and new.state = 'superseded' then
     if new.manifest_path is distinct from old.manifest_path
        or new.manifest_sha256 is distinct from old.manifest_sha256
        or new.watermarks is distinct from old.watermarks
        or new.counts is distinct from old.counts or new.bytes <> old.bytes then
       raise exception 'a ready snapshot is immutable' using errcode = '23514';
     end if;
-    -- keep current + previous: at least two newer ready generations, the newest stable (24 h)
-    select count(*), max(s.ready_at) filter (where s.generation = (
-             select max(s2.generation) from public.profile_snapshots s2
-              where s2.profile_id = old.profile_id and s2.state = 'ready'))
-      into newer, current_at
+    -- keep current + previous: two newer ready generations, the newest ready for >= 24 h
+    select count(*) into newer
       from public.profile_snapshots s
      where s.profile_id = old.profile_id and s.state = 'ready' and s.generation > old.generation;
+    select s.ready_at into current_at
+      from public.profile_snapshots s
+     where s.profile_id = old.profile_id and s.state = 'ready'
+     order by s.generation desc limit 1;
     if newer < 2 or current_at is null or current_at > now() - interval '24 hours' then
       raise exception 'generation % is still current/previous or the current one is not stable yet', old.generation
         using errcode = '23514';
     end if;
     new.ready_at := old.ready_at;
-  else
-    raise exception 'invalid snapshot transition % -> %', old.state, new.state using errcode = '23514';
+    return new;
   end if;
-  return new;
+
+  raise exception 'invalid snapshot transition % -> %', old.state, new.state using errcode = '23514';
 end;
 $$;
 
@@ -290,7 +364,7 @@ drop policy if exists profile_snapshots_update on public.profile_snapshots;
 create policy profile_snapshots_update on public.profile_snapshots
   for update to authenticated
   using (account_id = (select auth.uid())) with check (account_id = (select auth.uid()));
--- rows go away only when superseded or as an expired claim (or with the profile, by FK cascade)
+-- rows go away only when superseded, as an expired claim, or with the profile (FK cascade)
 drop policy if exists profile_snapshots_delete on public.profile_snapshots;
 create policy profile_snapshots_delete on public.profile_snapshots
   for delete to authenticated
@@ -303,16 +377,33 @@ grant insert (profile_id, generation, created_by) on public.profile_snapshots to
 grant update (state, manifest_path, manifest_sha256, watermarks, counts, bytes)
   on public.profile_snapshots to authenticated;
 
--- 3. Time-based decisions with the database clock ------------------------------------
+-- 3. Decisions with the database clock + GC blockers ---------------------------------
+-- devices mapped to the profile that cannot read snapshots and are not explicitly retired
+create or replace function public.synchrome_gc_blockers(p_profile uuid)
+returns integer
+language sql
+stable
+security invoker
+set search_path = ''
+as $$
+  select count(distinct m.device_id)::integer
+    from public.profile_mappings m
+   where m.profile_id = p_profile
+     and not exists (select 1 from public.sync_cursors c
+                      where c.profile_id = p_profile and c.device_id = m.device_id
+                        and (c.retired_at is not null or c.snapshot_protocol >= 1));
+$$;
+
 create or replace function public.synchrome_compaction_status(p_profile uuid)
 returns table (
   server_now              timestamptz,
   current_generation      bigint,
   current_ready_at        timestamptz,
   previous_generation     bigint,
-  journal_gc_watermarks   jsonb,       -- W(previous): GC runs one generation behind; null = nothing eligible
-  journal_gc_ok           boolean,     -- now() >= ready_at(current) + 10 min
-  generation_cleanup_ok   boolean,     -- current ready for >= 24 h (generations <= current-2 may be superseded)
+  journal_gc_watermarks   jsonb,       -- W(previous): GC runs one generation behind; null = none
+  gc_blockers             integer,     -- mapped devices without snapshot support (and not retired)
+  journal_gc_ok           boolean,     -- previous exists, now() >= ready_at(current) + 10 min, no blockers
+  generation_cleanup_ok   boolean,     -- current ready for >= 24 h
   last_claimed_at         timestamptz,
   claim_allowed           boolean      -- no live claim and >= 6 h since the last claim
 )
@@ -333,27 +424,76 @@ as $$
            bool_or(s.state = 'building' and s.expires_at > now()) as live_claim
       from public.profile_snapshots s
      where s.profile_id = p_profile
-  )
+  ), blk as (select public.synchrome_gc_blockers(p_profile) as n)
   select now(),
          (select generation from cur),
          (select ready_at from cur),
          (select generation from prev),
          (select watermarks from prev),
-         coalesce((select now() >= ready_at + interval '10 minutes' from cur), false)
-           and exists (select 1 from prev),
+         (select n from blk),
+         exists (select 1 from prev)
+           and coalesce((select now() >= ready_at + interval '10 minutes' from cur), false)
+           and (select n from blk) = 0,
          coalesce((select now() >= ready_at + interval '24 hours' from cur), false),
          (select last_claimed from claims),
          not coalesce((select live_claim from claims), false)
            and coalesce((select now() >= last_claimed + interval '6 hours' from claims), true);
 $$;
 
+-- the single eligibility rule of journal GC (used by the RLS policy, the RPC and Storage)
+create or replace function public.synchrome_journal_gc_allowed(p_profile uuid, p_device uuid, p_seq_to bigint)
+returns boolean
+language sql
+stable
+security invoker
+set search_path = ''
+as $$
+  select coalesce((select s.journal_gc_ok
+                          and (s.journal_gc_watermarks ->> p_device::text)::bigint >= p_seq_to
+                     from public.synchrome_compaction_status(p_profile) s), false);
+$$;
+
+-- the RPC clients use: one source device, up to an explicit seq, all-or-nothing validation
+create or replace function public.synchrome_gc_journal_events(p_profile uuid, p_device uuid, p_through bigint)
+returns bigint
+language plpgsql
+volatile
+security invoker
+set search_path = ''
+as $$
+declare
+  n bigint;
+begin
+  if p_through is null or p_through < 1
+     or not public.synchrome_journal_gc_allowed(p_profile, p_device, p_through) then
+    raise exception 'journal GC not allowed for this profile/device/seq now' using errcode = '42501';
+  end if;
+  with d as (
+    delete from public.store_events e
+     where e.profile_id = p_profile and e.device_id = p_device and e.seq_to <= p_through
+     returning 1)
+  select count(*) into n from d;
+  return n;
+end;
+$$;
+
 comment on function public.synchrome_compaction_status(uuid) is
-  'Synchrome: compaction decisions computed with the database clock (journal GC after ready_at + 10 min, one generation behind; generation cleanup after 24 h; one claim per 6 h).';
+  'Synchrome: compaction decisions with the database clock (journal GC after ready_at + 10 min, one generation behind, no blocking device; generation cleanup after 24 h; one claim per 6 h).';
+comment on function public.synchrome_journal_gc_allowed(uuid, uuid, bigint) is
+  'Synchrome: the only rule under which a store_events row / journal chunk may be deleted while its profile exists.';
+comment on function public.synchrome_gc_journal_events(uuid, uuid, bigint) is
+  'Synchrome: delete the store_events of one source device up to an eligible seq (SECURITY INVOKER; RLS re-checks every row).';
 
-revoke all on function public.synchrome_compaction_status(uuid) from public, anon;
-grant execute on function public.synchrome_compaction_status(uuid) to authenticated;
+-- store_events: replace 0004's generic DELETE by the GC rule
+drop policy if exists store_events_delete on public.store_events;
+drop policy if exists store_events_delete_gc on public.store_events;
+create policy store_events_delete_gc on public.store_events
+  for delete to authenticated
+  using (account_id = (select auth.uid())
+         and public.synchrome_journal_gc_allowed(profile_id, device_id, seq_to));
+-- 0004's grants stay (select, delete; insert on 6 columns; no update)
 
--- 4. Storage: snapshot objects ------------------------------------------------------
+-- 4. Storage: snapshot objects + guarded deletes -----------------------------------
 create or replace function public.synchrome_snapshot_object_ok(object_name text)
 returns boolean
 language sql
@@ -371,9 +511,6 @@ as $$
                     and s.expires_at > now());
 $$;
 
-comment on function public.synchrome_snapshot_object_ok(text) is
-  'Synchrome: true if a Storage object name is a part/manifest of a snapshot generation the caller has claimed (building, unexpired).';
-
 create or replace function public.synchrome_snapshot_object_protected(object_name text)
 returns boolean
 language sql
@@ -388,13 +525,43 @@ as $$
                     and s.state = 'ready');
 $$;
 
-comment on function public.synchrome_snapshot_object_protected(text) is
-  'Synchrome: true if a Storage object belongs to a ready snapshot generation (must not be deleted).';
+-- may this object be deleted? snapshot of a ready generation: never; journal chunk: only under
+-- the journal GC rule (file name = first seq of the chunk; watermarks are chunk boundaries), or
+-- when its profile no longer exists (profile cleanup); anything else: the 0004 owner rule.
+create or replace function public.synchrome_object_delete_ok(object_name text)
+returns boolean
+language sql
+stable
+security invoker
+set search_path = ''
+as $$
+  select case
+    when object_name ~ '^[0-9a-f-]{36}/profiles/[0-9a-f-]{36}/snapshots/' then
+      not public.synchrome_snapshot_object_protected(object_name)
+    when object_name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/profiles/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/journal/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[0-9]{4}/[0-9]{2}/[0-9]{8,12}\.jsonl$' then
+      not exists (select 1 from public.profiles p where p.id::text = split_part(object_name, '/', 3))
+      or public.synchrome_journal_gc_allowed(
+           split_part(object_name, '/', 3)::uuid,
+           split_part(object_name, '/', 5)::uuid,
+           split_part(split_part(object_name, '/', 8), '.', 1)::bigint)
+    else true
+  end;
+$$;
 
+revoke all on function public.synchrome_gc_blockers(uuid) from public, anon;
+revoke all on function public.synchrome_compaction_status(uuid) from public, anon;
+revoke all on function public.synchrome_journal_gc_allowed(uuid, uuid, bigint) from public, anon;
+revoke all on function public.synchrome_gc_journal_events(uuid, uuid, bigint) from public, anon;
 revoke all on function public.synchrome_snapshot_object_ok(text) from public, anon;
-grant execute on function public.synchrome_snapshot_object_ok(text) to authenticated;
 revoke all on function public.synchrome_snapshot_object_protected(text) from public, anon;
+revoke all on function public.synchrome_object_delete_ok(text) from public, anon;
+grant execute on function public.synchrome_gc_blockers(uuid) to authenticated;
+grant execute on function public.synchrome_compaction_status(uuid) to authenticated;
+grant execute on function public.synchrome_journal_gc_allowed(uuid, uuid, bigint) to authenticated;
+grant execute on function public.synchrome_gc_journal_events(uuid, uuid, bigint) to authenticated;
+grant execute on function public.synchrome_snapshot_object_ok(text) to authenticated;
 grant execute on function public.synchrome_snapshot_object_protected(text) to authenticated;
+grant execute on function public.synchrome_object_delete_ok(text) to authenticated;
 
 drop policy if exists synchrome_stores_insert on storage.objects;
 create policy synchrome_stores_insert on storage.objects
@@ -412,24 +579,30 @@ create policy synchrome_stores_update on storage.objects
               and (public.synchrome_journal_object_ok(name)
                    or public.synchrome_snapshot_object_ok(name)));
 
--- objects of a ready generation can never be deleted (AND-ed with the 0004 delete policy)
-drop policy if exists synchrome_stores_delete_keep_ready on storage.objects;
-create policy synchrome_stores_delete_keep_ready on storage.objects
+-- AND-ed with 0004's synchrome_stores_delete (own prefix)
+drop policy if exists synchrome_stores_delete_keep_ready on storage.objects;   -- earlier draft name
+drop policy if exists synchrome_stores_delete_guard on storage.objects;
+create policy synchrome_stores_delete_guard on storage.objects
   as restrictive
   for delete to authenticated
-  using (bucket_id <> 'stores' or not public.synchrome_snapshot_object_protected(name));
+  using (bucket_id <> 'stores' or public.synchrome_object_delete_ok(name));
 
--- 5. Realtime: store_events INSERTs as wake-up hints ------------------------------
+-- 5. Realtime: store_events INSERTs as wake-up hints (idempotent) -----------------
 do $$
+declare
+  pub record;
 begin
-  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
-    if not exists (select 1 from pg_publication_tables
-                    where pubname = 'supabase_realtime'
-                      and schemaname = 'public' and tablename = 'store_events') then
-      execute 'alter publication supabase_realtime add table public.store_events';
-    end if;
-  else
+  select p.oid, p.puballtables into pub from pg_publication p where p.pubname = 'supabase_realtime';
+  if not found then
     raise notice 'publication supabase_realtime not found: Realtime wake-up unavailable, polling keeps working.';
+  elsif pub.puballtables then
+    raise notice 'supabase_realtime is FOR ALL TABLES: store_events is already included; nothing to add.';
+  elsif exists (select 1 from pg_publication_tables t
+                 where t.pubname = 'supabase_realtime'
+                   and t.schemaname = 'public' and t.tablename = 'store_events') then
+    raise notice 'store_events already in supabase_realtime; nothing to add.';
+  else
+    execute 'alter publication supabase_realtime add table public.store_events';
   end if;
 end $$;
 
