@@ -1,12 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Synchrome",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.synchrome.app",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build"
   },
   "app": {
@@ -24,6 +22,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png", "icons/icon.icns"]
+    "icon": ["icons/icon.png", "icons/icon.icns"],
+    "resources": { "../../extension/": "extension/" },
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
   }
 }

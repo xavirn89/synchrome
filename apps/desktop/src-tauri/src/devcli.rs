@@ -259,6 +259,14 @@ async fn run_async(args: &[String]) -> i32 {
                 Err(e) => fail(e),
             }
         }
+        // Discovered browsers (standard + extra data folders): kinds, access, versions and
+        // profile COUNTS only (never profile names).
+        "--dev-browsers" => out(serde_json::json!({
+            "browsers": crate::discovered_pub().iter().map(|b| serde_json::json!({
+                "kind": b.kind, "display_name": b.display_name, "user_data_dir": b.user_data_dir,
+                "version": b.version, "access": b.access, "profiles": b.profiles.len(),
+            })).collect::<Vec<_>>()
+        })),
         "--dev-registry" => {
             let Ok(id) = Uuid::parse_str(&arg(1)) else {
                 return fail("bad mapping id");
@@ -574,6 +582,35 @@ async fn run_async(args: &[String]) -> i32 {
             }
         }
         // Keys of one extension store area (browser must be closed): names + value digests only.
+        // History of a CLOSED profile, strictly read-only (SQLite `immutable` URI): schema
+        // version and row counts only — never a URL or title.
+        "--dev-read-history" => {
+            let path = std::path::Path::new(&arg(1)).join(arg(2)).join("History");
+            let uri = format!("file:{}?mode=ro&immutable=1", path.display());
+            let r = (|| -> Result<serde_json::Value, String> {
+                let c = rusqlite::Connection::open_with_flags(
+                    &uri,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+                )
+                .map_err(|e| e.to_string())?;
+                let one = |sql: &str| -> Result<i64, String> {
+                    c.query_row(sql, [], |r| r.get(0))
+                        .map_err(|e| e.to_string())
+                };
+                Ok(serde_json::json!({
+                    "readable": true,
+                    "schema_version": one("SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'version'")?,
+                    "urls": one("SELECT COUNT(*) FROM urls")?,
+                    "visits": one("SELECT COUNT(*) FROM visits")?,
+                    "bytes": std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+                }))
+            })();
+            match r {
+                Ok(v) => out(v),
+                Err(e) => fail(e),
+            }
+        }
         "--dev-read-ext-area" => {
             let area = match arg(4).as_str() {
                 "sync" => synchrome_browser::Area::Sync,
@@ -1272,6 +1309,16 @@ async fn run_async(args: &[String]) -> i32 {
             };
             match r {
                 Ok(()) => out(serde_json::json!({ "retired": true })),
+                Err(e) => fail(e),
+            }
+        }
+        // Explicit user action: a retired device takes part in compaction again.
+        "--dev-reactivate-device" => {
+            let (Ok(pid), Ok(dev)) = (Uuid::parse_str(&arg(1)), Uuid::parse_str(&arg(2))) else {
+                return fail("usage: --dev-reactivate-device <profile> <device>");
+            };
+            match crate::compaction::reactivate_device(&state, pid, dev).await {
+                Ok(()) => out(serde_json::json!({ "reactivated": true })),
                 Err(e) => fail(e),
             }
         }

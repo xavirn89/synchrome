@@ -2,7 +2,7 @@
 
 use crate::access::detect_access;
 use crate::paths::user_data_dir;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use synchrome_types::{AccessState, BrowserKind, DiscoveredBrowser, DiscoveredProfile};
 
 /// Discover every installed Chromium-family browser and its profiles on this machine.
@@ -11,6 +11,21 @@ use synchrome_types::{AccessState, BrowserKind, DiscoveredBrowser, DiscoveredPro
 /// withhold reads while still allowing metadata). Nothing is written. Browsers that are not
 /// installed are omitted.
 pub fn discover_browsers() -> Vec<DiscoveredBrowser> {
+    discover_browsers_with(&[])
+}
+
+/// A browser data folder outside the standard location (a `--user-data-dir` the user runs a
+/// browser with). Listed as its own browser entry, labelled, with the same access rules.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExtraDataDir {
+    pub kind: BrowserKind,
+    pub user_data_dir: PathBuf,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// [`discover_browsers`] plus the given extra data folders (those that exist).
+pub fn discover_browsers_with(extra: &[ExtraDataDir]) -> Vec<DiscoveredBrowser> {
     let mut out = Vec::new();
     for &kind in BrowserKind::all() {
         let Some(udd) = user_data_dir(kind) else {
@@ -19,19 +34,42 @@ pub fn discover_browsers() -> Vec<DiscoveredBrowser> {
         if !is_present(kind, &udd) {
             continue;
         }
-        let access = detect_access(&udd);
-        let version = read_version(&udd);
-        let profiles = enumerate_profiles(&udd, access);
-        out.push(DiscoveredBrowser {
-            kind,
-            display_name: kind.display_name().to_string(),
-            user_data_dir: udd.to_string_lossy().into_owned(),
-            version,
-            access,
-            profiles,
-        });
+        out.push(describe(kind, &udd, kind.display_name().to_string()));
+    }
+    out.extend(discover_extra_only(extra));
+    out
+}
+
+/// Only the given extra data folders (the standard browser locations are not touched at all).
+pub fn discover_extra_only(extra: &[ExtraDataDir]) -> Vec<DiscoveredBrowser> {
+    let mut out = Vec::new();
+    for x in extra {
+        if std::fs::symlink_metadata(&x.user_data_dir).is_err() {
+            continue;
+        }
+        let label = x
+            .label
+            .as_deref()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| format!("{} — {}", x.kind.display_name(), l.trim()))
+            .unwrap_or_else(|| format!("{} — custom data folder", x.kind.display_name()));
+        out.push(describe(x.kind, &x.user_data_dir, label));
     }
     out
+}
+
+fn describe(kind: BrowserKind, udd: &Path, display_name: String) -> DiscoveredBrowser {
+    let access = detect_access(udd);
+    let version = read_version(udd);
+    let profiles = enumerate_profiles(udd, access);
+    DiscoveredBrowser {
+        kind,
+        display_name,
+        user_data_dir: udd.to_string_lossy().into_owned(),
+        version,
+        access,
+        profiles,
+    }
 }
 
 /// Is this browser installed? The user-data dir being stat-able is the primary signal; the

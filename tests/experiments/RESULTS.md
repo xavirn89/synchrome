@@ -155,7 +155,22 @@ Canary: `~/Library/Application Support/com.apple.TCC/TCC.db` not accessible (con
 
 **Degraded mode if the user declines FDA (macOS):** Helium fully works. Chrome/Brave/Edge: bookmarks, history capture, extension list/state and live applies still work **through the extension** (the browser reads its own files); what breaks is everything that needs the app to touch those profiles' files directly — full Preferences, extension settings, history import with dates, and `External Extensions` auto-install. Those become "needs Full Disk Access" in the UI.
 
-### DEFERRED (to run before closing development): live positive FDA test
+### DONE (2026-10-03): live positive FDA test — `e2e_fda.py`
+A disposable Chrome profile was created **by Chrome itself** inside its protected folder
+(`~/Library/Application Support/Google/Chrome/Synchrome-E2E-disposable`; Chrome launched as its
+own TCC-responsible process via `responsibility_spawnattrs_setdisclaim`, fixtures loaded over the
+DevTools pipe). Synchrome, signed with Developer ID (Team YV44FR3LG3, `com.synchrome.app`) and
+launched through `open` (own TCC identity): **without** the grant the folder is
+`requires_full_disk_access` (0 profiles); **with** the grant to `/Applications/Synchrome.app` it is
+accessible, and Preferences, History (read-only, SQLite `immutable` URI: schema 70, 3 visits) and
+the dummy's extension settings (LevelDB) are readable. A different build (other CDHash) and a
+re-signed bundle with the same Team ID + bundle id keep the grant (designated requirement, not the
+binary). The harness shell itself still cannot read the folder; `stat` is allowed by TCC, reads
+are not. Side findings: a shell-spawned Chrome inherits the shell's TCC identity and cannot even
+create `SingletonLock` in its own protected folder; a TCC-protected *sibling* created by us (e.g.
+`Google/Chrome Beta`) is not protected — only the canonical folders are.
+
+### (historical) DEFERRED: live positive FDA test
 Per the author's decision, the positive path will be verified at the end of development with a **manual FDA grant**: add the signed `Synchrome.app` (or the test `E1Probe.app`) in System Settings → Privacy & Security → Full Disk Access, then re-run the harness to confirm (a) Chrome/Brave/Edge profile reads succeed, (b) `External Extensions` becomes writable, and (c) the grant survives a notarized update (same identity) vs. breaks on an ad-hoc rebuild. Tracked here and in `docs/06` as the remaining E1 item.
 
 ## E6 — history.onVisitRemoved on expiry — PASS (hypothesis disproven; important design consequence)

@@ -101,6 +101,7 @@ pub async fn after_sync(state: &AppState, profile_id: Uuid) {
 
 /// Compact a mapping's profile now (UI / dev harness). `force` ignores the thresholds and the
 /// client-side 6 h rule in debug builds only; every database rule still applies.
+#[cfg_attr(not(debug_assertions), allow(dead_code))] // dev CLI only
 pub async fn compact_now(
     state: &AppState,
     mapping_id: Uuid,
@@ -124,6 +125,7 @@ pub async fn compact_now(
     .map_err(|e| e.to_string())
 }
 
+#[cfg_attr(not(debug_assertions), allow(dead_code))] // dev CLI only
 pub async fn gc_now(state: &AppState, mapping_id: Uuid) -> Result<GcReport, String> {
     let (_, pid) = bookmarks::own_profile_pub(state, mapping_id)?;
     let mut db = open_db()?;
@@ -134,12 +136,28 @@ pub async fn gc_now(state: &AppState, mapping_id: Uuid) -> Result<GcReport, Stri
 }
 
 /// Report this device's cursors now (also done after every sync).
+#[cfg_attr(not(debug_assertions), allow(dead_code))] // dev CLI only
 pub async fn report_now(state: &AppState, mapping_id: Uuid) -> Result<bool, String> {
     let (_, pid) = bookmarks::own_profile_pub(state, mapping_id)?;
     let mut db = open_db()?;
     cp::report_cursors(&mut db, &CloudSink::new(state), pid)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// A device mapped to the profile, as the compaction sees it (for the UI's device actions;
+/// the id is needed to act on it and is never displayed).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProfileDevice {
+    pub device_id: Uuid,
+    pub name: String,
+    pub is_current: bool,
+    /// It has reported with snapshot support (`snapshot_protocol ≥ 1`).
+    pub snapshot_capable: bool,
+    /// Explicitly removed from the profile's compaction by the user (`retired_at` set).
+    pub retired: bool,
+    /// It blocks journal GC right now (mapped, not retired, without snapshot support).
+    pub blocks_gc: bool,
 }
 
 /// Diagnostics of a mapping's profile (counts and generations only).
@@ -150,6 +168,85 @@ pub struct Diagnostics {
     pub cloud: Option<CompactionStatus>,
     pub gc_blocked: bool,
     pub snapshot_generations_kept: usize,
+    /// This device was retired from the profile's compaction (explicit action, reversible).
+    pub this_device_retired: bool,
+    pub devices: Vec<ProfileDevice>,
+}
+
+/// The devices mapped to a profile with their compaction state.
+async fn profile_devices(state: &AppState, pid: Uuid) -> Result<Vec<ProfileDevice>, String> {
+    let session = state.session().await?;
+    let cloud = state.cloud()?;
+    let me = state.device()?.device_id;
+    let mappings = cloud
+        .mapping_for_cloud_profile(&session, pid)
+        .await
+        .map_err(|e| e.to_string())?;
+    let names: std::collections::HashMap<Uuid, String> = cloud
+        .list_devices(&session, me)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|d| (d.device_id, d.name))
+        .collect();
+    let rows: std::collections::HashMap<Uuid, synchrome_cloud::compaction::CursorRowDto> = cloud
+        .list_cursor_rows(&session, pid)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|r| (r.device_id, r))
+        .collect();
+    let mut ids: Vec<Uuid> = mappings.iter().map(|m| m.device_id).collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids
+        .into_iter()
+        .map(|id| {
+            let row = rows.get(&id);
+            let capable = row.is_some_and(|r| r.snapshot_protocol >= 1);
+            let retired = row.is_some_and(|r| r.retired_at.is_some());
+            ProfileDevice {
+                device_id: id,
+                name: names
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown device".into()),
+                is_current: id == me,
+                snapshot_capable: capable,
+                retired,
+                blocks_gc: !retired && !capable,
+            }
+        })
+        .collect())
+}
+
+/// Explicit user action: remove a device from the profile's compaction (it stops holding
+/// watermarks and blocking GC; its history is kept). Reversible with [`reactivate_device`].
+pub async fn retire_device(
+    state: &AppState,
+    profile_id: Uuid,
+    device_id: Uuid,
+) -> Result<(), String> {
+    let session = state.session().await?;
+    state
+        .cloud()?
+        .retire_device(&session, profile_id, device_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Explicit user action: a retired device takes part in the compaction again.
+pub async fn reactivate_device(
+    state: &AppState,
+    profile_id: Uuid,
+    device_id: Uuid,
+) -> Result<(), String> {
+    let session = state.session().await?;
+    state
+        .cloud()?
+        .reactivate_device(&session, profile_id, device_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub async fn diagnostics(state: &AppState, mapping_id: Uuid) -> Result<Diagnostics, String> {
@@ -164,11 +261,14 @@ pub async fn diagnostics(state: &AppState, mapping_id: Uuid) -> Result<Diagnosti
         .await
         .map(|v| v.len())
         .unwrap_or(0);
+    let devices = profile_devices(state, pid).await.unwrap_or_default();
     Ok(Diagnostics {
         realtime: crate::realtime::status(),
         gc_blocked: cloud.as_ref().is_some_and(|c| c.gc_blockers > 0),
         local,
         cloud,
         snapshot_generations_kept: kept,
+        this_device_retired: devices.iter().any(|d| d.is_current && d.retired),
+        devices,
     })
 }

@@ -339,7 +339,9 @@ impl<T: RestTransport> CloudClient<T> {
         Err(CloudError::Conflict("sync_cursors row".into()))
     }
 
-    /// This device's cursors (a report also un-retires the device: it is in use).
+    /// This device's cursors. `retired_at` is NOT part of a report: a retired device that
+    /// keeps syncing stays retired (excluded from watermarks) until the user reactivates it
+    /// explicitly ([`Self::reactivate_device`]).
     pub async fn report_cursor_row(
         &self,
         session: &Session,
@@ -348,10 +350,32 @@ impl<T: RestTransport> CloudClient<T> {
         let body = serde_json::json!({
             "applied": row.applied, "published_through": row.published_through,
             "snapshot_generation": row.snapshot_generation, "snapshot_protocol": row.snapshot_protocol,
-            "retired_at": null,
         });
         self.cursor_patch_or_insert(session, row.profile_id, row.device_id, body)
             .await
+    }
+
+    /// Explicit user action: a retired device takes part in the profile's compaction again
+    /// (clears `retired_at`; the device's next report makes it an active reader).
+    pub async fn reactivate_device(
+        &self,
+        session: &Session,
+        profile_id: Uuid,
+        device_id: Uuid,
+    ) -> Result<(), CloudError> {
+        let body = serde_json::json!({ "retired_at": null });
+        self.call(
+            session,
+            "PATCH",
+            &format!("/sync_cursors?profile_id=eq.{profile_id}&device_id=eq.{device_id}"),
+            &[
+                ("Prefer", "return=minimal"),
+                ("Content-Type", "application/json"),
+            ],
+            Some(&body),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Explicit user action: retire a device from a profile (the server stamps the time).

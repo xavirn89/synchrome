@@ -30,5 +30,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "ti
 synchrome-device = { workspace = true }
 synchrome-state = { workspace = true }
 synchrome-sync = { workspace = true }
+rusqlite = { workspace = true }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "native-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

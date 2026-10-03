@@ -26,6 +26,21 @@ impl<T: AuthTransport> SessionManager<T> {
         Ok(AccountStatus::from_session(&session))
     }
 
+    /// Create an account; signed in right away when the server auto-confirms e-mails,
+    /// otherwise signed out with a hint to confirm the e-mail first.
+    pub async fn sign_up(&self, email: &str, password: &str) -> Result<AccountStatus, AuthError> {
+        match self.client.sign_up_password(email, password).await? {
+            Some(session) => {
+                self.store.save_session(&session).map_err(|e| {
+                    AuthError::InvalidResponse(format!("could not persist session: {e}"))
+                })?;
+                Ok(AccountStatus::from_session(&session))
+            }
+            None => Ok(AccountStatus::signed_out()
+                .with_error("Account created. Confirm the e-mail we sent you, then sign in.")),
+        }
+    }
+
     /// Return a session whose access token is valid now, refreshing if needed.
     ///
     /// - valid and not near expiry → returned as-is (no network)

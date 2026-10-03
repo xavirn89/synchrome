@@ -695,9 +695,14 @@ def main(creds):
     r.dev("--dev-report-cursors", r.mid)
     ri = local(r)
     rr = rows(a, pid)
-    check("13.87 the retired device returns behind compacted + collected history: re-bootstraps (G2) and converges; its report clears retired_at",
-          trr is not None and ri.get("snapshot_generation") == 2 and digest(r) == digest(a) and rr.get(r.device_id, {}).get("retired") is False,
-          json.dumps({"snapshot_generation": ri.get("snapshot_generation")}))
+    check("13.87 the retired device returns behind compacted + collected history: re-bootstraps (G2) and converges; it STAYS retired (a report never clears retired_at)",
+          trr is not None and ri.get("snapshot_generation") == 2 and digest(r) == digest(a) and rr.get(r.device_id, {}).get("retired") is True
+          and cloud(a).get("gc_blockers") == 0,
+          json.dumps({"snapshot_generation": ri.get("snapshot_generation"), "retired": rr.get(r.device_id, {}).get("retired")}))
+    a.dev("--dev-reactivate-device", pid, r.device_id)
+    rr = rows(a, pid)
+    check("14 explicit reactivation clears retired_at (user action), and only that",
+          rr.get(r.device_id, {}).get("retired") is False and rr.get(r.device_id, {}).get("retired_at") is None, "")
     check("13.86 a device that simply stopped reporting (D) is never retired automatically", rr.get(d.device_id, {}).get("retired") is False, "")
     xe.stop(r)
 

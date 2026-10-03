@@ -624,7 +624,7 @@ impl CompactionSink for Sink<'_> {
         e.applied = rep.applied.clone();
         e.published = rep.published_through;
         e.protocol = rep.snapshot_protocol;
-        e.retired = false;
+        // retired_at is not part of a report (only an explicit reactivation clears it)
         Ok(())
     }
     async fn claim_snapshot(&self, p: Uuid, generation: u64) -> Result<(), SinkError> {

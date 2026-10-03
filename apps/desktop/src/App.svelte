@@ -25,6 +25,13 @@
   let password = $state("");
   let authBusy = $state(false);
   let authError = $state(null);
+  let creatingAccount = $state(false);
+  // install location (the native messaging host needs a stable path) + bundled extension
+  let location = $state(null);
+  let extFolder = $state(null);
+  let extFolderError = $state(null);
+  let showSteps = $state(true);
+  let deviceConfirm = $state(null); // "<profile>:<device>" waiting for confirmation
 
   // cloud profile editing
   let newProfileName = $state("");
@@ -321,6 +328,26 @@
   async function loadDevice() {
     try { device = await invoke("device_identity"); } catch { device = null; }
   }
+  async function loadLocation() {
+    try { location = await invoke("install_location"); } catch { location = null; }
+    try { extFolder = await invoke("extension_folder"); extFolderError = null; } catch (e) { extFolder = null; extFolderError = String(e); }
+  }
+  async function revealExtension() {
+    try { await invoke("reveal_extension_folder"); } catch (e) { actionError = String(e); }
+  }
+  async function openFdaSettings() {
+    try { await invoke("open_full_disk_access_settings"); } catch (e) { actionError = String(e); }
+  }
+  async function deviceAction(m, d, action) {
+    const key = `${m.profile_id}:${d.device_id}:${action}`;
+    if (action === "retire" && deviceConfirm !== key) { deviceConfirm = key; return; }
+    deviceConfirm = null; busyKey = `dev:${d.device_id}`; actionError = null;
+    try {
+      await invoke(action === "retire" ? "retire_device" : "reactivate_device", { profileId: m.profile_id, deviceId: d.device_id });
+      await loadDiag(m);
+    } catch (e) { actionError = String(e); }
+    finally { busyKey = null; }
+  }
   /// Register this device, then fetch devices, profiles and mappings. Only when signed in.
   async function loadCloudData() {
     if (!account?.signed_in) { devices = []; profiles = []; mappings = []; return; }
@@ -346,7 +373,7 @@
   async function loadAll() {
     error = null;
     version = await invoke("app_version").catch(() => "");
-    await Promise.all([loadBrowsers(), loadCloud(), loadAccount(), loadDevice()]);
+    await Promise.all([loadBrowsers(), loadCloud(), loadAccount(), loadDevice(), loadLocation()]);
     await loadCloudData();
   }
   onMount(loadAll);
@@ -361,6 +388,49 @@
       await loadCloudData();
     } catch (e) { authError = String(e); }
     finally { authBusy = false; }
+  }
+  async function signUp() {
+    authError = null; authBusy = true;
+    try {
+      account = await invoke("sign_up", { email, password });
+      password = "";
+      if (account?.signed_in) { creatingAccount = false; await loadCloudData(); }
+    } catch (e) { authError = String(e); }
+    finally { authBusy = false; }
+  }
+  /// Plain-language version of an internal error; the raw text stays available as detail.
+  function humanize(e) {
+    const raw = String(e ?? "");
+    const l = raw.toLowerCase();
+    // messages the app already writes for people: shown as they are
+    const FRIENDLY = ["Drag it to Applications", "Move it to Applications", "was not detected on this device",
+      "Unmap it on every device first", "Account created", "could not map the new profile", "is not bundled with this build"];
+    const pick = () => {
+      if (!raw) return null;
+      if (FRIENDLY.some((f) => raw.includes(f))) return raw;
+      if (l.includes("not signed in")) return "Sign in to continue.";
+      if (l.includes("session expired") || l.includes("sessioninvalid") || l.includes("sign in again")) return "Your session expired. Sign in again.";
+      if (l.includes("invalid login") || l.includes("invalid credentials") || l.includes("invalidcredentials")) return "Wrong e-mail or password.";
+      if (l.includes("operation not permitted") || l.includes("eperm") || l.includes("full disk access") || l.includes("permission denied"))
+        return "macOS is blocking access to this browser's files. Grant Synchrome Full Disk Access (System Settings → Privacy & Security), then retry.";
+      if (l.includes("browser is open") || l.includes("browser running") || l.includes("browser is running") || l.includes("singletonlock") || l.includes("waiting_for_browser_close"))
+        return "The browser is open. Close it and retry; Synchrome writes these files only while the browser is closed.";
+      if (l.includes("token mismatch") || l.includes("mismatch")) return "This browser profile holds a link to a different Synchrome profile. Unmap it here, or reset the link in the browser's extension.";
+      if (l.includes("no token") || l.includes("token missing") || l.includes("not confirmed") || l.includes("unknown token")) return "The browser has not confirmed the link yet. Load the companion extension and open it once, or use “Retry local write” with the browser closed.";
+      if (l.includes("mapping deleted") || l.includes("mapping not found") || l.includes("no longer mapped")) return "This link was removed. Map the profile again if you want to keep syncing it.";
+      if (l.includes("profile not found") || l.includes("profile was deleted") || l.includes("profileinuse")) return "The Synchrome profile no longer exists or is still in use on another device.";
+      if (l.includes("another device") || l.includes("wrong device")) return "This link belongs to another of your devices.";
+      if (l.includes("version mismatch") || l.includes("version_mismatch")) return "The browser version changed. Open the browser once so Synchrome can re-read the preferences format.";
+      if (l.includes("unsupported")) return "This browser build is not supported for this feature.";
+      if (l.includes("user action required") || l.includes("user_action_required") || l.includes("gesture")) return "The browser needs you to confirm this change itself (open the extension's popup).";
+      if (l.includes("snapshot integrity") || l.includes("snapshot_invalid")) return "A downloaded snapshot failed its integrity check; nothing was changed. Synchrome retries with the previous one.";
+      if (l.includes("offline") || l.includes("network") || l.includes("unreachable") || l.includes("timed out") || l.includes("dns") || l.includes("connection")) return "Synchrome Cloud is not reachable right now. Your changes are kept and sent when it is back.";
+      if (l.includes("conflict")) return "This change conflicts with one made on another device. Review it below.";
+      if (l.includes("not configured") || l.includes("missing required configuration")) return "Synchrome Cloud is not configured in this build.";
+      return "Something went wrong.";
+    };
+    const text = pick();
+    return { text, detail: text && raw && !text.includes(raw) ? raw : null };
   }
   async function signOut() {
     authBusy = true; authError = null;
@@ -407,13 +477,13 @@
 
   const createAndMap = (b, p) => act(`map:${localKey(b, p)}`, () =>
     invoke("create_and_map_local_profile", {
-      name: p.display_name ?? p.dir_name, browserKind: b.kind, browserProfileDir: p.dir_name,
+      name: p.display_name ?? p.dir_name, browserKind: b.kind, browserProfileDir: p.dir_name, userDataDir: b.user_data_dir,
     }));
   const mapExisting = (b, p) => {
     const profileId = mapChoice[localKey(b, p)];
     if (!profileId) return;
     return act(`map:${localKey(b, p)}`, () =>
-      invoke("map_local_profile", { profileId, browserKind: b.kind, browserProfileDir: p.dir_name }));
+      invoke("map_local_profile", { profileId, browserKind: b.kind, browserProfileDir: p.dir_name, userDataDir: b.user_data_dir }));
   };
   const unmap = (m) => act(`unmap:${m.id}`, () => invoke("unmap_local_profile", { mappingId: m.id }));
   const retryWrite = (m) => act(`write:${m.id}`, () => invoke("write_mapping_token_local", { mappingId: m.id }));
@@ -422,10 +492,10 @@
   async function installConnector(b) {
     connectorMsg = { ...connectorMsg, [b.kind]: "Installing…" };
     try {
-      await invoke("install_native_host", { browserKind: b.kind });
+      await invoke("install_native_host", { browserKind: b.kind, userDataDir: b.user_data_dir });
       connectorMsg = { ...connectorMsg, [b.kind]: "Connector installed. Restart the browser." };
     } catch (e) {
-      connectorMsg = { ...connectorMsg, [b.kind]: `Connector install failed: ${e}` };
+      connectorMsg = { ...connectorMsg, [b.kind]: `Connector install failed: ${humanize(e).text} ${humanize(e).detail ? `(${humanize(e).detail})` : ""}` };
     }
   }
 
@@ -437,6 +507,25 @@
   const unmatched = $derived(mappings.filter((m) => m.is_this_device
     && !browsers.some((b) => b.kind === m.browser_kind && b.profiles.some((p) => p.dir_name === m.browser_profile_dir))));
   const cloudReady = $derived(!!cloud && cloud.configured && cloud.auth_ok);
+  const myMappings = $derived(mappings.filter((m) => m.is_this_device));
+  const confirmedMappings = $derived(myMappings.filter((m) => m.display_status === "extension_confirmed"));
+  const firstSyncDone = $derived(confirmedMappings.some((m) => m.bookmarks && (m.bookmarks.last_upload_at || m.bookmarks.state === "up_to_date")));
+  /// Getting-started checklist, computed from the real state (no hidden developer steps).
+  const steps = $derived.by(() => {
+    const out = [];
+    out.push({ done: !!location?.stable, label: "Synchrome is installed in Applications", hint: location?.stable ? null : (location?.reason ?? "Checking…"), action: null });
+    out.push({ done: !!cloud?.configured && !!cloud?.reachable, label: "Synchrome Cloud is reachable", hint: !cloud ? "Checking…" : !cloud.configured ? "This build has no cloud configuration." : !cloud.reachable ? "Check your internet connection." : null });
+    out.push({ done: signedIn, label: "Signed in", hint: signedIn ? null : "Sign in or create an account below." });
+    out.push({ done: browsers.length > 0, label: "A Chromium-family browser was found", hint: browsers.length ? null : "Install Helium, Chrome, Brave, Edge or Chromium and open it once." });
+    if (needsFda) out.push({ done: false, optional: true, label: "Optional: Full Disk Access for Chrome, Brave or Edge", hint: "Only if you want to sync those browsers. macOS protects their files: add Synchrome in System Settings → Privacy & Security → Full Disk Access, then press Re-check. Helium needs nothing.", action: "fda" });
+    out.push({ done: myMappings.length > 0, label: "A browser profile is linked to a Synchrome profile", hint: myMappings.length ? null : "Below, press “Create Synchrome profile” next to a browser profile (or map it to an existing one)." });
+    out.push({ done: Object.values(connectorMsg).some((v) => v && v.startsWith("Connector installed")) || confirmedMappings.length > 0, label: "The connector is installed for that browser", hint: "Press “Install connector” on the browser entry below (once per browser), then restart the browser." });
+    out.push({ done: confirmedMappings.length > 0, label: "The companion extension is loaded and confirmed the link", hint: confirmedMappings.length ? null : `In the browser open chrome://extensions, enable Developer mode, press “Load unpacked” and choose the extension folder (button below). Then open the extension's popup once. The status next to the profile turns “Extension confirmed”.`, action: "ext" });
+    out.push({ done: firstSyncDone, label: "First sync completed — Connected", hint: firstSyncDone ? null : "The extension sends the bookmarks and the app uploads them. Close the browser once to sync extension settings and preferences." });
+    return out;
+  });
+  const required = $derived(steps.filter((x) => !x.optional));
+  const stepsDone = $derived(required.every((x) => x.done));
 
   function cloudSummary(c) {
     if (!c) return { label: "Checking…", cls: "muted" };
@@ -465,7 +554,7 @@
   <button class="tiny-btn" onclick={() => checkExtension(m)} disabled={busyKey === `check:${m.id}`}
     title="Re-reads the link status. The extension reconnects when the browser starts, or from its popup.">Check extension</button>
   <button class="tiny-btn" onclick={() => unmap(m)} disabled={busyKey === `unmap:${m.id}`}>Unmap</button>
-  {#if m.local_error}<span class="small bad">{m.local_error}</span>{/if}
+  {#if m.local_error}{@const h = humanize(m.local_error)}<span class="small bad">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span>{/if}
   {#if m.display_status === "extension_confirmed"}
     {@const bm = m.bookmarks ?? { state: "not_synced", bookmarks: 0, folders: 0, pending: 0 }}
     <div class="bookmarks-row">
@@ -478,7 +567,7 @@
         <button class="tiny-btn" onclick={() => uploadNow(m)} disabled={busyKey === `upload:${m.id}`}
           title="Downloads remote changes and uploads the queued local ones now.">Sync now</button>
       {/if}
-      {#if bm.error}<span class="small bad">{bm.error}</span>{/if}
+      {#if bm.error}{@const h = humanize(bm.error)}<span class="small bad">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span>{/if}
     </div>
     {#if bm.download}
       <div class="bookmarks-row">
@@ -495,7 +584,7 @@
         <button class="tiny-btn" onclick={() => toggleConflicts(m)}>
           {conflictsOpen[m.id] ? "Hide conflicts" : bm.download.conflicts > 0 ? `Review conflicts (${bm.download.conflicts})` : "Conflict history"}
         </button>
-        {#if bm.download.error}<span class="small bad">{bm.download.error}</span>{/if}
+        {#if bm.download.error}{@const h = humanize(bm.download.error)}<span class="small bad">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span>{/if}
       </div>
     {/if}
     {#if conflictsOpen[m.id]}
@@ -646,6 +735,17 @@
       <span class="pdir">snapshot {dg.cloud?.current_generation ? `generation ${dg.cloud.current_generation}` : "none yet"} · {dg.snapshot_generations_kept} kept · last compacted {ago(serverSecs(dg.cloud?.current_ready_at, dg.cloud?.server_now) ?? dg.local.last_compaction_at)}{dg.local.last_gc_at ? ` · journals cleaned ${ago(dg.local.last_gc_at)}` : ""}</span>
       {#if dg.gc_blocked}<span class="small warn">Journal cleanup paused: {dg.cloud.gc_blockers} device{dg.cloud.gc_blockers === 1 ? "" : "s"} mapped to this profile cannot read snapshots yet (update Synchrome there, or remove the device).</span>{/if}
       {#if dg.local.snapshot_generation}<span class="small">This device started from snapshot generation {dg.local.snapshot_generation}{dg.local.bootstrap_fallback ? " (previous generation, the current one failed verification)" : ""}.</span>{/if}
+      {#if dg.this_device_retired}<span class="small warn">You removed this device from this profile's compaction: it still syncs, but it no longer holds journals for others. <button class="tiny-btn" onclick={() => deviceAction(m, dg.devices.find((d) => d.is_current), "reactivate")} disabled={!!busyKey}>Reactivate</button></span>{/if}
+      {#if dg.devices?.some((d) => (d.blocks_gc && !d.is_current) || (d.retired && !d.is_current))}
+        <span class="small">Devices on this profile:</span>
+        {#each dg.devices.filter((d) => !d.is_current && (d.blocks_gc || d.retired)) as d (d.device_id)}
+          {@const key = `${m.profile_id}:${d.device_id}:retire`}
+          <span class="pdir">{d.name} — {d.retired ? "removed from compaction" : "cannot read snapshots yet"}
+            {#if d.retired}<button class="tiny-btn" onclick={() => deviceAction(m, d, "reactivate")} disabled={!!busyKey}>Reactivate</button>
+            {:else}<button class="tiny-btn {deviceConfirm === key ? 'danger' : ''}" onclick={() => deviceAction(m, d, "retire")} disabled={!!busyKey}>{deviceConfirm === key ? "Confirm: remove from this profile's compaction" : "Remove from compaction"}</button>{/if}
+          </span>
+        {/each}
+      {/if}
     </div>
   {/if}
   {#if m.display_status === "extension_confirmed"}
@@ -666,7 +766,7 @@
           <button class="tiny-btn" onclick={() => prefsNow(m)} disabled={busyKey === `prefs:${m.id}`}>Retry</button>
         {/if}
         {#if pv.conflicts > 0}<button class="tiny-btn" onclick={() => { if (!conflictsOpen[m.id]) toggleConflicts(m); }}>Review conflicts</button>{/if}
-        {#if pv.error}<span class="small bad">{pv.error}</span>{/if}
+        {#if pv.error}{@const h = humanize(pv.error)}<span class="small bad">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span>{/if}
       {/if}
       {#if chosen !== "off"}
         <span class="small warn">Browser preferences may affect how your browser behaves on this device.</span>
@@ -685,8 +785,34 @@
     </button>
   </header>
 
-  {#if error}<div class="error">Error: {error}</div>{/if}
-  {#if actionError}<div class="error">{actionError} <button class="tiny-btn" onclick={() => (actionError = null)}>Dismiss</button></div>{/if}
+  {#if error}{@const h = humanize(error)}<div class="error"><span>{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span></div>{/if}
+  {#if actionError}{@const h = humanize(actionError)}<div class="error"><span>{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</span> <button class="tiny-btn" onclick={() => (actionError = null)}>Dismiss</button></div>{/if}
+  {#if location && !location.stable}<div class="notice warn">{location.reason}</div>{/if}
+
+  <!-- ===== Getting started ===== -->
+  <section class="card">
+    <div class="card-head">
+      <h2>Getting started</h2>
+      <span class="badge {stepsDone ? 'ok' : 'info'}">{stepsDone ? "Connected" : `${required.filter((x) => x.done).length} / ${required.length}`}</span>
+      <button class="tiny-btn right" onclick={() => (showSteps = !showSteps)}>{showSteps ? "Hide" : "Show"}</button>
+    </div>
+    {#if showSteps}
+      <ol class="steps">
+        {#each steps as st}
+          <li class={st.done ? "done" : st.optional ? "optional" : ""}>
+            <span class="tick">{st.done ? "✓" : st.optional ? "·" : "○"}</span>
+            <span class="grow">{st.label}{#if st.hint}<span class="hint small"> — {st.hint}</span>{/if}
+              {#if st.action === "fda"}
+                <span class="row-actions"><button class="tiny-btn" onclick={openFdaSettings}>Open System Settings</button><button class="tiny-btn" onclick={loadBrowsers} disabled={loadingBrowsers}>Re-check</button></span>
+              {:else if st.action === "ext" && !st.done}
+                <span class="row-actions"><button class="tiny-btn" onclick={revealExtension} disabled={!extFolder}>Show extension folder</button>{#if extFolder}<code>{extFolder}</code>{:else if extFolderError}<span class="small bad">{extFolderError}</span>{/if}</span>
+              {/if}
+            </span>
+          </li>
+        {/each}
+      </ol>
+    {/if}
+  </section>
 
   <!-- ===== Account ===== -->
   <section class="card">
@@ -710,7 +836,7 @@
           <button class="tiny-btn" onclick={loadCloudData} disabled={cloudDataBusy}>{cloudDataBusy ? "…" : "Reload"}</button>
         </div>
         {#if cloudDataError}
-          <p class="warn small">{cloudDataError}</p>
+          {@const h = humanize(cloudDataError)}<p class="warn small">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</p>
         {:else if devices.length === 0}
           <p class="muted small">{cloudDataBusy ? "Registering this device…" : "No devices registered yet."}</p>
         {:else}
@@ -758,23 +884,27 @@
         {/if}
       </div>
     {:else}
-      <form class="login" onsubmit={signIn}>
+      <form class="login" onsubmit={(e) => { e.preventDefault(); return creatingAccount ? signUp() : signIn(e); }}>
         <label>Email
           <input type="email" bind:value={email} autocomplete="username" required disabled={authBusy || !cloudReady} />
         </label>
         <label>Password
-          <input type="password" bind:value={password} autocomplete="current-password" required disabled={authBusy || !cloudReady} />
+          <input type="password" bind:value={password} autocomplete={creatingAccount ? "new-password" : "current-password"} required minlength={creatingAccount ? 8 : undefined} disabled={authBusy || !cloudReady} />
         </label>
-        <button type="submit" disabled={authBusy || !cloudReady || !email || !password}>{authBusy ? "Signing in…" : "Sign in"}</button>
+        <div class="row-actions">
+          <button type="submit" disabled={authBusy || !cloudReady || !email || !password}>{authBusy ? (creatingAccount ? "Creating…" : "Signing in…") : (creatingAccount ? "Create account" : "Sign in")}</button>
+          <button type="button" class="tiny-btn" onclick={() => (creatingAccount = !creatingAccount)} disabled={authBusy}>{creatingAccount ? "I already have an account" : "Create an account"}</button>
+        </div>
       </form>
       {#if !cloudReady}<p class="hint">Sign-in is enabled once Synchrome Cloud is configured and its Auth service is reachable.</p>{/if}
       {#if account?.error}<p class="warn small">{account.error}</p>{/if}
     {/if}
-    {#if authError}<p class="bad small">{authError}</p>{/if}
+    {#if authError}{@const h = humanize(authError)}<p class="bad small">{h.text}{#if h.detail}<details class="tech"><summary>Technical details</summary><code>{h.detail}</code></details>{/if}</p>{/if}
     {#if device}
       <p class="hint tiny">This device: <strong>{device.device_name}</strong> · {device.platform}{device.os_version ? ` · ${device.os_version}` : ""} · id {device.device_id.slice(0, 8)}…</p>
     {/if}
     <p class="hint tiny">Your session is stored only in the macOS Keychain. Tokens never reach this window.</p>
+    <p class="hint tiny">Updates: Synchrome {version.replace(/^Synchrome\//, "")} is updated manually — download the new version and replace the app in Applications. Your account, links and data stay.</p>
   </section>
 
   <!-- ===== Cloud ===== -->
@@ -815,7 +945,8 @@
     </div>
     <p class="lead">Mapping only links profiles in your account. Nothing is written into the browser yet.</p>
     {#if needsFda}
-      <div class="notice warn">Some browsers (Chrome, Brave, Edge) are protected by macOS. Synchrome will need <strong>Full Disk Access</strong> to read their profiles. Not requested yet.</div>
+      <div class="notice warn">Chrome, Brave and Edge keep their profiles in folders macOS protects. To sync them, add Synchrome under <strong>System Settings → Privacy &amp; Security → Full Disk Access</strong> (macOS never asks for this on its own), then press Re-check. Helium needs nothing.
+        <span class="row-actions"><button class="tiny-btn" onclick={openFdaSettings}>Open System Settings</button><button class="tiny-btn" onclick={loadBrowsers} disabled={loadingBrowsers}>Re-check</button></span></div>
     {/if}
     {#if loadingBrowsers}
       <div class="muted">Scanning…</div>
@@ -972,4 +1103,14 @@
   .info { color: #5aa6e0; }
   .settings-row td { padding-left: 18px; font-size: 12px; }
   .settings-row select { font-size: 12px; padding: 2px 6px; margin: 0 6px; }
+  .steps { margin: 4px 0 0; padding: 0 0 0 4px; list-style: none; display: grid; gap: 6px; font-size: 13px; }
+  .steps li { display: flex; gap: 10px; align-items: baseline; }
+  .steps li.done { color: #9aa7b4; }
+  .tick { width: 18px; color: #5fd08a; }
+  .steps li:not(.done) .tick { color: #e0a94a; }
+  .steps li.optional .tick { color: #8a97a4; }
+  .row-actions { display: inline-flex; gap: 6px; align-items: center; margin-left: 8px; flex-wrap: wrap; }
+  .tech { display: inline-block; margin-left: 6px; font-size: 11px; color: #8a97a4; }
+  .tech summary { cursor: pointer; }
+  .tech code { word-break: break-all; }
 </style>

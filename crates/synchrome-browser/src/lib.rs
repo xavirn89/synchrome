@@ -13,7 +13,7 @@ mod paths;
 pub mod prefs_file;
 
 pub use access::{detect_access, is_browser_running};
-pub use discovery::discover_browsers;
+pub use discovery::{discover_browsers, discover_browsers_with, discover_extra_only, ExtraDataDir};
 pub use ext_storage::{
     apply_extension_area, area_store_path, extension_store_path, is_store_locked,
     read_extension_area, read_extension_settings, read_store_copy, write_extension_setting, Area,

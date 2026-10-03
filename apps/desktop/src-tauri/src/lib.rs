@@ -102,9 +102,150 @@ impl AppState {
 
 // ---------- read-only local discovery ----------
 
+/// Extra browser data folders the user declared in `<app data>/browsers.json`
+/// (`[{"kind": "chrome", "user_data_dir": "/path", "label": "Work"}]`), for browsers run
+/// with a custom `--user-data-dir`. Absent or invalid file = none.
+fn extra_browser_dirs() -> Vec<synchrome_browser::ExtraDataDir> {
+    local_token::app_data_dir()
+        .ok()
+        .and_then(|d| std::fs::read(d.join("browsers.json")).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn discovered() -> Vec<DiscoveredBrowser> {
+    // debug harness only: list just the declared extra folders, so a Full Disk Access test
+    // never reads the user's real browser profiles (not even their `Local State`)
+    #[cfg(debug_assertions)]
+    if std::env::var("SYNCHROME_DEV_EXTRA_DIRS_ONLY").is_ok_and(|v| v == "1") {
+        return synchrome_browser::discover_extra_only(&extra_browser_dirs());
+    }
+    synchrome_browser::discover_browsers_with(&extra_browser_dirs())
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn discovered_pub() -> Vec<DiscoveredBrowser> {
+    discovered()
+}
+
 #[tauri::command]
 fn list_browsers() -> Vec<DiscoveredBrowser> {
-    synchrome_browser::discover_browsers()
+    discovered()
+}
+
+/// Where this app runs from, and whether that is a stable install location. A copy running
+/// from a disk image or from Gatekeeper's app translocation would leave the native messaging
+/// host pointing at a path that disappears.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppLocation {
+    pub path: String,
+    pub stable: bool,
+    pub reason: Option<String>,
+}
+
+fn app_location() -> AppLocation {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let reason = if exe.starts_with("/Volumes/") {
+        Some("Synchrome is running from a disk image. Drag it to Applications and open it from there.")
+    } else if exe.contains("/AppTranslocation/") {
+        Some("macOS opened a temporary copy of Synchrome. Move it to Applications and open it from there.")
+    } else if exe.contains("/Downloads/")
+        || exe.contains("/Desktop/")
+        || exe.contains("/Documents/")
+    {
+        Some(
+            "Synchrome is running from a user folder that macOS protects. Move it to Applications.",
+        )
+    } else {
+        None
+    };
+    AppLocation {
+        path: exe,
+        stable: reason.is_none(),
+        reason: reason.map(str::to_string),
+    }
+}
+
+#[tauri::command]
+fn install_location() -> AppLocation {
+    app_location()
+}
+
+/// Create an account (email + password) on the project's Synchrome Cloud.
+#[tauri::command]
+async fn sign_up(
+    state: State<'_, AppState>,
+    email: String,
+    password: String,
+) -> Result<AccountStatus, String> {
+    let st = state
+        .auth()?
+        .sign_up(email.trim(), &password)
+        .await
+        .map_err(|e| e.to_string())?;
+    realtime::set_account(
+        state
+            .auth()?
+            .stored_session()
+            .ok()
+            .flatten()
+            .map(|s| s.user_id),
+    );
+    Ok(st)
+}
+
+/// The companion extension shipped with the app (bundle `Resources/extension`; the source
+/// folder in development). The user loads it in the browser: Extensions → Developer mode →
+/// Load unpacked. Its id is fixed by the manifest `key`.
+#[tauri::command]
+fn extension_folder(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(res) = app.path().resource_dir() {
+        candidates.push(res.join("extension"));
+    }
+    #[cfg(debug_assertions)]
+    candidates.push(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../extension")
+            .to_path_buf(),
+    );
+    candidates
+        .into_iter()
+        .find(|p| p.join("manifest.json").is_file())
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.display().to_string())
+        .ok_or_else(|| "the companion extension is not bundled with this build".to_string())
+}
+
+#[tauri::command]
+fn reveal_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let p = extension_folder(app)?;
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(std::path::Path::new(&p).join("manifest.json"))
+            .status()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Open System Settings → Privacy & Security → Full Disk Access (macOS shows no prompt for
+/// it; the user adds Synchrome there).
+#[tauri::command]
+fn open_full_disk_access_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .status()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -237,10 +378,16 @@ async fn ensure_device(state: &AppState, session: &Session) -> Result<Uuid, Stri
 
 /// Only profiles Synchrome actually detected on this machine may be mapped; the UI cannot
 /// make up a browser/profile-directory pair.
-fn ensure_detected_local_profile(kind: BrowserKind, dir: &str) -> Result<(), String> {
-    let found = synchrome_browser::discover_browsers()
-        .iter()
-        .any(|b| b.kind == kind && b.profiles.iter().any(|p| p.dir_name == dir));
+fn ensure_detected_local_profile(
+    kind: BrowserKind,
+    dir: &str,
+    udd: Option<&str>,
+) -> Result<(), String> {
+    let found = discovered().iter().any(|b| {
+        b.kind == kind
+            && udd.map_or(true, |u| b.user_data_dir == u)
+            && b.profiles.iter().any(|p| p.dir_name == dir)
+    });
     if found {
         Ok(())
     } else {
@@ -249,6 +396,30 @@ fn ensure_detected_local_profile(kind: BrowserKind, dir: &str) -> Result<(), Str
             kind.display_name()
         ))
     }
+}
+
+/// The user-data directory of a mapping's local profile: the one the UI named, else the
+/// one the local registry recorded, else the discovered folder holding that profile
+/// (standard location first), else the standard location.
+fn udd_for(m: &Mapping, named: Option<&str>) -> Option<std::path::PathBuf> {
+    if let Some(u) = named.filter(|u| !u.is_empty()) {
+        return Some(std::path::PathBuf::from(u));
+    }
+    if let Some(r) = local_token::registry().find_by_mapping(m.id) {
+        if !r.user_data_dir.is_empty() {
+            return Some(std::path::PathBuf::from(r.user_data_dir));
+        }
+    }
+    discovered()
+        .into_iter()
+        .find(|b| {
+            b.kind == m.browser_kind
+                && b.profiles
+                    .iter()
+                    .any(|p| p.dir_name == m.browser_profile_dir)
+        })
+        .map(|b| std::path::PathBuf::from(b.user_data_dir))
+        .or_else(|| synchrome_browser::user_data_dir(m.browser_kind))
 }
 
 /// Turn internal mappings into safe summaries, resolving profile and device names.
@@ -359,8 +530,7 @@ pub(crate) async fn write_token_for_mapping(
     }
     let udd = match udd_override {
         Some(p) => p,
-        None => synchrome_browser::user_data_dir(m.browser_kind)
-            .ok_or_else(|| "unsupported platform".to_string())?,
+        None => udd_for(&m, None).ok_or_else(|| "unsupported platform".to_string())?,
     };
     let written = local_token::write_token_local(&m, &session.user_id, &udd);
     let view = mapping_views(state, &session, vec![m]).await?.remove(0);
@@ -374,8 +544,9 @@ async fn view_after_mapping(
     state: &AppState,
     session: &Session,
     m: Mapping,
+    udd: Option<&str>,
 ) -> Result<MappingView, String> {
-    if let Some(udd) = synchrome_browser::user_data_dir(m.browser_kind) {
+    if let Some(udd) = udd_for(&m, udd) {
         let _ = local_token::write_token_local(&m, &session.user_id, &udd);
     }
     Ok(mapping_views(state, session, vec![m]).await?.remove(0))
@@ -401,8 +572,9 @@ async fn map_local_profile(
     profile_id: Uuid,
     browser_kind: BrowserKind,
     browser_profile_dir: String,
+    user_data_dir: Option<String>,
 ) -> Result<MappingView, String> {
-    ensure_detected_local_profile(browser_kind, &browser_profile_dir)?;
+    ensure_detected_local_profile(browser_kind, &browser_profile_dir, user_data_dir.as_deref())?;
     let session = state.session().await?;
     let device_id = ensure_device(&state, &session).await?;
     let m = state
@@ -416,7 +588,7 @@ async fn map_local_profile(
         )
         .await
         .map_err(|e| e.to_string())?;
-    view_after_mapping(&state, &session, m).await
+    view_after_mapping(&state, &session, m, user_data_dir.as_deref()).await
 }
 
 /// "Create Synchrome profile" from a local profile: create the cloud profile, map it, then try
@@ -427,8 +599,9 @@ async fn create_and_map_local_profile(
     name: String,
     browser_kind: BrowserKind,
     browser_profile_dir: String,
+    user_data_dir: Option<String>,
 ) -> Result<MappingView, String> {
-    ensure_detected_local_profile(browser_kind, &browser_profile_dir)?;
+    ensure_detected_local_profile(browser_kind, &browser_profile_dir, user_data_dir.as_deref())?;
     let session = state.session().await?;
     let device_id = ensure_device(&state, &session).await?;
     let cloud = state.cloud()?;
@@ -446,7 +619,7 @@ async fn create_and_map_local_profile(
         )
         .await
     {
-        Ok(m) => view_after_mapping(&state, &session, m).await,
+        Ok(m) => view_after_mapping(&state, &session, m, user_data_dir.as_deref()).await,
         Err(map_err) => {
             let rollback = cloud.delete_profile(&session, profile.id).await;
             Err(match rollback {
@@ -618,6 +791,26 @@ async fn sync_diagnostics(
     compaction::diagnostics(&state, mapping_id).await
 }
 
+/// Explicit user action: remove a device from a profile's compaction (reversible).
+#[tauri::command]
+async fn retire_device(
+    state: State<'_, AppState>,
+    profile_id: Uuid,
+    device_id: Uuid,
+) -> Result<(), String> {
+    compaction::retire_device(&state, profile_id, device_id).await
+}
+
+/// Explicit user action: a retired device takes part in the compaction again.
+#[tauri::command]
+async fn reactivate_device(
+    state: State<'_, AppState>,
+    profile_id: Uuid,
+    device_id: Uuid,
+) -> Result<(), String> {
+    compaction::reactivate_device(&state, profile_id, device_id).await
+}
+
 /// Retry writing the mapping token into the local extension store (browser must be closed).
 #[tauri::command]
 async fn write_mapping_token_local(
@@ -632,9 +825,20 @@ async fn write_mapping_token_local(
 /// Register the native messaging host for a browser (writes its NativeMessagingHosts manifest,
 /// which is not a browser profile and is not TCC-protected). Returns the manifest path.
 #[tauri::command]
-fn install_native_host(browser_kind: BrowserKind) -> Result<String, String> {
-    let udd = synchrome_browser::user_data_dir(browser_kind)
-        .ok_or_else(|| "unsupported platform".to_string())?;
+fn install_native_host(
+    browser_kind: BrowserKind,
+    user_data_dir: Option<String>,
+) -> Result<String, String> {
+    let udd = match user_data_dir.filter(|u| !u.is_empty()) {
+        Some(u) => std::path::PathBuf::from(u),
+        None => synchrome_browser::user_data_dir(browser_kind)
+            .ok_or_else(|| "unsupported platform".to_string())?,
+    };
+    // the manifest must point at a path that will still exist when the browser starts
+    let loc = app_location();
+    if !loc.stable {
+        return Err(loc.reason.unwrap_or_default());
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     synchrome_browser::install_native_host(&udd, &exe)
         .map(|p| p.display().to_string())
@@ -779,6 +983,7 @@ pub fn run() {
             cloud_status,
             account_status,
             sign_in,
+            sign_up,
             refresh_session,
             sign_out,
             device_identity,
@@ -794,6 +999,10 @@ pub fn run() {
             unmap_local_profile,
             write_mapping_token_local,
             install_native_host,
+            install_location,
+            extension_folder,
+            reveal_extension_folder,
+            open_full_disk_access_settings,
             mapping_for_local_profile,
             mapping_for_cloud_profile,
             publish_bookmarks,
@@ -808,6 +1017,8 @@ pub fn run() {
             set_browser_preferences_mode,
             browser_preferences_sync_now,
             sync_diagnostics,
+            retire_device,
+            reactivate_device,
             dev_ui_report
         ])
         .run(tauri::generate_context!())

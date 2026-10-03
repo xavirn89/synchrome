@@ -66,7 +66,7 @@ impl AppConfig {
                 }
             }
         }
-        Self::from_lookup(|k| std::env::var(k).ok())
+        Self::from_lookup(|k| std::env::var(k).ok().or_else(|| built_in(k)))
     }
 
     /// Build from an arbitrary lookup function (testable without touching the real env).
@@ -86,6 +86,18 @@ impl AppConfig {
             },
         })
     }
+}
+
+/// Publishable values baked in at build time (`SUPABASE_URL` / `SUPABASE_ANON_KEY` in the
+/// build environment, see `scripts/release-macos.sh`), so an installed app needs no `.env`.
+/// Both are public client values; administrative secrets have no compile-time counterpart.
+fn built_in(k: &str) -> Option<String> {
+    let v = match k {
+        ENV_SUPABASE_URL => option_env!("SUPABASE_URL"),
+        ENV_SUPABASE_ANON_KEY => option_env!("SUPABASE_ANON_KEY"),
+        _ => None,
+    };
+    v.filter(|v| !v.trim().is_empty()).map(str::to_string)
 }
 
 fn required(

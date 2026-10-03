@@ -124,6 +124,7 @@ impl<'a> CloudSink<'a> {
     }
 
     /// How many forced refreshes this sink performed.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))] // dev CLI only
     pub fn refreshes(&self) -> usize {
         self.refreshes.load(std::sync::atomic::Ordering::Relaxed)
     }

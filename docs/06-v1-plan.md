@@ -1,5 +1,92 @@
 # 06 — The First Complete Version: Scope, Experiments, Milestones, Risks
 
+## 0. SYNCHROME V1 — DONE (2026-10-03, version 1.0.0)
+
+Synchrome 1.0 is the macOS release of the sync engine built in M1 (slices 1–13) plus the release
+closure. Section 1 below is the original *full* target; this section is what 1.0 actually ships,
+what it consciously leaves out, and what remains for later. The release gates live in
+`docs/07-release-checklist.md`.
+
+**Platform.** macOS 12+ (validated on macOS 27 / Apple silicon). One signed app
+(`/Applications/Synchrome.app`, Developer ID, Team YV44FR3LG3, bundle id `com.synchrome.app`,
+hardened runtime) distributed as a DMG. Windows and Linux: not in 1.0.
+
+**Browsers validated with real E2E on disposable profiles.**
+
+| Browser | Detection + access state | Mapping + native host | Bookmarks (live) | Extensions inventory | Enable/disable (worker) | Uninstall | Extension settings (closed) | Preferences (closed, 4 allow-listed) |
+|---|---|---|---|---|---|---|---|---|
+| Helium 0.18 (Chromium 154) | yes (no permission needed) | yes | yes (snapshot, local change, remote apply, echo suppression, conflicts) | yes | applied without a gesture | gesture required → "User action required" | yes | yes (Helium's `visibility_state` adapter) |
+| Google Chrome 154 stable | yes (Full Disk Access for the standard folder) | yes | yes | yes | **applied without a gesture** (real Chrome, `e2e_chrome.py` E.1–E.2) | **refused without a gesture** → "User action required" (F.1–F.3) | yes (LevelDB, browser closed) | yes (`show_on_all_tabs` native; no `visibility_state`) |
+
+Brave, Edge and Chromium are discovered and share the Chromium code paths, but are **not
+validated** end to end in 1.0 (use at your own risk; Brave/Edge need Full Disk Access like Chrome).
+
+**Datasets.** Bookmarks (full tree, order; `dateAdded` not preserved); installed extensions +
+enabled state (themes/apps/policy items excluded; installing a missing extension opens its
+store page, never silent; uninstall always asks the user); extension settings (`storage.local`,
+`storage.sync`, per-extension opt-in, deny-listed keys, 5 MB cap, applied with the browser
+closed); browser preferences (4 allow-listed untracked paths, applied with the browser closed).
+Sync: per-device journals, HLC, per-field LWW, conflict records + resolution UI, snapshots +
+compaction (current + previous generation, journal GC one generation behind), Realtime wake-up
+with 30 s polling fallback.
+
+**Requirements.**
+- *Supabase (Synchrome Cloud)*: the project's private instance with migrations 0001–0005
+  applied (RLS on every table, Storage prefix policies, `store_events` in the Realtime
+  publication, compaction contract of 0005). The app ships only the public URL and anon key
+  (baked in at build time); e-mail sign-up with auto-confirmation is enabled on the server.
+- *Full Disk Access*: only for Google Chrome, Brave and Edge profiles in their standard folders
+  (macOS TCC). Granted by the user to `/Applications/Synchrome.app`; macOS never prompts, the app
+  detects `EPERM`, shows "Requires Full Disk Access" and opens System Settings. **Validated**
+  (`e2e_fda.py`): without the grant every read is refused; with it, Preferences, History (strictly
+  read-only, `immutable` SQLite URI) and a fixture's extension settings of a disposable Chrome
+  profile inside Chrome's protected folder are readable; the grant follows the code-signing
+  identity (Team ID + bundle id): a different build (other CDHash) and a re-signed bundle keep it.
+  Helium needs nothing. The native-messaging manifest folder (`NativeMessagingHosts`) is never
+  protected.
+- *Companion extension*: shipped inside the app (`Contents/Resources/extension`, fixed id via
+  its manifest `key`); the user loads it once per browser profile (`chrome://extensions` →
+  Developer mode → Load unpacked). The app registers the native host per browser data folder and
+  refuses to do so from a disk image, a translocated copy or Documents/Desktop/Downloads.
+
+**Conscious exclusions in 1.0.** Passwords, cookies, sessions (never); browsing History sync;
+tracked preferences (E2, MAC forging); IndexedDB / Local Storage of extensions; Windows and
+Linux; GitHub / folder / Drive / WebDAV / S3 stores; end-to-end encryption; Web Store
+publication of the companion and silent install through external-extension descriptors or
+policies; profile creation inside browsers; magic-link sign-in; automatic updates (1.0 updates
+are manual: replace the app in Applications — no updater plugin is configured, consciously).
+
+**Known limitations.**
+- The 1.0 DMG is signed with Developer ID but **not notarized** (EXTERNAL RELEASE CREDENTIAL
+  BLOCKER: no notary credentials on the build Mac). Until notarized, Gatekeeper on other Macs
+  refuses it ("Unnotarized Developer ID"); `scripts/release-macos.sh` notarizes and staples
+  automatically once `APPLE_API_KEY`/`APPLE_API_ISSUER`/`APPLE_API_KEY_PATH` (or
+  `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID`) are in the environment.
+- The companion runs as a developer-mode ("unpacked") extension; Chrome shows its usual notice
+  for those.
+- Live applies (bookmarks, extension state) need the companion; extension settings and
+  preferences apply only while the browser is closed.
+- The Realtime wake-up speeds up downloads; the browser applies them on the companion's next
+  cycle (≤ 1 min) or at the next start.
+- A device that never reports snapshot support (a stuck or pre-1.0 client) pauses journal GC
+  until the user removes it from the profile's compaction (Sync health shows it, with the
+  action); retirement is explicit and sticky (a retired device that keeps syncing stays retired
+  until the user reactivates it).
+- Tombstones are kept forever (no tombstone GC); snapshots are capped at 250 000 entities /
+  128 MiB per collection.
+
+**Post-v1.** Tracked preferences (E2); IndexedDB and Local Storage of extensions; History sync;
+Windows (and Linux) validation and builds; tombstone GC (retention + bootstrap preview);
+optimisations for large snapshots (incremental/streamed parts, partial bootstrap); Web Store
+listing + silent companion install; Brave/Edge/Chromium end-to-end validation; notarization in
+CI; updater (Tauri updater with signed update manifests); additional stores and E2E encryption.
+
+**Release closure evidence (2026-10-03).** `cargo fmt --check`, `cargo clippy -D warnings`,
+280 tests, `pnpm build`; release build + bundle audit (`scripts/release-macos.sh`); Chrome stable
+matrix `e2e_chrome.py` 23/23 + local 7/7; FDA `e2e_fda.py` negative + positive 9/9; compaction
+regression `e2e_compaction.py`; clean install of the DMG with the real UI (sign-in, mapping,
+connector, companion, first sync, restart, logout/login) driven through macOS accessibility.
+
 ## 1. Definition of v1 ("Synchrome 1.0")
 
 v1 is complete when a user installs **one desktop application**, signs in to a Synchrome account, picks which local browser profiles to sync (or creates new ones), and from then on **bookmarks, installed extensions, extension settings, browsing history and Chromium preferences** of those profiles stay synchronised across all their computers — on **macOS, Windows and Linux**, for **Helium, Chromium, Google Chrome, Brave and Microsoft Edge** (Flatpak/Snap browsers excluded) — with the behaviour below. Passwords, cookies and sessions are never synced.
@@ -32,7 +119,7 @@ Scripted against headless throwaway profiles (`tests/experiments/`). Pass/fail c
 
 | # | Question | Method | If it fails |
 |---|---|---|---|
-| E1 | **macOS TCC** — MOSTLY DONE (`RESULTS.md`): without FDA, Helium fully accessible; Chrome/Brave/Edge profile data EPERM (need FDA); `NativeMessagingHosts` accessible without FDA; canonical `External Extensions` needs FDA; binary and .app identical (grant attaches to code-signing identity, survives notarized updates). DEFERRED: live positive test with a manual FDA grant before closing development | Rust harness (e1-harness) | — |
+| E1 | **macOS TCC** — DONE (positive case validated 2026-10-03, `e2e_fda.py`; see §0) (`RESULTS.md`): without FDA, Helium fully accessible; Chrome/Brave/Edge profile data EPERM (need FDA); `NativeMessagingHosts` accessible without FDA; canonical `External Extensions` needs FDA; binary and .app identical (grant attaches to code-signing identity, survives notarized updates). DEFERRED: live positive test with a manual FDA grant before closing development | Rust harness (e1-harness) | — |
 | E2 | **Tracked-pref MAC forging** on non-branded builds (empty seed, `IOPlatformUUID`/machine id, drop `*_encrypted_hash`): does `homepage` survive relaunch in Helium, Chromium, Brave on macOS and Windows? | extend `tracked_prefs.py` | tracked prefs "apply manually" on Win/Mac |
 | E3 | **External extension descriptor** installs a Web Store extension on Chrome, Chromium, Brave, Edge (macOS), Windows via HKCU, Linux Chromium-branded; what does Helium do through its proxy? What exactly does the user see? | throwaway profiles | store-link fallback on failing combinations; consider `force_installed` policy as advanced option |
 | E4 | **LevelDB codec round-trip** — DONE: read/copy/restore of storage.local + storage.sync + IndexedDB verified on Helium (write-once probe reads restored values); Chrome 154 ignores --load-extension (format identical); storage.session in-memory, Local Storage shared/out-of-scope | probe extension | — |

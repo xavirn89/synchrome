@@ -200,6 +200,34 @@ impl<T: AuthTransport> AuthClient<T> {
         }
     }
 
+    /// `POST /auth/v1/signup` (email + password). With e-mail auto-confirmation the response
+    /// carries a session; otherwise the account exists but must be confirmed by e-mail first.
+    pub async fn sign_up_password(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<Option<Session>, AuthError> {
+        let body = serde_json::json!({ "email": email, "password": password });
+        let headers = [
+            ("apikey", self.cfg.anon_key.as_str()),
+            ("Content-Type", "application/json"),
+        ];
+        let (status, bytes) = self
+            .transport
+            .post_json(&self.url("/auth/v1/signup"), &headers, &body)
+            .await
+            .map_err(|e| AuthError::Network(e.to_string()))?;
+        if (200..=299).contains(&status) {
+            match parse_token_response(&bytes, now_unix()) {
+                Ok(s) => Ok(Some(s)),
+                Err(AuthError::InvalidResponse(_)) => Ok(None), // user created, no session yet
+                Err(e) => Err(e),
+            }
+        } else {
+            Err(classify_error(status, &bytes, false))
+        }
+    }
+
     /// `POST /auth/v1/token?grant_type=refresh_token`
     pub async fn refresh(&self, refresh_token: &Secret) -> Result<Session, AuthError> {
         let body = serde_json::json!({ "refresh_token": refresh_token.expose() });

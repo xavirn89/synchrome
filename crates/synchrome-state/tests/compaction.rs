@@ -576,7 +576,7 @@ async fn watermarks_follow_active_readers_dormancy_and_the_server_validation() {
 #[tokio::test]
 async fn devices_without_snapshot_support_block_gc_but_not_snapshots_until_retired() {
     let (mut w, mut a, mut b, mut x, mut y) = history().await;
-    let mut old = w.device(); // mapped, never reports (an older build)
+    let old = w.device(); // mapped, never reports (an older build)
     compact_now(&w, &mut a).await;
     other_collections(&w, &mut x, &mut y, 1_790_000_004_000);
     w.remote(&mut a, 512 * 1024).await;
@@ -618,7 +618,57 @@ async fn devices_without_snapshot_support_block_gc_but_not_snapshots_until_retir
         .retired = true;
     let r = gc(&mut a.db, &w.sink(), w.profile, 1).await.unwrap();
     assert!(r.allowed && r.events_deleted > 0);
-    let _ = &mut old;
+    // the retired device comes back and reports (even with snapshot support): it stays
+    // retired — no silent reactivation — so it neither blocks GC nor holds watermarks
+    REPORTER.with(|r| *r.borrow_mut() = old.src.device_id.to_string());
+    w.sink()
+        .report_cursors(
+            w.profile,
+            &CursorReport {
+                snapshot_protocol: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let still = w
+        .sink()
+        .list_cursors(w.profile)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.device_id == old.src.device_id.to_string())
+        .unwrap();
+    assert!(still.retired, "a report never clears retired_at");
+    assert_eq!(
+        gc(&mut a.db, &w.sink(), w.profile, 1)
+            .await
+            .unwrap()
+            .blockers,
+        0
+    );
+    assert!(matches!(
+        compact_now(&w, &mut a).await,
+        CompactionOutcome::NotNeeded { .. }
+    ));
+    // explicit reactivation (user action): it is an active reader again, holding watermarks
+    w.cloud
+        .lock()
+        .unwrap()
+        .cursors
+        .get_mut(&(w.account.clone(), w.profile, old.src.device_id.to_string()))
+        .unwrap()
+        .retired = false;
+    other_collections(&w, &mut x, &mut y, 1_790_000_005_000);
+    w.remote(&mut a, 512 * 1024).await;
+    report_as(&w, &mut a).await;
+    assert!(
+        matches!(
+            compact_now(&w, &mut a).await,
+            CompactionOutcome::NotNeeded { .. }
+        ),
+        "the reactivated reader (applied nothing of the new history) holds the watermarks"
+    );
 }
 
 // ------------------------------------------------------------------ tombstones
