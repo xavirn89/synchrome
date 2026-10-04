@@ -1,4 +1,5 @@
 <script>
+  import { allowsIconMotion } from "./lib/iconography.js";
   import { invoke, previewEnabled, previewScenario } from "./lib/api.js";
   import { onMount } from "svelte";
   import AuthView from "./components/AuthView.svelte";
@@ -537,10 +538,11 @@
   const setupMapping = $derived(modalMapping ? mappings.find(m=>m.id===modalMapping.id) : myMappings.find(m=>m.display_status!=='extension_confirmed'||!m.bookmarks?.last_upload_at));
   const setupBrowser = $derived(setupMapping ? browsers.find(b=>b.kind===setupMapping.browser_kind) : null);
   const setupComplete = $derived(!!setupMapping?.bookmarks && (!!setupMapping.bookmarks.last_upload_at || setupMapping.bookmarks.state==='up_to_date'));
+  let appearanceIconMotion = $state(false);
   const dark = $derived(appearance==='dark'||(appearance==='system'&&systemDark));
   $effect(()=>{ document.documentElement.dataset.theme=dark?'dark':'light'; document.documentElement.style.colorScheme=dark?'dark':'light'; });
 
-  function setAppearance(value) { appearance=value; try{localStorage.setItem('synchrome.appearance',value);}catch{} }
+  function setAppearance(value, event) { appearanceIconMotion=allowsIconMotion(event); appearance=value; try{localStorage.setItem('synchrome.appearance',value);}catch{} }
   function navigate(next) { route=next; actionError=null; if(next==='activity') for(const m of confirmedMappings){ conflictsOpen={...conflictsOpen,[m.id]:true}; loadConflicts(m); } }
   function openProfile(p) { selectedId=p.id; navigate('profiles'); }
   function openCreate(method='choose', option=null) { modal='profile'; modalProfile=null; modalMapping=null; profileMethod=method; selectedLocal=option?.key??''; selectedTarget=''; formName=option?.p.display_name??''; formError=''; }
@@ -903,7 +905,7 @@
       <div class="sidebar-bottom"><div class="service-status">{@render status(cloudState(cloud))}</div><button class="account-button" onclick={()=>navigate('settings')} title={account.email}><span class="avatar">{(account.email??'S').slice(0,1).toUpperCase()}</span><span class="account-text"><strong>{account.email?.split('@')[0]??'Your account'}</strong><span>{device?.device_name??'This Mac'}</span></span><Icon name="settings" size={16}/></button></div>
     </aside>
     <div class="work-area">
-      <header class="topbar"><span>{device?.device_name??'This Mac'}<span class="topbar-divider">/</span>{nav.find(n=>n.id===route)?.name}</span><div class="topbar-actions">{#if cloudDataBusy}<span class="refresh-label" role="status">Updating…</span>{/if}<button class="icon-button" aria-label="Refresh workspace" title="Refresh workspace" onclick={refreshWorkspace} disabled={cloudDataBusy||!!busyKey}><Icon name="refresh" size={18}/></button><button class="icon-button" aria-label={dark?'Switch to light mode':'Switch to dark mode'} title={dark?'Switch to light mode':'Switch to dark mode'} onclick={()=>setAppearance(dark?'light':'dark')}><Icon name={dark?'sun':'moon'} size={18}/></button></div></header>
+      <header class="topbar"><span>{device?.device_name??'This Mac'}<span class="topbar-divider">/</span>{nav.find(n=>n.id===route)?.name}</span><div class="topbar-actions">{#if cloudDataBusy}<span class="refresh-label" role="status">Updating…</span>{/if}<button class="icon-button" aria-label="Refresh workspace" title="Refresh workspace" onclick={refreshWorkspace} disabled={cloudDataBusy||!!busyKey}><Icon name="refresh" size={18}/></button><button class="icon-button" aria-label={dark?'Switch to light mode':'Switch to dark mode'} title={dark?'Switch to light mode':'Switch to dark mode'} onclick={(event)=>setAppearance(dark?'light':'dark',event)}><Icon name={dark?'sun':'moon'} size={18} morph animate={appearanceIconMotion}/></button></div></header>
       <main id="main-content" class="main-content" tabindex="-1">
         {#if cloud?.reachable===false}<div class="notice warning"><Icon name="cloud" size={19}/><div><strong>You’re offline. Your local changes are kept.</strong><p>Sync resumes when Synchrome Cloud is available.</p></div><button class="button secondary" onclick={refreshWorkspace} disabled={cloudDataBusy}>Try again</button></div>{/if}
         {#if account?.needs_refresh}<div class="notice warning"><Icon name="shield" size={19}/><div><strong>Your session needs to be refreshed.</strong><p>Reconnect your account to continue syncing.</p></div><button class="button secondary" onclick={refresh} disabled={authBusy||!!busyKey}>Refresh session</button></div>{/if}

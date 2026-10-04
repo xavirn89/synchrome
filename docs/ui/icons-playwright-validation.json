@@ -1,0 +1,194 @@
+{
+  "generatedAt": "2026-10-04T16:06:43.332Z",
+  "runtime": "Playwright / Chromium",
+  "scope": "Complementary real frontend checks with explicit token-free DEV fixtures; native acceptance is recorded separately",
+  "checks": [
+    {
+      "name": "Auth exposes labelled fields and password autocomplete",
+      "passed": true
+    },
+    {
+      "name": "Invalid email focuses the email field",
+      "passed": true
+    },
+    {
+      "name": "Password visibility is explicit and reversible",
+      "passed": true
+    },
+    {
+      "name": "Auth failure retains values and gives human feedback",
+      "passed": true
+    },
+    {
+      "name": "Sign up validates its password before calling the service",
+      "passed": true
+    },
+    {
+      "name": "Account confirmation is a success panel",
+      "passed": true
+    },
+    {
+      "name": "First entry explains the three-part profile relationship",
+      "passed": true
+    },
+    {
+      "name": "Sign out is confirmed and explains preservation",
+      "passed": true
+    },
+    {
+      "name": "Sign out leaves the authentication view",
+      "passed": true
+    },
+    {
+      "name": "Browser access guidance explains Full Disk Access",
+      "passed": true
+    },
+    {
+      "name": "Import creates one central profile and one pending connection",
+      "passed": true
+    },
+    {
+      "name": "Companion setup provides the concrete next steps",
+      "passed": true
+    },
+    {
+      "name": "Companion confirmation does not masquerade as import completion",
+      "passed": true
+    },
+    {
+      "name": "Completion follows an observed successful first upload",
+      "passed": true
+    },
+    {
+      "name": "Overview shows central profiles and distinct Mac counts",
+      "passed": true
+    },
+    {
+      "name": "Mixed attention acknowledges setup or recovery",
+      "passed": true
+    },
+    {
+      "name": "Attention action matches the described conflict task",
+      "passed": true
+    },
+    {
+      "name": "Connections are grouped by Mac",
+      "passed": true
+    },
+    {
+      "name": "Remote connections avoid live-state claims",
+      "passed": true
+    },
+    {
+      "name": "Unsupported second local connection is prevented",
+      "passed": true
+    },
+    {
+      "name": "Failed replacement explains recovery after disconnection",
+      "passed": true
+    },
+    {
+      "name": "Retry connects the new browser without repeating the old disconnect",
+      "passed": true
+    },
+    {
+      "name": "Disconnect confirmation keeps local browser data explicit",
+      "passed": true
+    },
+    {
+      "name": "Disconnect retains the central profile",
+      "passed": true
+    },
+    {
+      "name": "Duplicate names are validated inline",
+      "passed": true
+    },
+    {
+      "name": "An in-flight mutation protects its dialog and submit action",
+      "passed": true
+    },
+    {
+      "name": "Manual creation leaves browsers unconnected",
+      "passed": true
+    },
+    {
+      "name": "Escape restores the invoking control",
+      "passed": true
+    },
+    {
+      "name": "Delete shows separate cloud removal and local retention",
+      "passed": true
+    },
+    {
+      "name": "Delete rejects a mismatched name",
+      "passed": true
+    },
+    {
+      "name": "Partial deletion failure leaves the cloud profile retryable",
+      "passed": true
+    },
+    {
+      "name": "Retry safely removes cloud profile and all its relationships",
+      "passed": true
+    },
+    {
+      "name": "Profile deletion preserves every local browser fixture",
+      "passed": true
+    },
+    {
+      "name": "Conflict decision resolves the fixture conflict",
+      "passed": true
+    },
+    {
+      "name": "Offline preserves local changes in its explanation",
+      "passed": true
+    },
+    {
+      "name": "Empty workspace offers meaningful creation choices",
+      "passed": true
+    },
+    {
+      "name": "Dark theme is applied with native control color scheme",
+      "passed": true
+    },
+    {
+      "name": "Appearance persists only the local presentation preference",
+      "passed": true
+    },
+    {
+      "name": "overview has no horizontal overflow at 720 px",
+      "passed": true
+    },
+    {
+      "name": "profiles has no horizontal overflow at 720 px",
+      "passed": true
+    },
+    {
+      "name": "devices has no horizontal overflow at 720 px",
+      "passed": true
+    },
+    {
+      "name": "activity has no horizontal overflow at 720 px",
+      "passed": true
+    },
+    {
+      "name": "settings has no horizontal overflow at 720 px",
+      "passed": true
+    },
+    {
+      "name": "Preview banner does not clip account access",
+      "passed": true
+    },
+    {
+      "name": "Reduced motion disables dialog animation",
+      "passed": true
+    },
+    {
+      "name": "No uncaught browser errors occurred",
+      "passed": true
+    }
+  ],
+  "passed": 46,
+  "failed": 0,
+  "errors": []
+}

@@ -1,0 +1,15 @@
+{
+  "runtime": "Tauri WKWebView",
+  "scope": "Isolated in-memory auth fixture, DOM mouse events; no real account or browser writes",
+  "keyboard": {
+    "hidden": "true",
+    "inputType": "text",
+    "mutations": 1
+  },
+  "pointer": {
+    "hidden": "true",
+    "inputType": "password",
+    "mutations": 28
+  },
+  "passed": true
+}

@@ -1,5 +1,6 @@
 <script>
   import Icon from "./Icon.svelte";
+  import { allowsIconMotion } from "../lib/iconography.js";
 
   let { busy = false, error = null, cloud = null, account = null, onsubmit = async () => {}, onretry = () => {} } = $props();
   const uid = $props.id();
@@ -7,6 +8,7 @@
   let email = $state("");
   let password = $state("");
   let showPassword = $state(false);
+  let passwordIconMotion = $state(false);
   let submitting = $state(false);
   let submitted = $state(false);
   let emailTouched = $state(false);
@@ -107,7 +109,7 @@
             <label for={`${uid}-password`}>Password</label>
             <div class="password-input">
               <input id={`${uid}-password`} name="password" type={showPassword ? "text" : "password"} bind:value={password} autocomplete={isSignup ? "new-password" : "current-password"} required minlength={isSignup ? 8 : undefined} disabled={isBusy || blocked} aria-invalid={!!passwordError} aria-describedby={passwordError ? `${uid}-password-error` : isSignup ? `${uid}-password-help` : undefined} onblur={() => { passwordTouched = true; }} />
-              <button type="button" class="password-toggle" aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword} disabled={isBusy || blocked} onclick={() => { showPassword = !showPassword; }}><Icon name={showPassword ? "eye-off" : "eye"} size={19} /></button>
+              <button type="button" class="password-toggle" aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword} disabled={isBusy || blocked} onclick={(event) => { passwordIconMotion = allowsIconMotion(event); showPassword = !showPassword; }}><Icon name={showPassword ? "eye-off" : "eye"} size={19} morph animate={passwordIconMotion} /></button>
             </div>
             {#if passwordError}<span id={`${uid}-password-error`} class="validation" role="alert">{passwordError}</span>{:else if isSignup}<span id={`${uid}-password-help`} class="field-hint">At least 8 characters.</span>{/if}
           </div>

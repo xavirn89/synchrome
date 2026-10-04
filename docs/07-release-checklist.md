@@ -114,3 +114,11 @@ checks, native light/dark captures and delivery limits. Formatting, workspace cl
 37 frontend tests, production build, Developer ID signature, production bundle audit and
 DMG integrity passed. The signed, unnotarized installer is on the Desktop; the installed
 app and the user’s live session/connections remain intact.
+
+## Internal icon update — 2026-10-04, version 1.0.2
+
+See [ICONS-UPDATE.md](ui/ICONS-UPDATE.md). All Rust release gates, 37 Node tests,
+63 native WKWebView checks, 46 Chromium checks, pointer/keyboard/reduced-motion probes,
+production build, Developer ID signature and all 12 bundle audit checks passed.
+The signed, unnotarized DMG is on the Desktop. The user’s installed app, session and
+live connections were preserved.

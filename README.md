@@ -77,7 +77,8 @@ Release build: `scripts/release-macos.sh` (embedded frontend, Developer ID signa
 `.dmg`, bundle audit; notarizes when notary credentials are in the environment). Use
 `scripts/release-macos.sh --local-only` to sign and package without uploading to Apple.
 
-Current local delivery: **1.0.1**, with the refined app/companion identity. See
+Current local delivery: **1.0.2**, with Lucide internal icons and restrained Morphicons
+transitions. See [icon update and verification](docs/ui/ICONS-UPDATE.md) and
 [identity update and verification](docs/ui/BRAND-UPDATE.md). After replacing the app, reload
 already-loaded unpacked companions to refresh their artwork and popup.
 

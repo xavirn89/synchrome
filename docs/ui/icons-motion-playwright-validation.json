@@ -1,0 +1,16 @@
+{
+  "runtime": "Chromium",
+  "keyboard": {
+    "mutations": 1,
+    "inputType": "text"
+  },
+  "pointer": {
+    "mutations": 52,
+    "inputType": "password"
+  },
+  "reducedMotion": {
+    "mutations": 1,
+    "inputType": "text"
+  },
+  "passed": true
+}

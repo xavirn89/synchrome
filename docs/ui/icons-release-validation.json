@@ -1,0 +1,20 @@
+{
+  "date": "2026-10-04",
+  "version": "1.0.2",
+  "installerSha256": "0362ee9c556cbfe50f17ca41a61600094de864db118430d9fb6d03d36904857c",
+  "installerBytes": 6878404,
+  "signatureValid": true,
+  "notarized": false,
+  "productionBundleAuditPassed": true,
+  "dmgIntegrityPassed": true,
+  "frontendTestsPassed": 37,
+  "rustFormattingPassed": true,
+  "rustClippyPassed": true,
+  "rustWorkspaceTestsPassed": true,
+  "nativeUIChecksPassed": 63,
+  "playwrightChecksPassed": 46,
+  "extensionIdentityAndPermissionsUnchanged": true,
+  "personalSessionAndConnectionsPreserved": true,
+  "isolatedPreviewClosed": true,
+  "isolatedPreviewDataAndCachesRemoved": true
+}

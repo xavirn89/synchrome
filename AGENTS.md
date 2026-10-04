@@ -23,7 +23,7 @@ Read `PRODUCT.md` and `DESIGN.md` before changing product behavior or UI. These 
 
 - Navigation is Overview, Profiles, Devices, Activity and Settings. Account access opens Settings. Keep contextual actions close to the selected profile or browser connection.
 - Preserve shared tokens and reusable controls in `apps/desktop/src/styles.css`. New components consume CSS variables; do not introduce independent palettes or hardcoded theme colors.
-- Use the native system font, 14px body text, restrained heading hierarchy and the existing 4px/2px spacing rhythm. Use original SVG icons from `Icon.svelte`, never Unicode glyphs or emoji as UI icons. Brand assets and their source are documented in `docs/brand.md`.
+- Use the native system font, 14px body text, restrained heading hierarchy and the existing 4px/2px spacing rhythm. Use Lucide SVG icons through `Icon.svelte` for internal controls, preserving the custom Synchrome logo. Never use Unicode glyphs or emoji as UI icons. Brand assets and their source are documented in `docs/brand.md`.
 - Support System, Light and Dark. Appearance state belongs to the shell and sets root `data-theme` and `color-scheme`. Persist only this local presentation preference under `synchrome.appearance`; do not store account or sync data there.
 - Use `.button`, `.field`, `.notice`, `.status` and the existing style variants. Colors convey meaning alongside text and icons. Reserve teal for primary/current/positive meaning, amber for attention, red for failures/destructive actions and blue for pending information.
 - Summarize local sync state with the shared helpers in `src/lib/product.js`. Keep technical diagnostics expandable. A healthy remote link cannot hide a local conflict or incomplete first sync.

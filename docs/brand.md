@@ -40,5 +40,7 @@ next to the existing text heading, preserving all status/action selectors. Gener
 appearance, with visible keyboard focus and semantic status colors.
 
 The wordmark remains native system typography with the existing restrained weight and spacing.
-Do not substitute text glyphs or library icons for the mark. The vectors and interface icons
-are original work for this repository and governed by its licence.
+Do not substitute text glyphs or library icons for the mark. The brand vectors are original work for this repository and governed by its licence.
+Internal controls use Lucide (ISC, with MIT notices for Feather-derived icons); the two
+optional state transitions use Morphicons (MIT). Their full notices ship in the embedded
+frontend as `THIRD-PARTY-LICENSES.txt`. The brand mark remains separate from these libraries.
