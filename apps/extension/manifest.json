@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Synchrome",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Synchrome companion: links this browser profile to your Synchrome account and syncs bookmarks and the extensions list (installed, enabled) through the Synchrome app.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAw3hIT6rBRyooDI2pHUEfI1+oAsTDOa4HItmUsX+5ZUIgRIq8/AD/+Zx7+yCTkWhCDbnLGUy86s3JYo6sPSQHnUO6fnJY6FvTo18SOjP729I/0+x9Cnb/VyxizUrpFq5Xzx81NdE/d2Z9WY/Kr3qDE0w8+9BLN/RsOYqLx6Afu2xGrVQLcKLAr+Y2/aZwgSIaFKyeb5t7q6207GYrucSWWf3vCPEeFTN5MKCgWnQhMkV36lbGquCNQtYVViHMpLuYF9WuernX286OqNotP+F0skbBipedIgND8sSuTB2H5XK3N3bRRpX2DzU3aAzh25coUfyOO8+9UoyTLw/XYgxWFQIDAQAB",
   "minimum_chrome_version": "116",
@@ -17,6 +17,16 @@
   },
   "action": {
     "default_title": "Synchrome",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
   }
 }

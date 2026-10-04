@@ -19,6 +19,7 @@
   --warning-soft: #fff4df;
   --info: #2d6193;
   --info-soft: #eaf2fa;
+  --primary-text: var(--surface);
   --shadow: 0 1px 3px rgb(23 50 40 / 5%);
 }
 
@@ -37,6 +38,7 @@
   --warning-soft: #3e3423;
   --info: #a4cafa;
   --info-soft: #26394b;
+  --primary-text: #12251e;
   --shadow: none;
 }
 
@@ -203,7 +205,7 @@ small,.small {
 }
 
 :root[data-theme=dark] .primary {
-  color: #12251e;
+  color: var(--primary-text);
 }
 
 .secondary {
@@ -453,7 +455,7 @@ small,.small {
 }
 
 :root[data-theme=dark] .brand-logo {
-  color: #12251e;
+  color: var(--primary-text);
 }
 
 .sidebar nav {

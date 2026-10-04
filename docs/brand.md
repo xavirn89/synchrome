@@ -1,9 +1,44 @@
 # Synchrome identity
 
-Synchrome uses two connected paths with opposing arrows. The mark expresses a shared profile receiving and sending changes across browsers and devices. Its open paths remain legible as a small toolbar symbol, an application icon and a monochrome mark.
+The mark retains two opposing paths: sending and receiving changes around the same shared
+profile. The 1.0.1 refinement uses continuous semicircular turns, shorter arrowheads and more
+space between the arrows. Its balanced silhouette remains readable at toolbar sizes and in
+monochrome, without decorative motion.
 
-The application icon places the mark in off-white (`#f4fffd`) on a teal (`#087f75`) rounded square, with clear space around the silhouette for macOS. The interface uses the same geometry in `apps/desktop/src/components/Icon.svelte` with `name="logo"`; its colour comes from the current theme’s accent token. The icon artwork is theme independent.
+## One geometry
 
-Sources are `apps/desktop/public/synchrome.svg` for the browser favicon and `apps/desktop/src-tauri/icons/icon.svg` for the macOS icon. Keep their geometry identical. `icon.png` is a 1024-pixel transparent rendering of the vector; `icon.icns` includes the standard macOS sizes. Regenerate these raster outputs when changing the vector. Do not approximate the mark with text symbols or unrelated library icons.
+`apps/desktop/src/lib/brand.js` owns the four original paths on a 24-unit grid and the 2.05-unit
+stroke. `Icon.svelte` imports these paths for the shell, authentication, boot and onboarding.
+Run `node scripts/generate-brand.mjs` on macOS to regenerate all exported artwork. It uses the
+existing Tauri SVG renderer, `sips` and `iconutil`; no extra dependency is required. macOS
+sandbox restrictions may require running the generator outside the sandbox.
 
-The SVG mark, interface icons and application icon were drawn originally for this repository. No third-party imagery, font or icon artwork is included in these assets; the repository’s licence governs their use.
+The generator reads the light accent and foreground from the shared desktop CSS tokens:
+
+- Application icon: teal `#176b5d`, white mark, restrained lower shadow and inner highlight;
+  transparent 1024-unit canvas, 864-unit rounded-square tile and clear surrounding space.
+- Interface: current theme accent and shared primary text tokens. Retain light/dark/system
+  appearance; the logo never owns a separate interface palette.
+- Favicon and companion toolbar icons: the same geometry on a compact teal tile, rendered
+  separately for 16, 32, 48 and 128 pixels. Their compact tile omits the Dock shadow and gutter.
+
+## Assets
+
+| Surface | Source/output |
+| --- | --- |
+| Interface mark | `apps/desktop/src/lib/brand.js`, consumed by `Icon.svelte` |
+| Browser favicon | `apps/desktop/public/synchrome.svg` |
+| macOS vector | `apps/desktop/src-tauri/icons/icon.svg` |
+| macOS raster and icon family | `apps/desktop/src-tauri/icons/icon.png`, `icon.icns` |
+| Companion monochrome vector | `apps/extension/brand.svg` |
+| Companion toolbar/list/popup | `apps/extension/icons/{16,32,48,128}.png`, declared in the existing manifest |
+
+The companion's manifest key and permissions remain unchanged: adding artwork must not change
+its fixed extension identity or connection contract. Its popup adds the decorative brand image
+next to the existing text heading, preserving all status/action selectors. Generated
+`brand-tokens.css` shares the desktop palette; the popup follows the system light/dark
+appearance, with visible keyboard focus and semantic status colors.
+
+The wordmark remains native system typography with the existing restrained weight and spacing.
+Do not substitute text glyphs or library icons for the mark. The vectors and interface icons
+are original work for this repository and governed by its licence.

@@ -1,9 +1,10 @@
 <script>
+  import { brandPaths, brandStroke } from "../lib/brand.js";
   let { name, size = 20, stroke = 1.8, class: className = "" } = $props();
 
   // Original geometric paths. One grid and stroke keep the interface consistent.
   const paths = {
-    logo: ["M9 4H7a4 4 0 0 0-4 4v3a4 4 0 0 0 4 4h5", "M15 20h2a4 4 0 0 0 4-4v-3a4 4 0 0 0-4-4h-5", "m9 11 3 4-3 4", "m15 5-3 4 3 4"],
+    logo: brandPaths,
     overview: ["M3 3h7v7H3z", "M14 3h7v7h-7z", "M3 14h7v7H3z", "M14 14h7v7h-7z"],
     profiles: ["M3 5h7l2 3h9v11H3z", "M3 8h9"],
     devices: ["M3 4h13v11H3z", "M6 19h7", "M9.5 15v4", "M19 9h3v12h-5v-6"],
@@ -44,7 +45,7 @@
   };
 </script>
 
-<svg class={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width={stroke} stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+<svg class={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width={name === "logo" ? brandStroke : stroke} stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
   {#each paths[name] ?? paths.info as path}<path d={path} />{/each}
   {#if name === "sun"}<circle cx="12" cy="12" r="4" />{/if}
   {#if name === "search"}<circle cx="10" cy="10" r="7" />{/if}

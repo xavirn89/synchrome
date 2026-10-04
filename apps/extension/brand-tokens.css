@@ -1,0 +1,40 @@
+/* Generated from the desktop theme by scripts/generate-brand.mjs. */
+:root {
+  color-scheme: light dark;
+  --bg: #f5f8f7;
+  --surface: #fff;
+  --sidebar: #eaf1ef;
+  --fg: #203a37;
+  --muted: #59716c;
+  --accent: #176b5d;
+  --accent-soft: #e0f0e9;
+  --line: #d8e3de;
+  --danger: #af343d;
+  --danger-soft: #fbebed;
+  --warning: #855413;
+  --warning-soft: #fff4df;
+  --info: #2d6193;
+  --info-soft: #eaf2fa;
+  --primary-text: var(--surface);
+  --shadow: 0 1px 3px rgb(23 50 40 / 5%);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+  --bg: #141f20;
+  --surface: #1b292b;
+  --sidebar: #102321;
+  --fg: #e5eeeb;
+  --muted: #a2b8b0;
+  --accent: #8bdbc0;
+  --accent-soft: #243d35;
+  --line: #354844;
+  --danger: #ffabb3;
+  --danger-soft: #432d34;
+  --warning: #edc481;
+  --warning-soft: #3e3423;
+  --info: #a4cafa;
+  --info-soft: #26394b;
+  --primary-text: #12251e;
+  --shadow: none;
+  }
+}

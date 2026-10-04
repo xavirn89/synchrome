@@ -1,16 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <title>Synchrome</title>
-  <desc>Two connected paths moving in opposite directions, on a teal rounded square.</desc>
-  <defs>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
-      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#071e1c" flood-opacity=".18" />
-    </filter>
-  </defs>
-  <rect x="80" y="80" width="864" height="864" rx="200" fill="#087f75" filter="url(#shadow)" />
-  <g transform="translate(200 200) scale(26)" fill="none" stroke="#f4fffd" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M9 4H7a4 4 0 0 0-4 4v3a4 4 0 0 0 4 4h5" />
-    <path d="M15 20h2a4 4 0 0 0 4-4v-3a4 4 0 0 0-4-4h-5" />
-    <path d="m9 11 3 4-3 4" />
-    <path d="m15 5-3 4 3 4" />
-  </g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024"><title>Synchrome</title><defs><filter id="shadow" x="-15%" y="-15%" width="130%" height="140%"><feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#203a37" flood-opacity=".18"/></filter></defs><rect x="80" y="80" width="864" height="864" rx="200" fill="#176b5d" filter="url(#shadow)"/><rect x="82" y="82" width="860" height="860" rx="198" fill="none" stroke="#ffffff" stroke-opacity=".12" stroke-width="4"/><g transform="translate(176 176) scale(28)"><g fill="none" stroke="#ffffff" stroke-width="2.05" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 3.5H8.5a5.75 5.75 0 0 0 0 11.5h8"/><path d="m14.25 12.75 2.25 2.25-2.25 2.25"/><path d="M8.5 20.5h7a5.75 5.75 0 0 0 0-11.5h-8"/><path d="m9.75 6.75-2.25 2.25 2.25 2.25"/></g></g></svg>

@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-04",
+  "version": "1.0.1",
+  "installerSha256": "95c68e9468b337feccf58b378ac5ac5d4a431f099f3ed2f47e0040472e8ede3c",
+  "installerBytes": 6866079,
+  "signatureValid": true,
+  "notarized": false,
+  "productionBundleAuditPassed": true,
+  "frontendTestsPassed": 37,
+  "rustFormattingPassed": true,
+  "rustClippyPassed": true,
+  "rustWorkspaceTestsPassed": true,
+  "liveConnectionAudit": {
+    "profiles": 5,
+    "firstUploadsComplete": 5,
+    "unpublishedOperations": 0,
+    "recordedErrors": 0,
+    "conflicts": 0,
+    "crossMacConvergenceTested": false
+  },
+  "extensionIdentityAndPermissionsUnchanged": true,
+  "isolatedPreviewClosed": true
+}

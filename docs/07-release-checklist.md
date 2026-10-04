@@ -106,3 +106,11 @@ Install by dragging the app into Applications and replacing the previous copy be
 browser connectors. The delivery contains no signed-in account or personal browser data.
 The older server-maintenance tasks above require their original server/account context and
 remain separate from removal of this UI preview's fictitious account.
+
+## Identity update — 2026-10-04, version 1.0.1
+
+See [BRAND-UPDATE.md](ui/BRAND-UPDATE.md) for the refinement, live read-only connection audit,
+checks, native light/dark captures and delivery limits. Formatting, workspace clippy/tests,
+37 frontend tests, production build, Developer ID signature, production bundle audit and
+DMG integrity passed. The signed, unnotarized installer is on the Desktop; the installed
+app and the user’s live session/connections remain intact.

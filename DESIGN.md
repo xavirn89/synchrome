@@ -318,7 +318,7 @@ Reduced motion retains the same state information, disables movement and smooth 
 
 Standard controls have gently curved corners (8px); notices use 10px; browser connection groups use 11px; primary content groups use 12px; dialogs use 16px. Compact tags use 5px, diagnostic controls 6px and count pills 7px. Related boundaries use a 1px shared line color, with a dashed boundary for an unconnected browser empty state. Identity marks use rounded squares; account avatars and setup step indicators use circles.
 
-`Icon.svelte` provides original geometric SVG paths on a 24px grid with a consistent 1.8px stroke, round caps and round joins. Default icon size is 20px. Use those original SVG icons rather than Unicode glyphs or emoji. The logo and macOS assets follow `docs/brand.md`.
+`Icon.svelte` provides original geometric SVG paths on a 24px grid with a consistent 1.8px stroke, round caps and round joins. Default icon size is 20px. Use those original SVG icons rather than Unicode glyphs or emoji. The logo uses the canonical opposing-arc geometry in `src/lib/brand.js`; `Icon.svelte` imports it with its dedicated 2.05-unit stroke. The logo and macOS assets follow `docs/brand.md`.
 
 ## Components
 
