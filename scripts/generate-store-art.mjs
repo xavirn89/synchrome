@@ -1,0 +1,12 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+import { brandPaths, brandStroke } from '../apps/desktop/src/lib/brand.js';
+import { fileURLToPath } from 'node:url';
+const output = new URL('../distribution/chrome-web-store/assets/', import.meta.url);
+const css = readFileSync(new URL('../apps/desktop/src/styles.css', import.meta.url), 'utf8');
+const accent = css.match(/--accent:\s*(#[a-fA-F0-9]+)/)[1];
+const accentDark = css.match(/:root\[data-theme=dark\] \{([\s\S]*?)\n\}/)[1].match(/--accent:\s*(#[a-fA-F0-9]+)/)[1];
+const paths = brandPaths.map(d => `<path d="${d}"/>`).join('');
+const mark = `<g fill="none" stroke="white" stroke-width="${brandStroke}" stroke-linecap="round" stroke-linejoin="round">${paths}</g>`;
+const svg = (w,h,body) => `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${body}</svg>`;
+writeFileSync(fileURLToPath(new URL('store-icon.svg', output)), svg(128,128,`<rect x="16" y="16" width="96" height="96" rx="24" fill="${accent}"/><g transform="translate(24 24) scale(3.333333)">${mark}</g>`));
+writeFileSync(fileURLToPath(new URL('promo-small.svg', output)), svg(440,280,`<rect width="440" height="280" fill="${accent}"/><g opacity=".25" stroke="${accentDark}" stroke-width="2" fill="none"><rect x="30" y="66" width="128" height="148" rx="14"/><rect x="282" y="66" width="128" height="148" rx="14"/><path d="M30 99h128M282 99h128"/></g><g transform="translate(148 68) scale(6)">${mark}</g>`));
