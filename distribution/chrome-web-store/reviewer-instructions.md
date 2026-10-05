@@ -11,9 +11,10 @@ Synchrome is a macOS companion extension. Chrome 116+ and a separate macOS Synch
 7. Create/edit a sample bookmark and observe sync state. A second Mac with another dedicated profile can verify cross-Mac convergence.
 8. Synchrome displays conflicts in the desktop app, where the reviewer can choose a resolution.
 
+Public privacy policy: https://www.garduc.com/synchrome/privacy/
+
 Prerequisites currently outstanding:
 - Public macOS app download URL, with the official store extension ID supported.
-- Published privacy policy URL.
 - Official CWS item ID and public key incorporated into a tested native compatibility update.
 - Reviewer account if self-service registration is insufficient for review.
 

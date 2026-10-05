@@ -45,3 +45,8 @@ the user’s availability. ZIP allowlist, identity consistency, JS syntax, deter
 PNG dimensions and privacy-page layouts (1280/375px) passed. The existing frontend suite
 passed all 37 tests. No app engine/cloud behavior changed; native/cloud E2E was not rerun
 for this packaging-only change.
+
+The privacy policy was published through Garduc `main` on 5 October 2026
+(commits `2c437c6`, `68044fa`). Its canonical URL returns the standalone policy
+with HTTP 200; the slashless URL redirects to it. The store draft and native
+store-identity compatibility remain outstanding.
