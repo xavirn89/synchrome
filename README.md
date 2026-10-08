@@ -4,6 +4,16 @@
 
 Synchrome is a desktop application that keeps your Chromium browser profiles synchronised across your computers. **Version 1.0 (macOS)** syncs bookmarks, installed extensions and their enabled state, extension settings and a set of browser preferences for Helium and Google Chrome (validated); browsing history, tracked preferences, other browsers and other platforms are on the roadmap. Passwords are never synced; bring your own password manager.
 
+## Download
+
+**[Latest release](https://github.com/xavirn89/synchrome/releases/latest)** — notarized macOS app
+(`Synchrome_<version>_aarch64.dmg`, Apple silicon, macOS 12+). Open the DMG, drag Synchrome to
+Applications and open it from there. Companion extension: Chrome Web Store item
+`ceflmoojogokmklgcmcihdgakbefgiee` (listing coming soon); until then it ships inside the app
+(`Synchrome.app/Contents/Resources/extension`, load it with *Developer mode → Load unpacked*).
+Privacy policy: https://www.garduc.com/synchrome/privacy/ · Support: xavirn.me@gmail.com ·
+License: [MIT](LICENSE).
+
 ## Status
 
 **Synchrome 1.0 (macOS)** — the first complete version: Helium and Google Chrome on macOS, with
