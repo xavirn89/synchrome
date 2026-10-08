@@ -1,7 +1,7 @@
 {
-  "version": "1.0.2",
-  "archive": "Synchrome-1.0.2-ChromeWebStore.zip",
-  "sha256": "a4cf5bb5c2c7f348f68421b1ef719f9d03b8c77c3700f797175564a70b94cb9b",
+  "version": "1.0.3",
+  "archive": "Synchrome-1.0.3-ChromeWebStore.zip",
+  "sha256": "7ffa1af9ea576d783517d1d813e70f2a3e4552a3a888a88cf3b4793130d3d3fe",
   "bytes": 16929,
   "files": [
     "manifest.json",
@@ -14,7 +14,7 @@
     "icons/48.png",
     "icons/128.png"
   ],
-  "unpackedExtensionId": "gmpmcnknoaogpjdoonlddhpdpgkebbog",
+  "unpackedExtensionId": "ceflmoojogokmklgcmcihdgakbefgiee",
   "storeExtensionId": null,
   "nativeCompatibilityVerified": false,
   "publicationReady": false,

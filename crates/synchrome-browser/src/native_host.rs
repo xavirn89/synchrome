@@ -2,10 +2,10 @@
 //!
 //! Chromium looks for `<user-data-dir>/NativeMessagingHosts/<host-name>.json` (user level;
 //! Milestone 0 E1: this directory is NOT TCC-protected even for Chrome). The manifest only
-//! allows the Synchrome extension's origin.
+//! allows the Synchrome companion's origins (its store id and the pre-store development id).
 
 use std::path::{Path, PathBuf};
-use synchrome_types::{synchrome_extension_origin, NATIVE_HOST_NAME};
+use synchrome_types::{synchrome_extension_origins, NATIVE_HOST_NAME};
 
 /// Manifest JSON for the Synchrome host. `host_path` must be absolute.
 pub fn host_manifest(host_path: &Path) -> serde_json::Value {
@@ -14,7 +14,7 @@ pub fn host_manifest(host_path: &Path) -> serde_json::Value {
         "description": "Synchrome native messaging host",
         "path": host_path.display().to_string(),
         "type": "stdio",
-        "allowed_origins": [synchrome_extension_origin()],
+        "allowed_origins": synchrome_extension_origins(),
     })
 }
 
@@ -46,11 +46,18 @@ mod tests {
         ));
         assert_eq!(m["name"], NATIVE_HOST_NAME);
         assert_eq!(m["type"], "stdio");
-        let origins = m["allowed_origins"].as_array().unwrap();
-        assert_eq!(origins.len(), 1);
+        let origins: Vec<&str> = m["allowed_origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o.as_str().unwrap())
+            .collect();
         assert_eq!(
-            origins[0],
-            "chrome-extension://gmpmcnknoaogpjdoonlddhpdpgkebbog/"
+            origins,
+            [
+                "chrome-extension://ceflmoojogokmklgcmcihdgakbefgiee/",
+                "chrome-extension://gmpmcnknoaogpjdoonlddhpdpgkebbog/"
+            ]
         );
     }
 

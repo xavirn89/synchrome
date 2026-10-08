@@ -14,6 +14,16 @@ Store, con tu cuenta) o **yo** (en el repo / la app).
 | Política de privacidad pública | https://www.garduc.com/synchrome/privacy/ | publicada (HTTP 200 comprobado hoy) |
 | Instrucciones para el revisor | `distribution/chrome-web-store/reviewer-instructions.md` | listas, faltan 2 datos (ver fase 4) |
 
+## Estado (8 de octubre)
+
+- Fase 2 hecha: borrador creado, Item ID `ceflmoojogokmklgcmcihdgakbefgiee`.
+- Fase 3 hecha: app **1.0.3** acepta el ID oficial (y el antiguo), el manifest de desarrollo usa la
+  clave de la tienda, paquete nuevo `dist/chrome-web-store/Synchrome-1.0.3-ChromeWebStore.zip`
+  (súbelo con **Package → Upload new package**), DMG firmado
+  `target/release/bundle/dmg/Synchrome_1.0.3_aarch64.dmg`. E2E de identidad 7/7.
+- Pendiente: notarización (fase 4.1), URL pública del DMG (fase 4.2), E2E con cuenta usando el ID
+  oficial (necesito un fichero de credenciales de prueba), enviar a revisión (fase 6).
+
 ## El punto crítico: el ID de la extensión
 
 La app nativa solo acepta conexiones de la extensión con ID `gmpmcnknoaogpjdoonlddhpdpgkebbog`

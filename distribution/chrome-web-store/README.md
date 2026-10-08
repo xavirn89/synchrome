@@ -19,11 +19,11 @@ store item is already compatible with the installed native app.
 ## Publication gates
 
 1. Obtain the official CWS Item ID and Package → View public key after creating the draft.
-2. Compare against local ID `gmpmcnknoaogpjdoonlddhpdpgkebbog`. The current development
-   manifest key cannot guarantee the store's assigned signing identity.
-3. If different, implement and test native allowlisting/pairing for the official identity,
-   preserving existing local connections. Do not replace the constant blindly or expose
-   pairing tokens. A separate app release is required before store users can connect.
+2. DONE (8 Oct 2026): store item id `ceflmoojogokmklgcmcihdgakbefgiee`; its public key is now the
+   development manifest `key` (same id unpacked and in the store). Pre-store id
+   `gmpmcnknoaogpjdoonlddhpdpgkebbog` stays accepted for existing connections.
+3. DONE: app 1.0.3 accepts both origins and writes the pairing token for the store id (and for
+   the pre-store id only where its store already exists); `tests/experiments/e2e_store_id.py` 7/7.
 4. Publish the privacy page and a public compatible macOS app download. Verify both anonymously.
 5. Complete store graphics, listing, privacy disclosures and reviewer instructions.
 6. Submit for review with publication deferred; publish only after compatibility is tested.

@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Synchrome",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Connect this browser to Synchrome for macOS to sync bookmarks and your installed extensions across your Macs.",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAw3hIT6rBRyooDI2pHUEfI1+oAsTDOa4HItmUsX+5ZUIgRIq8/AD/+Zx7+yCTkWhCDbnLGUy86s3JYo6sPSQHnUO6fnJY6FvTo18SOjP729I/0+x9Cnb/VyxizUrpFq5Xzx81NdE/d2Z9WY/Kr3qDE0w8+9BLN/RsOYqLx6Afu2xGrVQLcKLAr+Y2/aZwgSIaFKyeb5t7q6207GYrucSWWf3vCPEeFTN5MKCgWnQhMkV36lbGquCNQtYVViHMpLuYF9WuernX286OqNotP+F0skbBipedIgND8sSuTB2H5XK3N3bRRpX2DzU3aAzh25coUfyOO8+9UoyTLw/XYgxWFQIDAQAB",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8mpknjD5cVnog/u9dseMHDxF6FR6EoSsw+ANNoPYetkJn4Nv6BxSOZtPexH3hqUPCL0amgbp1FkgsKur3dmat1qhq3YSDewXWGLxZBRT4PXSmunEtQqwACNya00jb9KIGVEbZsHHIFy5WojtffXgbQcXlr3SzK/lHVwl+RWxWrzm+7scPZoTCh8+zvNUD8Sx56RSx01GIhE1xFrIj02o7Xp3UZDwZV+t9dZKaeSnpivJ8iub/F+cIy6SO396L99D3aLvQFWkh/3lbv14RaljJvZ2KMRjONSGHPHKLyubuJ5cXk0h+JXjBT4kEX/vF3hHmh8X/nASTiMdLjGLmi+UKQIDAQAB",
   "minimum_chrome_version": "116",
   "permissions": [
     "storage",

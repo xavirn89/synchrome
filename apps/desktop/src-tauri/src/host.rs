@@ -24,7 +24,7 @@ use synchrome_bridge::{
 };
 use synchrome_cloud::ReqwestRest;
 use synchrome_state::{ApplyPlan, CaptureError, CaptureOutcome, ExtPlan, Source};
-use synchrome_types::synchrome_extension_origin;
+use synchrome_types::synchrome_extension_origins;
 use uuid::Uuid;
 
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
@@ -62,7 +62,7 @@ fn parent_pid() -> u32 {
 
 /// Entry point for host mode. Returns the process exit code.
 pub fn run(origin: &str) -> i32 {
-    if origin != synchrome_extension_origin() {
+    if !synchrome_extension_origins().iter().any(|o| o == origin) {
         log(&format!("rejected origin {origin:?}"));
         return 2;
     }

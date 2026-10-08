@@ -2,13 +2,22 @@
   "supportEmail": "xavirn.me@gmail.com",
   "privacyUrl": "https://www.garduc.com/synchrome/privacy/",
   "publisherDashboard": "https://chrome.google.com/webstore/devconsole/3c311759-0fb3-4d94-a190-6d10b742247b",
-  "storeItemId": null,
-  "storePublicKey": null,
-  "status": "prepared-locally",
+  "storeItemId": "ceflmoojogokmklgcmcihdgakbefgiee",
+  "storePublicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8mpknjD5cVnog/u9dseMHDxF6FR6EoSsw+ANNoPYetkJn4Nv6BxSOZtPexH3hqUPCL0amgbp1FkgsKur3dmat1qhq3YSDewXWGLxZBRT4PXSmunEtQqwACNya00jb9KIGVEbZsHHIFy5WojtffXgbQcXlr3SzK/lHVwl+RWxWrzm+7scPZoTCh8+zvNUD8Sx56RSx01GIhE1xFrIj02o7Xp3UZDwZV+t9dZKaeSnpivJ8iub/F+cIy6SO396L99D3aLvQFWkh/3lbv14RaljJvZ2KMRjONSGHPHKLyubuJ5cXk0h+JXjBT4kEX/vF3hHmh8X/nASTiMdLjGLmi+UKQIDAQAB",
+  "status": "draft-created",
   "privacyPagePublished": true,
-  "nativeStoreCompatibilityVerified": false,
+  "nativeStoreCompatibilityVerified": true,
   "reviewSubmitted": false,
   "publicationDeferred": true,
   "privacyDeploymentRepository": "https://github.com/xavirn89/garduc",
-  "privacyDeploymentCommit": "68044fa"
+  "privacyDeploymentCommit": "68044fa",
+  "legacyExtensionIds": [
+    "gmpmcnknoaogpjdoonlddhpdpgkebbog"
+  ],
+  "nativeStoreCompatibilityEvidence": "tests/experiments/e2e_store_id.py 7/7 (Helium + Chrome 154, store id and pre-store id accepted, foreign origin rejected); app 1.0.3",
+  "storePackage": "Synchrome-1.0.3-ChromeWebStore.zip",
+  "appVersionRequired": "1.0.3",
+  "authenticatedStoreIdE2E": false,
+  "notarized": false,
+  "publicDownloadUrl": null
 }

@@ -8,7 +8,7 @@ use synchrome_bridge::{
 };
 use synchrome_browser::{write_extension_setting, ExtStorageError, WriteReport};
 use synchrome_cloud::{Mapping, MappingStatus, MappingSummary};
-use synchrome_types::{MAPPING_TOKEN_STORAGE_KEY, SYNCHROME_EXTENSION_ID};
+use synchrome_types::{LEGACY_EXTENSION_IDS, MAPPING_TOKEN_STORAGE_KEY, SYNCHROME_EXTENSION_ID};
 
 /// What the UI shows for a mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -92,6 +92,18 @@ fn reason(e: &ExtStorageError) -> String {
     }
 }
 
+/// Pre-store companion ids that already have a local store in this browser profile (an old
+/// unpacked companion is, or was, installed there): they get the token as well.
+pub fn legacy_token_targets(user_data_dir: &Path, profile_dir: &str) -> Vec<&'static str> {
+    LEGACY_EXTENSION_IDS
+        .iter()
+        .copied()
+        .filter(|id| {
+            synchrome_browser::extension_store_path(user_data_dir, profile_dir, id).exists()
+        })
+        .collect()
+}
+
 /// Write `mapping`'s token into `<user_data_dir>/<dir>/Local Extension Settings/<ext-id>` and
 /// record the outcome in the local registry (hash only). Errors are user-facing strings.
 pub fn write_token_local(
@@ -103,6 +115,18 @@ pub fn write_token_local(
     let value = serde_json::to_string(mapping.mapping_token.expose()).map_err(|e| e.to_string())?;
     let reg = registry();
     let previous = reg.find_by_mapping(mapping.id);
+    // a profile that still runs the pre-store companion keeps working: its store gets the
+    // token too (only when that store already exists — nothing is created for an old id)
+    for legacy in legacy_token_targets(user_data_dir, &mapping.browser_profile_dir) {
+        let _ = write_extension_setting(
+            user_data_dir,
+            &mapping.browser_profile_dir,
+            legacy,
+            MAPPING_TOKEN_STORAGE_KEY,
+            &value,
+            &backups,
+        );
+    }
     match write_extension_setting(
         user_data_dir,
         &mapping.browser_profile_dir,
@@ -151,5 +175,32 @@ pub fn write_token_local(
             let _ = reg.upsert(rec);
             Err(msg)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_store_gets_the_token_only_where_the_old_companion_already_has_one() {
+        let udd = std::env::temp_dir().join(format!("synchrome-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&udd);
+        std::fs::create_dir_all(udd.join("Default")).unwrap();
+        assert!(
+            legacy_token_targets(&udd, "Default").is_empty(),
+            "nothing created for an old id"
+        );
+        let old = synchrome_browser::extension_store_path(&udd, "Default", LEGACY_EXTENSION_IDS[0]);
+        std::fs::create_dir_all(&old).unwrap();
+        assert_eq!(
+            legacy_token_targets(&udd, "Default"),
+            [LEGACY_EXTENSION_IDS[0]]
+        );
+        assert!(
+            legacy_token_targets(&udd, "Profile 2").is_empty(),
+            "per profile"
+        );
+        let _ = std::fs::remove_dir_all(&udd);
     }
 }

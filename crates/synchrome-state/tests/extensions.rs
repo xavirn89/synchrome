@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 const X: &str = "aaaabbbbccccddddeeeeffffgggghhhh";
 const Y: &str = "ppppoooonnnnmmmmllllkkkkjjjjiiii";
-const ME: &str = "gmpmcnknoaogpjdoonlddhpdpgkebbog";
+const ME: &str = "ceflmoojogokmklgcmcihdgakbefgiee";
+const LEGACY: &str = "gmpmcnknoaogpjdoonlddhpdpgkebbog";
 
 fn info(id: &str, name: &str, install_type: &str) -> ExtInfo {
     ExtInfo {
@@ -233,6 +234,8 @@ async fn snapshot_with_several_extensions_publishes_their_inventory_only() {
 async fn synchrome_itself_apps_and_policy_extensions_are_never_published() {
     let (w, mut a, _b) = two().await;
     a.m.add(info(ME, "Synchrome", "development"));
+    // the pre-store companion (unpacked 1.0.0–1.0.2) is the same app: never published either
+    a.m.add(info(LEGACY, "Synchrome (old)", "development"));
     let mut app = info(Y, "An app", "normal");
     app.kind = "hosted_app".into();
     a.m.add(app);

@@ -17,9 +17,30 @@ pub fn user_agent() -> String {
     format!("Synchrome/{VERSION}")
 }
 
-/// Stable id of the Synchrome companion extension, pinned by the public `key` in
-/// `apps/extension/manifest.json`. Native messaging only accepts this origin.
-pub const SYNCHROME_EXTENSION_ID: &str = "gmpmcnknoaogpjdoonlddhpdpgkebbog";
+/// Id of the Synchrome companion extension: its Chrome Web Store item, also pinned for unpacked
+/// development builds by the store's public `key` in `apps/extension/manifest.json`.
+pub const SYNCHROME_EXTENSION_ID: &str = "ceflmoojogokmklgcmcihdgakbefgiee";
+
+/// Ids the companion had before its store listing (unpacked installs of 1.0.0–1.0.2). Still
+/// accepted so existing browser connections keep working; nothing new is created for them.
+pub const LEGACY_EXTENSION_IDS: &[&str] = &["gmpmcnknoaogpjdoonlddhpdpgkebbog"];
+
+/// Every id the companion may have (current first).
+pub fn synchrome_extension_ids() -> impl Iterator<Item = &'static str> {
+    std::iter::once(SYNCHROME_EXTENSION_ID).chain(LEGACY_EXTENSION_IDS.iter().copied())
+}
+
+/// Whether `id` is (any version of) the Synchrome companion itself.
+pub fn is_synchrome_extension_id(id: &str) -> bool {
+    synchrome_extension_ids().any(|x| x == id)
+}
+
+/// Origins native messaging accepts: the companion under every id it may have.
+pub fn synchrome_extension_origins() -> Vec<String> {
+    synchrome_extension_ids()
+        .map(|id| format!("chrome-extension://{id}/"))
+        .collect()
+}
 
 /// Native messaging host name registered for the extension (`connectNative` target).
 pub const NATIVE_HOST_NAME: &str = "com.synchrome.host";
@@ -127,6 +148,38 @@ pub struct DiscoveredProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_ids_current_first_and_legacy_still_accepted() {
+        let ids: Vec<&str> = synchrome_extension_ids().collect();
+        assert_eq!(
+            ids,
+            [
+                "ceflmoojogokmklgcmcihdgakbefgiee",
+                "gmpmcnknoaogpjdoonlddhpdpgkebbog"
+            ]
+        );
+        assert!(is_synchrome_extension_id(
+            "ceflmoojogokmklgcmcihdgakbefgiee"
+        ));
+        assert!(is_synchrome_extension_id(
+            "gmpmcnknoaogpjdoonlddhpdpgkebbog"
+        ));
+        assert!(!is_synchrome_extension_id(
+            "abcdefghijklmnopabcdefghijklmnop"
+        ));
+        assert_eq!(
+            synchrome_extension_origins(),
+            [
+                "chrome-extension://ceflmoojogokmklgcmcihdgakbefgiee/",
+                "chrome-extension://gmpmcnknoaogpjdoonlddhpdpgkebbog/"
+            ]
+        );
+        assert_eq!(
+            synchrome_extension_origin(),
+            synchrome_extension_origins()[0]
+        );
+    }
 
     #[test]
     fn user_agent_is_branded() {

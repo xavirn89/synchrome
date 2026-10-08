@@ -433,6 +433,9 @@ fn process(
     let mut out = Vec::new();
     let mut seen_now: HashSet<String> = HashSet::new();
     for info in observed {
+        if synchrome_types::is_synchrome_extension_id(&info.id) {
+            continue; // the companion itself (store or pre-store id) is never synchronised
+        }
         match ex::classify(info, synchrome_id()) {
             Class::Ignored => continue,
             Class::Protected => {
@@ -612,7 +615,7 @@ pub(crate) fn apply_remote_op(
     op: &Op,
     now: i64,
 ) -> Result<bool, StateError> {
-    if !ex::valid_id(&op.id) || op.id == synchrome_id() {
+    if !ex::valid_id(&op.id) || synchrome_types::is_synchrome_extension_id(&op.id) {
         return Ok(false);
     }
     let row = load(tx, pid, &op.id)?;

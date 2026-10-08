@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn classification_excludes_self_apps_and_policy() {
-        let me = "gmpmcnknoaogpjdoonlddhpdpgkebbog";
+        let me = "ceflmoojogokmklgcmcihdgakbefgiee";
         assert_eq!(classify(&info(ID, "normal", None), me), Class::Synced);
         assert_eq!(classify(&info(me, "development", None), me), Class::Ignored);
         assert_eq!(classify(&info(ID, "admin", None), me), Class::Protected);

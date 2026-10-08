@@ -14,8 +14,11 @@ Synchrome is a macOS companion extension. Chrome 116+ and a separate macOS Synch
 Public privacy policy: https://www.garduc.com/synchrome/privacy/
 
 Prerequisites currently outstanding:
-- Public macOS app download URL, with the official store extension ID supported.
-- Official CWS item ID and public key incorporated into a tested native compatibility update.
+- Public download URL of the Synchrome macOS app 1.0.3 or later (the first version that accepts
+  the store item id `ceflmoojogokmklgcmcihdgakbefgiee`), preferably notarized.
 - Reviewer account if self-service registration is insufficient for review.
+
+Done: official CWS item id and public key incorporated (app 1.0.3; development manifest uses the
+store key, so unpacked and store builds share the id; the pre-store id stays accepted).
 
 Do not submit a package claiming compatibility with the current local/unpacked ID without checking its actual CWS item ID. Never change/delete personal browser data for review testing.

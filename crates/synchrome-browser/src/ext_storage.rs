@@ -515,7 +515,7 @@ pub fn apply_extension_area(
 mod tests {
     use super::*;
 
-    const EXT: &str = "gmpmcnknoaogpjdoonlddhpdpgkebbog";
+    const EXT: &str = "ceflmoojogokmklgcmcihdgakbefgiee";
 
     fn seed_store(udd: &Path, profile: &str, kv: &[(&str, &str)]) {
         let store = extension_store_path(udd, profile, EXT);
