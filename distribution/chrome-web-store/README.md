@@ -3,6 +3,8 @@
 Support: xavirn.me@gmail.com
 Privacy URL reserved: https://www.garduc.com/synchrome/privacy/
 
+Step-by-step publication guide (Spanish, current order of operations): `GUIA-PUBLICACION.md`.
+
 Files:
 - `listing.md`: store name, short and full descriptions.
 - `privacy-disclosures.md`: actual permission/data explanations for the dashboard.
