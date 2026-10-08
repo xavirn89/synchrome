@@ -21,8 +21,11 @@ Store, con tu cuenta) o **yo** (en el repo / la app).
   clave de la tienda, paquete nuevo `dist/chrome-web-store/Synchrome-1.0.3-ChromeWebStore.zip`
   (súbelo con **Package → Upload new package**), DMG firmado
   `target/release/bundle/dmg/Synchrome_1.0.3_aarch64.dmg`. E2E de identidad 7/7.
-- Pendiente: notarización (fase 4.1), URL pública del DMG (fase 4.2), E2E con cuenta usando el ID
-  oficial (necesito un fichero de credenciales de prueba), enviar a revisión (fase 6).
+- Fase 4 hecha: app y DMG 1.0.3 **notarizados y grapados** (Gatekeeper: «Notarized Developer
+  ID»), publicados en el repo público https://github.com/xavirn89/synchrome →
+  `https://github.com/xavirn89/synchrome/releases/download/v1.0.3/Synchrome_1.0.3_aarch64.dmg`.
+- Pendiente: pegar esa URL en *Test instructions*, E2E con cuenta usando el ID oficial
+  (recomendado; necesito un fichero de credenciales de prueba) y enviar a revisión (fase 6).
 
 ## El punto crítico: el ID de la extensión
 

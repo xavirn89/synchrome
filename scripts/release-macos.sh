@@ -88,6 +88,14 @@ DMG=$(ls target/release/bundle/dmg/*.dmg | head -1)
 echo "app: $APP"
 echo "dmg: $DMG"
 
+if [[ $NOTARIZE == 1 && -n "${APPLE_API_KEY:-}" ]]; then
+  # Tauri notarizes the .app; the DMG itself is notarized and stapled here too
+  echo "--- notarize + staple the DMG"
+  xcrun notarytool submit "$DMG" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait | grep -E "status:|id:"
+  xcrun stapler staple "$DMG"
+  spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG" || true
+fi
+
 echo "--- codesign"
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "^(Authority|TeamIdentifier|Identifier|Runtime|Timestamp)" || true

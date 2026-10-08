@@ -18,6 +18,8 @@
   "storePackage": "Synchrome-1.0.3-ChromeWebStore.zip",
   "appVersionRequired": "1.0.3",
   "authenticatedStoreIdE2E": false,
-  "notarized": false,
-  "publicDownloadUrl": null
+  "notarized": true,
+  "publicDownloadUrl": "https://github.com/xavirn89/synchrome/releases/download/v1.0.3/Synchrome_1.0.3_aarch64.dmg",
+  "publicReleasePage": "https://github.com/xavirn89/synchrome/releases/tag/v1.0.3",
+  "dmgSha256": "73db92f390340030efa4\u2026"
 }
