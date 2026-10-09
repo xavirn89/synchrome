@@ -19,7 +19,7 @@ pub use ext_storage::{
     read_extension_area, read_extension_settings, read_store_copy, write_extension_setting, Area,
     BatchReport, ExtStorageError, WriteReport,
 };
-pub use native_host::{host_manifest, install_native_host};
+pub use native_host::{host_manifest, install_native_host, refresh_native_host};
 #[cfg(target_os = "macos")]
 pub use paths::open_in_profile_args;
 pub use paths::user_data_dir;

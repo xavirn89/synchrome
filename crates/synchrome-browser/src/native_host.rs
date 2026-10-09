@@ -35,9 +35,60 @@ pub fn install_native_host(user_data_dir: &Path, host_path: &Path) -> std::io::R
     Ok(target)
 }
 
+/// Bring an EXISTING Synchrome host manifest up to date (path of this app, current allowed
+/// origins). A browser without the manifest is left alone (installing the connector stays a
+/// user action). Returns whether the file was rewritten.
+pub fn refresh_native_host(user_data_dir: &Path, host_path: &Path) -> std::io::Result<bool> {
+    let target = user_data_dir
+        .join("NativeMessagingHosts")
+        .join(format!("{NATIVE_HOST_NAME}.json"));
+    let Ok(bytes) = std::fs::read(&target) else {
+        return Ok(false);
+    };
+    let current: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
+    if current.as_ref() == Some(&host_manifest(host_path)) {
+        return Ok(false);
+    }
+    install_native_host(user_data_dir, host_path).map(|_| true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_updates_only_an_existing_outdated_manifest() {
+        let udd = tempfile::tempdir().unwrap();
+        let host = Path::new("/Applications/Synchrome.app/Contents/MacOS/synchrome-desktop");
+        // no connector installed: nothing is created
+        assert!(!refresh_native_host(udd.path(), host).unwrap());
+        assert!(!udd.path().join("NativeMessagingHosts").exists());
+        // a 1.0.2 manifest (pre-store origin only) is rewritten with the current origins
+        let dir = udd.path().join("NativeMessagingHosts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = serde_json::json!({
+            "name": NATIVE_HOST_NAME, "description": "Synchrome native messaging host",
+            "path": host.display().to_string(), "type": "stdio",
+            "allowed_origins": ["chrome-extension://gmpmcnknoaogpjdoonlddhpdpgkebbog/"],
+        });
+        let file = dir.join(format!("{NATIVE_HOST_NAME}.json"));
+        std::fs::write(&file, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(refresh_native_host(udd.path(), host).unwrap());
+        let now: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(now, host_manifest(host));
+        // already current: untouched
+        let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        assert!(!refresh_native_host(udd.path(), host).unwrap());
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), mtime);
+        // a manifest pointing at another copy of the app is repointed
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&host_manifest(Path::new("/Volumes/Synchrome/x"))).unwrap(),
+        )
+        .unwrap();
+        assert!(refresh_native_host(udd.path(), host).unwrap());
+    }
 
     #[test]
     fn manifest_allows_only_the_synchrome_extension() {

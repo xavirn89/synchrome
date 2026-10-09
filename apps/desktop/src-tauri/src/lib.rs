@@ -168,6 +168,23 @@ fn app_location() -> AppLocation {
     }
 }
 
+fn refresh_installed_connectors() {
+    if !app_location().stable {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut dirs: Vec<std::path::PathBuf> = BrowserKind::all()
+        .iter()
+        .filter_map(|&k| synchrome_browser::user_data_dir(k))
+        .collect();
+    dirs.extend(extra_browser_dirs().into_iter().map(|x| x.user_data_dir));
+    for udd in dirs {
+        let _ = synchrome_browser::refresh_native_host(&udd, &exe);
+    }
+}
+
 #[tauri::command]
 fn install_location() -> AppLocation {
     app_location()
@@ -997,6 +1014,10 @@ pub fn run() {
         .setup(|_app| {
             #[cfg(debug_assertions)]
             start_dev_ui_driver(_app);
+            // Connectors installed by an earlier version (other path, fewer allowed origins —
+            // e.g. before the Chrome Web Store id) are brought up to date. Only existing
+            // Synchrome manifests, and only from a stable install location.
+            std::thread::spawn(refresh_installed_connectors);
             // Realtime wake-up: one connection for the account signed in at startup (if any)
             realtime::start();
             {
