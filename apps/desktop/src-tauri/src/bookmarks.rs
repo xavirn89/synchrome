@@ -343,7 +343,74 @@ pub async fn sync_all(
         )
         .await;
     }
+    // connections made with the pre-store companion: hand their token to the store companion
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        reseed_store_companions(state),
+    )
+    .await;
     out
+}
+
+/// Connections whose store companion was already seen holding its token (no further reads).
+static COMPANION_TOKEN_OK: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<Uuid>>> =
+    std::sync::OnceLock::new();
+
+/// Give the Chrome Web Store companion the connection token where a confirmed connection was
+/// made with the pre-store companion (browser closed only; nothing for absent companions).
+pub async fn reseed_store_companions(state: &AppState) {
+    let ok = COMPANION_TOKEN_OK.get_or_init(Default::default);
+    let Ok(account) = current_account(state) else {
+        return;
+    };
+    let pending: Vec<synchrome_bridge::LocalTokenRecord> = crate::local_token::registry()
+        .load()
+        .into_iter()
+        .filter(|r| r.account_id == account && r.state != synchrome_bridge::LocalTokenState::Failed)
+        .filter(|r| {
+            !ok.lock()
+                .map(|s| s.contains(&r.mapping_id))
+                .unwrap_or(false)
+        })
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let mut mappings: Option<Vec<synchrome_cloud::Mapping>> = None;
+    for r in pending {
+        let udd = std::path::PathBuf::from(&r.user_data_dir);
+        let store = synchrome_browser::extension_store_path(
+            &udd,
+            &r.profile_dir,
+            synchrome_types::SYNCHROME_EXTENSION_ID,
+        );
+        if !store.exists() || synchrome_browser::is_browser_running(&udd) {
+            continue; // not installed there / not now
+        }
+        if !crate::local_token::store_companion_missing_token(&udd, &r.profile_dir) {
+            if let Ok(mut s) = ok.lock() {
+                s.insert(r.mapping_id);
+            }
+            continue;
+        }
+        if mappings.is_none() {
+            let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
+                return;
+            };
+            mappings = cloud.list_mappings(&session).await.ok();
+        }
+        let me = state.device().map(|d| d.device_id).ok();
+        if let Some(m) = mappings.as_ref().and_then(|all| {
+            all.iter()
+                .find(|m| m.id == r.mapping_id && Some(m.device_id) == me)
+        }) {
+            if crate::local_token::write_token_local(m, &account, &udd).is_ok() {
+                if let Ok(mut s) = ok.lock() {
+                    s.insert(r.mapping_id);
+                }
+            }
+        }
+    }
 }
 
 /// Extensions counts of a profile on this device (None when unknown).

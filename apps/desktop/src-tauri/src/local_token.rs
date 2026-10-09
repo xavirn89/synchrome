@@ -92,6 +92,21 @@ fn reason(e: &ExtStorageError) -> String {
     }
 }
 
+/// Whether the Chrome Web Store companion of this browser profile still lacks the connection
+/// token: its store exists (the store companion is installed there), the browser is closed and
+/// no token is stored yet. This happens when a profile connected through the pre-store companion
+/// switches to the store one (the old companion's storage goes away with it).
+pub fn store_companion_missing_token(user_data_dir: &Path, profile_dir: &str) -> bool {
+    let store =
+        synchrome_browser::extension_store_path(user_data_dir, profile_dir, SYNCHROME_EXTENSION_ID);
+    if !store.exists() || synchrome_browser::is_browser_running(user_data_dir) {
+        return false;
+    }
+    synchrome_browser::read_extension_settings(user_data_dir, profile_dir, SYNCHROME_EXTENSION_ID)
+        .map(|kv| !kv.contains_key(MAPPING_TOKEN_STORAGE_KEY))
+        .unwrap_or(false)
+}
+
 /// Pre-store companion ids that already have a local store in this browser profile (an old
 /// unpacked companion is, or was, installed there): they get the token as well.
 pub fn legacy_token_targets(user_data_dir: &Path, profile_dir: &str) -> Vec<&'static str> {
@@ -181,6 +196,43 @@ pub fn write_token_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_store_companion_without_the_connection_token_is_detected_only_when_installed() {
+        let udd = std::env::temp_dir().join(format!("synchrome-reseed-{}", std::process::id()));
+        let backups = udd.join("backups");
+        let _ = std::fs::remove_dir_all(&udd);
+        std::fs::create_dir_all(udd.join("Default")).unwrap();
+        assert!(
+            !store_companion_missing_token(&udd, "Default"),
+            "store companion not installed"
+        );
+        // the store companion ran there (its storage exists) but holds no connection token
+        write_extension_setting(
+            &udd,
+            "Default",
+            SYNCHROME_EXTENSION_ID,
+            "synchromeStatus",
+            "{}",
+            &backups,
+        )
+        .unwrap();
+        assert!(store_companion_missing_token(&udd, "Default"));
+        write_extension_setting(
+            &udd,
+            "Default",
+            SYNCHROME_EXTENSION_ID,
+            MAPPING_TOKEN_STORAGE_KEY,
+            "\"t\"",
+            &backups,
+        )
+        .unwrap();
+        assert!(
+            !store_companion_missing_token(&udd, "Default"),
+            "token present"
+        );
+        let _ = std::fs::remove_dir_all(&udd);
+    }
 
     #[test]
     fn legacy_store_gets_the_token_only_where_the_old_companion_already_has_one() {
