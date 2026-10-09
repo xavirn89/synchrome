@@ -210,3 +210,11 @@ test("onboarding FDA, error injection and unsupported commands remain explicit",
   await api.invoke("create_profile", { name: "Travel" });
   await assert.rejects(api.invoke("unsupported_command"), /does not implement/);
 });
+
+test("the companion store page opens only for a connection on this Mac", async () => {
+  const backend = createPreviewBackend("workspace");
+  const mine = (await backend.invoke("list_mappings")).find((m) => m.is_this_device);
+  assert.ok(mine, "the workspace scenario has a local connection");
+  assert.equal(await backend.invoke("open_companion_store", { mappingId: mine.id }), null);
+  await assert.rejects(() => backend.invoke("open_companion_store", { mappingId: "not-a-connection" }), /not on this Mac/);
+});

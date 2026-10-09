@@ -44,26 +44,26 @@ with 30 s polling fallback.
   identity (Team ID + bundle id): a different build (other CDHash) and a re-signed bundle keep it.
   Helium needs nothing. The native-messaging manifest folder (`NativeMessagingHosts`) is never
   protected.
-- *Companion extension*: shipped inside the app (`Contents/Resources/extension`, fixed id via
-  its manifest `key`); the user loads it once per browser profile (`chrome://extensions` →
-  Developer mode → Load unpacked). The app registers the native host per browser data folder and
-  refuses to do so from a disk image, a translocated copy or Documents/Desktop/Downloads.
+- *Companion extension*: published on the Chrome Web Store (item
+  `ceflmoojogokmklgcmcihdgakbefgiee`, unlisted, since 2026-10-09; the served CRX was verified
+  byte-identical to the uploaded package). Since app 1.0.4 setup opens its store page in the
+  connected browser profile; the same code also ships inside the app (`Contents/Resources/extension`,
+  same id via the store's public `key`) for a manual Load unpacked. The pre-store id
+  `gmpmcnknoaogpjdoonlddhpdpgkebbog` stays accepted (app ≥ 1.0.3). The app registers the native host
+  per browser data folder and refuses to do so from a disk image, a translocated copy or
+  Documents/Desktop/Downloads.
 
 **Conscious exclusions in 1.0.** Passwords, cookies, sessions (never); browsing History sync;
 tracked preferences (E2, MAC forging); IndexedDB / Local Storage of extensions; Windows and
-Linux; GitHub / folder / Drive / WebDAV / S3 stores; end-to-end encryption; Web Store
-publication of the companion and silent install through external-extension descriptors or
-policies; profile creation inside browsers; magic-link sign-in; automatic updates (1.0 updates
+Linux; GitHub / folder / Drive / WebDAV / S3 stores; end-to-end encryption; silent install of the companion through external-extension descriptors or policies; profile creation inside browsers; magic-link sign-in; automatic updates (1.0 updates
 are manual: replace the app in Applications — no updater plugin is configured, consciously).
 
 **Known limitations.**
-- The 1.0 DMG is signed with Developer ID but **not notarized** (EXTERNAL RELEASE CREDENTIAL
-  BLOCKER: no notary credentials on the build Mac). Until notarized, Gatekeeper on other Macs
-  refuses it ("Unnotarized Developer ID"); `scripts/release-macos.sh` notarizes and staples
-  automatically once `APPLE_API_KEY`/`APPLE_API_ISSUER`/`APPLE_API_KEY_PATH` (or
-  `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID`) are in the environment.
-- The companion runs as a developer-mode ("unpacked") extension; Chrome shows its usual notice
-  for those.
+- Notarization: resolved from 1.0.3 (2026-10-08). The app and the DMG are notarized and stapled
+  (Gatekeeper: "Notarized Developer ID"); `scripts/release-macos.sh` notarizes both when the App
+  Store Connect API key variables are set. Downloads: https://github.com/xavirn89/synchrome/releases.
+- The companion listing is **unlisted** on the Chrome Web Store (installable from its link, not
+  searchable); a manual unpacked install remains possible and shows Chrome's developer-mode notice.
 - Live applies (bookmarks, extension state) need the companion; extension settings and
   preferences apply only while the browser is closed.
 - The Realtime wake-up speeds up downloads; the browser applies them on the companion's next
@@ -77,8 +77,8 @@ are manual: replace the app in Applications — no updater plugin is configured,
 
 **Post-v1.** Tracked preferences (E2); IndexedDB and Local Storage of extensions; History sync;
 Windows (and Linux) validation and builds; tombstone GC (retention + bootstrap preview);
-optimisations for large snapshots (incremental/streamed parts, partial bootstrap); Web Store
-listing + silent companion install; Brave/Edge/Chromium end-to-end validation; notarization in
+optimisations for large snapshots (incremental/streamed parts, partial bootstrap); public
+(searchable) store listing + silent companion install; Brave/Edge/Chromium end-to-end validation; notarization in
 CI; updater (Tauri updater with signed update manifests); additional stores and E2E encryption.
 
 **Release closure evidence (2026-10-03).** `cargo fmt --check`, `cargo clippy -D warnings`,

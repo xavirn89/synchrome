@@ -16,6 +16,7 @@ Improve navigation, authentication, progressive setup, profile creation and impo
 - Removing a connection does not delete its browser profile. Deleting a Synchrome profile disconnects its cloud connections and invokes the existing safe cloud deletion service. Browser profiles, local bookmarks, and local browser files are retained.
 - Disconnecting all mappings and deleting are separate existing operations. Partial failures must refresh state and give truthful recovery guidance.
 - Device retirement only removes a device from compaction membership. It does not disconnect or stop synchronization.
+- The companion is published on the Chrome Web Store (item `ceflmoojogokmklgcmcihdgakbefgiee`, unlisted). Setup opens its store page in the connected browser profile; loading the bundled folder unpacked stays available as a manual fallback. The pre-store companion id keeps working for existing connections.
 
 ## Product direction
 

@@ -243,6 +243,11 @@ export function createPreviewBackend(scenario = "workspace", { delayMs = 0 } = {
       case "install_location": return { path: "/Applications/Synchrome.app/Contents/MacOS/synchrome-desktop", stable: true, reason: null };
       case "extension_folder": return "/Applications/Synchrome.app/Contents/Resources/extension";
       case "reveal_extension_folder": return null;
+      case "open_companion_store": {
+        const m = state.mappings.find((x) => x.id === args?.mappingId && x.is_this_device);
+        if (!m) throw new Error("This browser connection is not on this Mac.");
+        return null;
+      }
       case "open_full_disk_access_settings": return null;
       case "cloud_status": {
         const probe = { status: state.online ? 200 : null, latency_ms: state.online ? 42 : 0, outcome: state.online ? "ok" : "unreachable", error: state.online ? null : "offline" };

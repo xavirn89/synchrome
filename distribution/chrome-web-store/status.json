@@ -4,10 +4,10 @@
   "publisherDashboard": "https://chrome.google.com/webstore/devconsole/3c311759-0fb3-4d94-a190-6d10b742247b",
   "storeItemId": "ceflmoojogokmklgcmcihdgakbefgiee",
   "storePublicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8mpknjD5cVnog/u9dseMHDxF6FR6EoSsw+ANNoPYetkJn4Nv6BxSOZtPexH3hqUPCL0amgbp1FkgsKur3dmat1qhq3YSDewXWGLxZBRT4PXSmunEtQqwACNya00jb9KIGVEbZsHHIFy5WojtffXgbQcXlr3SzK/lHVwl+RWxWrzm+7scPZoTCh8+zvNUD8Sx56RSx01GIhE1xFrIj02o7Xp3UZDwZV+t9dZKaeSnpivJ8iub/F+cIy6SO396L99D3aLvQFWkh/3lbv14RaljJvZ2KMRjONSGHPHKLyubuJ5cXk0h+JXjBT4kEX/vF3hHmh8X/nASTiMdLjGLmi+UKQIDAQAB",
-  "status": "draft-created",
+  "status": "published-unlisted",
   "privacyPagePublished": true,
   "nativeStoreCompatibilityVerified": true,
-  "reviewSubmitted": false,
+  "reviewSubmitted": true,
   "publicationDeferred": true,
   "privacyDeploymentRepository": "https://github.com/xavirn89/garduc",
   "privacyDeploymentCommit": "68044fa",
@@ -21,5 +21,11 @@
   "notarized": true,
   "publicDownloadUrl": "https://github.com/xavirn89/synchrome/releases/download/v1.0.3/Synchrome_1.0.3_aarch64.dmg",
   "publicReleasePage": "https://github.com/xavirn89/synchrome/releases/tag/v1.0.3",
-  "dmgSha256": "73db92f390340030efa4\u2026"
+  "dmgSha256": "73db92f390340030efa4\u2026",
+  "published": true,
+  "publishedVersion": "1.0.3",
+  "visibility": "unlisted",
+  "listingUrl": "https://chromewebstore.google.com/detail/synchrome/ceflmoojogokmklgcmcihdgakbefgiee",
+  "storeCrxVerified": "2026-10-09: CRX3 signed for ceflmoojogokmklgcmcihdgakbefgiee; code/assets byte-identical to Synchrome-1.0.3-ChromeWebStore.zip; manifest adds only update_url",
+  "appStoreSetupFromVersion": "1.0.4"
 }

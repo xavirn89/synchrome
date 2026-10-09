@@ -27,6 +27,11 @@ Store, con tu cuenta) o **yo** (en el repo / la app).
 - Pendiente: pegar esa URL en *Test instructions*, E2E con cuenta usando el ID oficial
   (recomendado; necesito un fichero de credenciales de prueba) y enviar a revisión (fase 6).
 
+- **Publicada (unlisted) el 9 de octubre**, versión 1.0.3:
+  https://chromewebstore.google.com/detail/synchrome/ceflmoojogokmklgcmcihdgakbefgiee — el CRX que
+  sirve Google está firmado con este ID y su código es idéntico byte a byte al paquete subido.
+  La app 1.0.4 abre esta página en el perfil del navegador durante la conexión.
+
 ## El punto crítico: el ID de la extensión
 
 La app nativa solo acepta conexiones de la extensión con ID `gmpmcnknoaogpjdoonlddhpdpgkebbog`

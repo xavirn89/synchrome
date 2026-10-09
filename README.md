@@ -8,9 +8,10 @@ Synchrome is a desktop application that keeps your Chromium browser profiles syn
 
 **[Latest release](https://github.com/xavirn89/synchrome/releases/latest)** — notarized macOS app
 (`Synchrome_<version>_aarch64.dmg`, Apple silicon, macOS 12+). Open the DMG, drag Synchrome to
-Applications and open it from there. Companion extension: Chrome Web Store item
-`ceflmoojogokmklgcmcihdgakbefgiee` (listing coming soon); until then it ships inside the app
-(`Synchrome.app/Contents/Resources/extension`, load it with *Developer mode → Load unpacked*).
+Applications and open it from there. Companion extension:
+[Chrome Web Store](https://chromewebstore.google.com/detail/synchrome/ceflmoojogokmklgcmcihdgakbefgiee)
+(the app opens it in the right browser profile during setup; a copy also ships inside the app for
+manual *Load unpacked* installs).
 Privacy policy: https://www.garduc.com/synchrome/privacy/ · Support: xavirn.me@gmail.com ·
 License: [MIT](LICENSE).
 
@@ -66,9 +67,10 @@ Data lives in Synchrome Cloud (the project's private Supabase). Other stores (Gi
    profile as the initial source. *Start fresh* creates an unconnected Synchrome profile;
    *Connect browser* links a browser to an existing one. Each Synchrome profile supports one
    browser connection per Mac. Close the browser when the setup flow asks you to.
-5. In **Finish setup**, choose **Install connector**, then restart the browser. Open
-   `chrome://extensions`, enable *Developer mode*, choose *Load unpacked*, and select the folder
-   revealed by **Show companion folder** (`Synchrome.app/Contents/Resources/extension`).
+5. In **Finish setup**, choose **Install connector**, then restart the browser. Choose
+   **Open Chrome Web Store**: the companion's store page opens in that browser profile; choose
+   *Add to Chrome*. (Manual fallback: *Install it manually instead* reveals the bundled folder for
+   `chrome://extensions` → *Developer mode* → *Load unpacked*.)
    Open the companion popup and choose **Check connection** in Synchrome. Wait for the first
    sync to complete; a stored connection alone does not mean browser data has been imported.
 6. Bookmarks and extension state can then sync live. Extension settings and supported browser

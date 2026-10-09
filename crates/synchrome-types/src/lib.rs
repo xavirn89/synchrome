@@ -21,6 +21,10 @@ pub fn user_agent() -> String {
 /// development builds by the store's public `key` in `apps/extension/manifest.json`.
 pub const SYNCHROME_EXTENSION_ID: &str = "ceflmoojogokmklgcmcihdgakbefgiee";
 
+/// Chrome Web Store page of the companion (listed, unlisted visibility).
+pub const SYNCHROME_STORE_URL: &str =
+    "https://chromewebstore.google.com/detail/synchrome/ceflmoojogokmklgcmcihdgakbefgiee";
+
 /// Ids the companion had before its store listing (unpacked installs of 1.0.0–1.0.2). Still
 /// accepted so existing browser connections keep working; nothing new is created for them.
 pub const LEGACY_EXTENSION_IDS: &[&str] = &["gmpmcnknoaogpjdoonlddhpdpgkebbog"];

@@ -348,6 +348,14 @@
     try { location = await invoke("install_location"); } catch { location = null; }
     try { extFolder = await invoke("extension_folder"); extFolderError = null; } catch (e) { extFolder = null; extFolderError = String(e); }
   }
+  let storeMsg = $state({});
+  async function openCompanionStore(m) {
+    actionError = null;
+    try {
+      await invoke("open_companion_store", { mappingId: m.id });
+      storeMsg = { ...storeMsg, [m.id]: `Opened in ${browserName(m.browser_kind)}. After adding it, come back and check the connection.` };
+    } catch (e) { actionError = String(e); }
+  }
   async function revealExtension() {
     try { await invoke("reveal_extension_folder"); } catch (e) { actionError = String(e); }
   }
@@ -997,7 +1005,7 @@
     {#if setupMapping.display_status==='pending_local_write'||setupMapping.display_status==='error'}<div class="setup-step"><span class="step-number">1</span><div><h3>Close the browser and write its connection.</h3><p>The link is stored only in the Synchrome companion’s own browser storage.</p><button class="button primary" onclick={()=>retryWrite(setupMapping)} disabled={!!busyKey}>Retry link</button></div></div>
     {:else if setupMapping.display_status!=='extension_confirmed'}
       <div class="setup-step"><span class="step-number">1</span><div><h3>Install the browser connector.</h3><p>Do this once for {browserName(setupMapping.browser_kind)}, then restart the browser.</p>{#if !location?.stable}<p class="form-error">{location?.reason??'Move Synchrome to Applications first.'}</p>{/if}<button class="button secondary" onclick={()=>installConnector(setupBrowser)} disabled={!setupBrowser||!!busyKey||!location?.stable}>Install connector</button>{#if connectorMsg[setupMapping.browser_kind]}<p class="small" role="status">{connectorMsg[setupMapping.browser_kind]}</p>{/if}</div></div>
-      <div class="setup-step"><span class="step-number">2</span><div><h3>Load the Synchrome companion.</h3><p>In this browser, open <code>chrome://extensions</code>, turn on Developer mode, then choose Load unpacked and select the companion folder. Open its popup once to confirm the connection.</p><button class="button secondary" onclick={revealExtension} disabled={!extFolder}>Show companion folder<Icon name="external" size={15}/></button></div></div>
+      <div class="setup-step"><span class="step-number">2</span><div><h3>Add the Synchrome companion.</h3><p>Open its Chrome Web Store page in this browser profile, choose <strong>Add to Chrome</strong>, then open the companion’s popup once to confirm the connection.</p><button class="button secondary" onclick={()=>openCompanionStore(setupMapping)} disabled={!!busyKey}>Open Chrome Web Store<Icon name="external" size={15}/></button>{#if storeMsg[setupMapping.id]}<p class="small" role="status">{storeMsg[setupMapping.id]}</p>{/if}<details class="privacy-details"><summary>Install it manually instead</summary><p>Open <code>chrome://extensions</code>, turn on Developer mode, choose Load unpacked and select the companion folder that ships with Synchrome.</p><button class="button quiet" onclick={revealExtension} disabled={!extFolder}>Show companion folder<Icon name="external" size={15}/></button></details></div></div>
       <div class="setup-step"><span class="step-number">3</span><div><h3>Confirm your first sync.</h3><p>After the companion connects, Synchrome receives your browser data. This step stays pending until an actual sync completes.</p><button class="button primary" onclick={()=>checkExtension(setupMapping)} disabled={!!busyKey}>Check connection<Icon name="refresh" size={16}/></button></div></div>
     {:else}<div class="setup-step"><span class="step-number"><Icon name="check" size={18}/></span><div><h3>Companion connected. Waiting for first sync.</h3><p>Open the browser and its companion to send the first bookmarks. You can check again or sync now.</p><button class="button primary" onclick={()=>uploadNow(setupMapping)} disabled={!!busyKey}>Sync now</button><button class="button quiet" onclick={()=>checkExtension(setupMapping)} disabled={!!busyKey}>Check connection</button></div></div>{/if}
     {#if actionError}{@render errorNotice(actionError)}{/if}<div class="dialog-footer"><button class="button quiet" onclick={closeModal} disabled={!!busyKey}>Continue later</button></div>

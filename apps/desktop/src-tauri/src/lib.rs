@@ -234,6 +234,51 @@ fn reveal_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Open the companion's Chrome Web Store page in the browser profile of one of this Mac's
+/// connections (that browser, that profile — never another one), so the user adds it there.
+#[tauri::command]
+async fn open_companion_store(state: State<'_, AppState>, mapping_id: Uuid) -> Result<(), String> {
+    let session = state.session().await?;
+    let me = state.device()?.device_id;
+    let m = state
+        .cloud()?
+        .list_mappings(&session)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|m| m.id == mapping_id && m.device_id == me)
+        .ok_or_else(|| "This browser connection is not on this Mac.".to_string())?;
+    let udd = udd_for(&m, None).ok_or_else(|| "unsupported platform".to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        let args = synchrome_browser::open_in_profile_args(
+            m.browser_kind,
+            &udd,
+            &m.browser_profile_dir,
+            synchrome_types::SYNCHROME_STORE_URL,
+        )
+        .ok_or_else(|| {
+            format!(
+                "{} is not installed in Applications.",
+                m.browser_kind.display_name()
+            )
+        })?;
+        let ok = std::process::Command::new("/usr/bin/open")
+            .args(&args)
+            .status()
+            .map_err(|e| e.to_string())?
+            .success();
+        if !ok {
+            return Err(format!(
+                "{} could not be opened.",
+                m.browser_kind.display_name()
+            ));
+        }
+    }
+    let _ = udd;
+    Ok(())
+}
+
 /// Open System Settings → Privacy & Security → Full Disk Access (macOS shows no prompt for
 /// it; the user adds Synchrome there).
 #[tauri::command]
@@ -1002,6 +1047,7 @@ pub fn run() {
             install_location,
             extension_folder,
             reveal_extension_folder,
+            open_companion_store,
             open_full_disk_access_settings,
             mapping_for_local_profile,
             mapping_for_cloud_profile,
