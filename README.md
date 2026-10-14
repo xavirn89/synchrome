@@ -168,7 +168,7 @@ profile supports one browser connection per Mac.
 
 ## What syncs
 
-| Data | When | |
+| Data | When | Default |
 |---|---|---|
 | Bookmarks (full tree and order) | Live, through the companion | Always on |
 | Installed extensions + enabled state | Live, through the companion | Always on; installs and uninstalls ask you |
@@ -182,8 +182,8 @@ end-to-end encryption. See the [roadmap](#roadmap).
 ## Privacy and security
 
 - **Never synchronized:** passwords, cookies, sessions or arbitrary browser files.
-- **Credentials stay native.** Your session lives in the macOS Keychain; the interface never
-  stores tokens, and the companion extension never receives them.
+- **Credentials stay native.** Your account session lives in the macOS Keychain and never reaches
+  the interface's storage or the browser; the companion holds only a per-connection link token.
 - **No admin secrets in the app.** The app ships only the public cloud URL and anonymous key;
   per-account access rules protect every table and storage path.
 - **Safe by default.** Closed-browser writes happen after a backup; disconnecting or deleting a profile

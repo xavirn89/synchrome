@@ -9,3 +9,4 @@ locally installed Google Chrome.
 2. `node capture.mjs <raw-dir>` — light and dark screenshots at 1280×800, 2×.
 3. `node compose.mjs <raw-dir> docs/readme <repo-root>` — macOS window frames and the companion popup.
 4. `node diagram.mjs docs/readme <repo-root>` — the "How it works" diagram.
+5. `node social.mjs docs/readme/social-preview.png <repo-root> <raw-dir>` — GitHub social preview (1280×640; upload it in *Settings → General → Social preview*).
