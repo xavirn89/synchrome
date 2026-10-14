@@ -1,6 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
-const scenarios = new Set(["workspace", "onboarding", "auth", "offline", "empty"]);
+const scenarios = new Set(["workspace", "onboarding", "auth", "offline", "empty", "showcase"]);
 
 // An explicit URL opt-in is required. A release build always invokes Rust, even if
 // someone adds ?preview=workspace to the window URL.

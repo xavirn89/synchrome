@@ -1,6 +1,6 @@
 // In-memory, token-free Tauri fixtures. Loaded only by an explicit development
 // preview; these paths and accounts do not refer to anything on the host machine.
-export const PREVIEW_SCENARIOS = ["workspace", "onboarding", "auth", "offline", "empty"];
+export const PREVIEW_SCENARIOS = ["workspace", "onboarding", "auth", "offline", "empty", "showcase"];
 
 const clone = (value) => structuredClone(value);
 const uid = (n) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
@@ -142,6 +142,20 @@ function fixture(scenario) {
   if (scenario === "onboarding") {
     browsers[0].access = "requires_full_disk_access";
     browsers[0].profiles = [];
+  }
+  if (scenario === "showcase") {
+    // documentation screenshots: the workspace sample with every connection healthy
+    for (const b of state.browsers) { b.access = "accessible"; for (const p of b.profiles) p.access = "accessible"; }
+    for (const m of state.mappings) {
+      m.status = "token_confirmed"; m.display_status = "extension_confirmed"; m.token_confirmed_at = iso;
+      if (m.is_this_device) {
+        m.bookmarks = bookmarkStatus(m.profile_id === PERSONAL ? 248 : m.profile_id === WORK ? 132 : 64, "up_to_date", 0);
+        m.extensions = { synced: 3, installed: 3, missing: 0, differences: 0, conflicts: 0, user_action: 0 };
+        state.extensions[m.id] = extensions().map((x) => ({ ...x, state: "synced", installed_here: true, enabled_here: true, actions: ["disable"] }));
+        state.conflicts[m.id] = [];
+        state.prefs[m.id] = prefs(m.browser_kind, true, false);
+      }
+    }
   }
   if (scenario === "offline") {
     for (const m of state.mappings.filter((m) => m.bookmarks)) m.bookmarks = bookmarkStatus(m.bookmarks.bookmarks, "offline", m.bookmarks.download.conflicts);
