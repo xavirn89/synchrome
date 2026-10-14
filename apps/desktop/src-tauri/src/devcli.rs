@@ -267,6 +267,14 @@ async fn run_async(args: &[String]) -> i32 {
                 "version": b.version, "access": b.access, "profiles": b.profiles.len(),
             })).collect::<Vec<_>>()
         })),
+        // The background step that hands connection tokens to the store companion, once,
+        // with its decision per connection (profile directory + outcome only).
+        "--dev-reseed-companions" => {
+            let r = bookmarks::reseed_store_companions(&state).await;
+            out(
+                serde_json::json!({ "decisions": r.iter().map(|(p, d)| serde_json::json!({"profile_dir": p, "decision": d})).collect::<Vec<_>>() }),
+            )
+        }
         "--dev-registry" => {
             let Ok(id) = Uuid::parse_str(&arg(1)) else {
                 return fail("bad mapping id");

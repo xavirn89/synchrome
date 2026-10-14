@@ -343,12 +343,6 @@ pub async fn sync_all(
         )
         .await;
     }
-    // connections made with the pre-store companion: hand their token to the store companion
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        reseed_store_companions(state),
-    )
-    .await;
     out
 }
 
@@ -358,59 +352,72 @@ static COMPANION_TOKEN_OK: std::sync::OnceLock<std::sync::Mutex<std::collections
 
 /// Give the Chrome Web Store companion the connection token where a confirmed connection was
 /// made with the pre-store companion (browser closed only; nothing for absent companions).
-pub async fn reseed_store_companions(state: &AppState) {
+/// Returns one decision per connection of this account (profile directory, outcome; no ids).
+pub async fn reseed_store_companions(state: &AppState) -> Vec<(String, &'static str)> {
     let ok = COMPANION_TOKEN_OK.get_or_init(Default::default);
+    let mut report = Vec::new();
     let Ok(account) = current_account(state) else {
-        return;
+        return report;
     };
-    let pending: Vec<synchrome_bridge::LocalTokenRecord> = crate::local_token::registry()
+    let records: Vec<synchrome_bridge::LocalTokenRecord> = crate::local_token::registry()
         .load()
         .into_iter()
         .filter(|r| r.account_id == account && r.state != synchrome_bridge::LocalTokenState::Failed)
-        .filter(|r| {
-            !ok.lock()
+        .collect();
+    let mut mappings: Option<Vec<synchrome_cloud::Mapping>> = None;
+    for r in records {
+        let decision = 'd: {
+            if ok
+                .lock()
                 .map(|s| s.contains(&r.mapping_id))
                 .unwrap_or(false)
-        })
-        .collect();
-    if pending.is_empty() {
-        return;
-    }
-    let mut mappings: Option<Vec<synchrome_cloud::Mapping>> = None;
-    for r in pending {
-        let udd = std::path::PathBuf::from(&r.user_data_dir);
-        let store = synchrome_browser::extension_store_path(
-            &udd,
-            &r.profile_dir,
-            synchrome_types::SYNCHROME_EXTENSION_ID,
-        );
-        if !store.exists() || synchrome_browser::is_browser_running(&udd) {
-            continue; // not installed there / not now
-        }
-        if !crate::local_token::store_companion_missing_token(&udd, &r.profile_dir) {
-            if let Ok(mut s) = ok.lock() {
-                s.insert(r.mapping_id);
+            {
+                break 'd "already has the token";
             }
-            continue;
-        }
-        if mappings.is_none() {
-            let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
-                return;
-            };
-            mappings = cloud.list_mappings(&session).await.ok();
-        }
-        let me = state.device().map(|d| d.device_id).ok();
-        if let Some(m) = mappings.as_ref().and_then(|all| {
-            all.iter()
-                .find(|m| m.id == r.mapping_id && Some(m.device_id) == me)
-        }) {
-            if crate::local_token::write_token_local(m, &account, &udd).is_ok() {
+            let udd = std::path::PathBuf::from(&r.user_data_dir);
+            let store = synchrome_browser::extension_store_path(
+                &udd,
+                &r.profile_dir,
+                synchrome_types::SYNCHROME_EXTENSION_ID,
+            );
+            if !store.exists() {
+                break 'd "store companion not installed";
+            }
+            if synchrome_browser::is_browser_running(&udd) {
+                break 'd "browser open: waiting";
+            }
+            if !crate::local_token::store_companion_missing_token(&udd, &r.profile_dir) {
                 if let Ok(mut s) = ok.lock() {
                     s.insert(r.mapping_id);
                 }
+                break 'd "already has the token";
             }
-        }
+            if mappings.is_none() {
+                let (Ok(session), Ok(cloud)) = (state.session().await, state.cloud()) else {
+                    break 'd "not signed in / cloud unavailable";
+                };
+                mappings = cloud.list_mappings(&session).await.ok();
+            }
+            let me = state.device().map(|d| d.device_id).ok();
+            let Some(m) = mappings.as_ref().and_then(|all| {
+                all.iter()
+                    .find(|m| m.id == r.mapping_id && Some(m.device_id) == me)
+            }) else {
+                break 'd "connection not found in the cloud for this Mac";
+            };
+            match crate::local_token::write_token_local(m, &account, &udd) {
+                Ok(_) => {
+                    if let Ok(mut s) = ok.lock() {
+                        s.insert(r.mapping_id);
+                    }
+                    "token written"
+                }
+                Err(_) => "write failed",
+            }
+        };
+        report.push((r.profile_dir.clone(), decision));
     }
+    report
 }
 
 /// Extensions counts of a profile on this device (None when unknown).

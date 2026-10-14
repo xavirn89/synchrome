@@ -71,6 +71,9 @@ Data lives in Synchrome Cloud (the project's private Supabase). Other stores (Gi
    **Open Chrome Web Store**: the companion's store page opens in that browser profile; choose
    *Add to Chrome*. (Manual fallback: *Install it manually instead* reveals the bundled folder for
    `chrome://extensions` → *Developer mode* → *Load unpacked*.)
+   Switching an existing connection from a manually loaded companion to the store one: add the
+   store companion, remove the old one, then quit the browser for a few seconds — Synchrome
+   (1.0.7+) hands the connection to the new companion while the browser is closed.
    Open the companion popup and choose **Check connection** in Synchrome. Wait for the first
    sync to complete; a stored connection alone does not mean browser data has been imported.
 6. Bookmarks and extension state can then sync live. Extension settings and supported browser

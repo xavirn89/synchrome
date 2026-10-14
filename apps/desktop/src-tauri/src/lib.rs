@@ -1018,6 +1018,20 @@ pub fn run() {
             // e.g. before the Chrome Web Store id) are brought up to date. Only existing
             // Synchrome manifests, and only from a stable install location.
             std::thread::spawn(refresh_installed_connectors);
+            // Connections made with the pre-store companion: as soon as the browser is closed,
+            // hand the connection token to the Chrome Web Store companion. A short, cheap
+            // check of its own (the full sync cycle can outlast a quick browser restart).
+            tauri::async_runtime::spawn(async {
+                let state = AppState::new();
+                loop {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        bookmarks::reseed_store_companions(&state),
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            });
             // Realtime wake-up: one connection for the account signed in at startup (if any)
             realtime::start();
             {
